@@ -16,6 +16,8 @@
 
 首页 `UI-R02 / L` 的 1号/2号曲库、歌单按钮和歌曲列表见 [首页曲库与歌单](ui/home-left-library.md)。
 
+首页 `UI-R05 / R` 的视频缩略图快速播放和 Tiger Touch 灯光快捷控制见 [视频与灯光快捷区](ui/home-right-media-lighting.md)。
+
 ## UI 目标
 
 - 暗色、低干扰，适合酒吧现场环境
