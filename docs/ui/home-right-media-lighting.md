@@ -16,7 +16,8 @@
 ├────────────────────────────┤
 │ R2：灯光快捷控制           │  50%
 │ 灯光预设 + 常用灯光        │
-│ Tiger Touch 简易控制       │
+│ Avolites Tiger Touch Pro   │
+│ 简化快捷控制               │
 └────────────────────────────┘
 ```
 
@@ -64,7 +65,7 @@
 
 ## 3. `R2` 灯光快捷控制
 
-“老虎机”在本项目中指 Avolites Tiger Touch Pro 灯光控制台，不指博彩老虎机。R2 是其简化快捷操作区，完整配置和管理在“灯光管理”及底部“老虎机”页面完成。
+R2 是 Avolites Tiger Touch Pro 的简化快捷操作区，完整配置和管理在“灯光管理”及底部“Avolites Tiger Touch Pro”页面完成。所有界面、文档和代码统一使用完整设备名称，不使用口语简称。
 
 ### 内容分组
 
@@ -109,4 +110,3 @@
 | R 下部灯光 | `UI-R05-B` | `LightingQuickControl` | `region-right-lighting` |
 
 根区域仍使用 `data-region-id="UI-R05"`；子区域分别使用 `data-subregion-id="UI-R05-A/B"`。
-

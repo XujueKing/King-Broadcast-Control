@@ -17,11 +17,11 @@
 | `NAV-03` | `video` | 视频管理 | 视频/显示器 |
 | `NAV-04` | `lighting` | 灯光管理 | 灯光/光束 |
 | `NAV-05` | `mixer` | 调音台 | 推子/调音台 |
-| `NAV-06` | `tiger-console` |老虎机 | Tiger Touch 灯光台/设备图标 |
+| `NAV-06` | `avolites-tiger-touch-pro` | Avolites Tiger Touch Pro | 灯光控制台/设备图标 |
 
 按钮顺序已经确认。除非用户明确要求，后续不自动重排，也不因某页面暂未开发而隐藏按钮。
 
-本项目中的“老虎机”是 Avolites Tiger Touch Pro 灯光控制台的简称，不指博彩老虎机；代码和英文路由统一使用 `tiger-console`，避免歧义。
+所有 UI、文档和代码统一使用完整名称 `Avolites Tiger Touch Pro`，不使用口语简称。底部按钮空间不足时允许分成两行显示，但不得截断或替换名称。代码和英文路由统一使用 `avolites-tiger-touch-pro`。
 
 ## 3. 视觉样式
 
@@ -67,7 +67,7 @@ BottomNavigation
   ├─ NAV-03 / video
   ├─ NAV-04 / lighting
   ├─ NAV-05 / mixer
-  └─ NAV-06 / tiger-console
+  └─ NAV-06 / avolites-tiger-touch-pro
 ```
 
 根节点使用 `data-region-id="UI-R06"`，按钮使用 `data-nav-id="NAV-xx"`，便于自动化测试和后续按编号修改。
