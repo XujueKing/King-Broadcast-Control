@@ -4,6 +4,10 @@
 
 版本：0.2
 
+固定区域编号见 [UI 控制台区域编号](ui/console-region-map.md)。后续讨论和实现统一使用 `UI-R01` 至 `UI-R06`，并兼容图片代号 `T/L/C1/C2/R/B`。
+
+正式 Logo 和使用规则见 [品牌资产](ui/brand-assets.md)。
+
 ## UI 目标
 
 - 暗色、低干扰，适合酒吧现场环境
