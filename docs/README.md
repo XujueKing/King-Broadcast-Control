@@ -9,6 +9,8 @@
 3. [UI 与交互设计](03-ui-ux.md) — 信息架构、控制台布局、状态反馈与安全操作
    - [UI 控制台区域编号](ui/console-region-map.md) — `UI-R01` 至 `UI-R06` 固定区域索引
    - [品牌资产](ui/brand-assets.md) — KING CLUB Logo 文件与使用规则
+   - [底部主导航](ui/bottom-navigation.md) — `UI-R06/B` 的 6 个横排页面按钮
+   - [暗场颜色令牌](ui/color-tokens.md) — 绿色主色及警告、故障和文字颜色规则
 4. [开发路线图](04-roadmap.md) — 阶段、验收门槛和开发顺序
 5. [决策记录](decisions/README.md) — 已确认的重要技术/产品决策
 
