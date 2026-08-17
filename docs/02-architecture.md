@@ -66,6 +66,30 @@ Windows 主控界面
 
 软件负责歌曲媒体播放。原声/伴唱的实现取决于现有素材结构，需要先验证双声道、双文件或多音轨三种来源中的实际一种。
 
+### 音乐供应商接入
+
+采用可替换的 `MusicProvider` 适配层，播放编排不能直接依赖 QQ 音乐或酷狗的内部接口：
+
+```text
+MusicProvider
+  ├─ Search(query)
+  ├─ GetMetadata(trackId)
+  ├─ GetPlaybackEntitlement(trackId)
+  ├─ PreparePlayback(trackId)
+  ├─ GetLyrics(trackId)
+  └─ GetVocalModes(trackId)
+
+实现候选
+  ├─ LicensedOnlineProvider（取得正式 B 端合同/API 后）
+  └─ AuthorizedLocalLibrary（合法授权的本地应急曲库）
+```
+
+`PreparePlayback` 的结果可以是短期流地址、供应商 SDK 播放句柄或加密离线缓存，不假设供应商会交付普通 MP3 文件。任何资源都同时保存供应商、授权状态、到期时间、地域/设备限制和可用音轨信息。
+
+明确排除：调用逆向得到的私有 API、模拟登录、读取客户端缓存、解密会员下载、抓取播放地址或用界面自动化批量下载。这些方案违反平台规则的风险高，接口随时失效，也无法证明酒吧公开播放授权。
+
+如果供应商只允许在其官方客户端中播放，可以把该客户端作为人工应急工具，但不纳入 KING CLUB 软件的自动播控承诺；键盘媒体键或窗口自动化既不能解决版权授权，也无法可靠获得歌单状态、原伴唱和播放确认。
+
 ### Qu-16
 
 Qu-16 官方 MIDI 协议支持 USB-B MIDI，也支持经 Network 口的 TCP MIDI，可双向发送和接收控制变化。网络模式只允许一个 TCP MIDI 连接，因此软件必须考虑连接独占、心跳和断线重连。
@@ -243,6 +267,8 @@ RTX 4060 与 RTX 5070 均具备现代硬件视频能力；RTX 5070 官方规格�
 - Tiger Touch Pro 触发协议
 - 主屏像素画布和异形遮罩格式
 - DJ 小屏首版是否纳入
+- 商用音乐供应商、授权范围与正式 API
+- 在线播放、加密缓存和本地应急曲库的边界
 
 ## 11. 参考资料
 
@@ -253,3 +279,8 @@ RTX 4060 与 RTX 5070 均具备现代硬件视频能力；RTX 5070 官方规格�
 - [NVIDIA：GeForce RTX 4060 官方介绍与规格](https://www.nvidia.com/en-us/geforce/news/ultimate-guide-to-4060/)
 - [NVIDIA：GeForce RTX 5070 Family 官方规格](https://www.nvidia.com/pt-br/geforce/graphics-cards/50-series/rtx-5070-family/)
 - [Microsoft：Windows 11 系统要求](https://support.microsoft.com/en-us/windows/experience/compatibility/windows-11-system-requirements)
+- [腾讯音乐娱乐：服务协议](https://www.tencentmusic.com/zh-cn/protocol.html)
+- [腾讯音乐娱乐：B 端音乐整合与商用授权业务](https://www.tencentmusic.com/zh-cn/business.html)
+- [酷狗音乐：用户服务协议](https://www.kugou.com/about/protocol.html)
+- [酷狗音乐：会员服务协议](https://h5.kugou.com/voo/v-a019d10d/index.html)
+- [酷狗音乐：开放平台](https://open.kugou.com/docs)
