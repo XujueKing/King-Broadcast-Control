@@ -107,38 +107,55 @@ Qu-16 官方 MIDI 协议支持 USB-B MIDI，也支持经 Network 口的 TCP MIDI
 
 具体触发方式必须依据控制台序列号、Titan 版本和当前 show 配置做技术验证，候选包括灯光台支持的远程、MIDI或网络触发能力。不可在未验证协议时承诺全自动控制。
 
-## 3. 技术栈候选
+## 3. 技术栈方案
 
-### 方案 A：.NET 桌面应用（当前推荐进入技术验证）
+### 当前推荐：Rust 核心 + Tauri 2 控制台 + mpv 播放进程
 
-- .NET 8 LTS
-- WPF 控制台（成熟的 Windows 多屏、窗口和硬件生态）
-- 独立播放引擎：LibVLCSharp 或 mpv 二选一验证
-- SQLite 保存节目、素材元数据、绑定关系、设置和日志
-- ASP.NET Core 本地服务，为后续手机端提供局域网 API/WebSocket
+Rust 适合承担需要长期稳定运行的核心逻辑，但不要求所有 UI 都使用纯 Rust 绘制。建议技术栈：
 
-优点：Windows 集成和长期现场部署较直接，单机服务与设备通信方便。风险：高质量 UI 和视频合成需要做好渲染层封装。
+- Rust stable/MSVC：领域模型、播放编排、设备适配器、状态恢复和日志
+- Tokio：异步任务、外设连接、心跳和进程通信
+- Tauri 2：Windows 控制台应用外壳
+- React + TypeScript + Vite：简单、密集、易维护的控制台 UI
+- mpv 独立进程 + JSON IPC：视频/音频解码、音轨控制和屏幕输出
+- SQLite：节目、歌单、素材索引、绑定关系、设置和日志
+- SQLx 或 rusqlite：Rust 数据访问层，技术样机后确定
+- Axum：后续手机点歌、弹幕和审核所需的局域网 HTTP/WebSocket 服务
+- Serde：命令、状态和配置序列化
+- tracing：结构化日志与故障诊断
 
-### 方案 B：Web UI 桌面壳
+Tauri 在 Windows 上使用系统 WebView2 渲染控制界面。WebView 只负责按钮、列表、表格和状态展示，不承担 LED 视频输出；视频始终由独立播放进程输出，避免 UI 刷新、WebView 异常或前端崩溃影响主屏。
 
-- Electron 或 Tauri
-- React/Vue 控制界面
-- 原生播放/设备服务
+### 为什么适合本项目
 
-优点：UI 开发效率高，后续手机界面复用思路较容易。风险：视频、多屏、音频设备和进程隔离仍需原生层，整体组合复杂度可能更高。
+- Rust 类型系统适合约束播放状态机、设备指令和错误处理
+- 单个核心可复用到桌面端、后续局域网服务和设备适配器
+- Tauri 控制台比 Electron 更轻，UI 又比纯 Rust 桌面框架更容易快速调整
+- React/TypeScript 足以完成朴素的控制台，无需动画、3D 或复杂视觉特效
+- mpv 已具备成熟的硬件解码、音轨/声道选择和 JSON IPC，避免自行编写解码器
+- 播放进程与 UI 分离后，可以独立监控、重启，并为未来 DJ 小屏启动第二个输出实例
 
-### 当前建议
+### 不采用的方向
 
-先用最小技术样机比较 LibVLCSharp 与 mpv：
+- 不用纯前端 `<video>` 元素承担正式 LED 播放：多文件组合、独立音轨、多屏和故障恢复能力不足
+- 不在首版自行用 FFmpeg/wgpu 从零编写完整播放器：工作量和稳定性风险过高
+- 暂不选择 Slint/egui 等纯 Rust UI：它们可以实现界面，但当前控制台包含大量列表、表格、搜索和表单，Web UI 的开发与维护效率更好
+- .NET/WPF 保留为样机失败时的备选，不再作为当前首选
+
+### 必须先通过的技术样机
+
+先用最小样机验证 Rust 对 mpv 的管理和 Tauri 状态同步：
 
 - 在指定第二屏独占全屏
 - 主控窗口实时预览
 - 4K 或现场实际规格视频连续播放
 - 暂停、跳转、无黑帧切换和循环
 - 音轨/声道切换
+- MP4 音频搭配替换视频、MP3 搭配循环视频
+- UI 关闭或重启时播放输出的预期行为
 - 输出进程异常后的安全黑场与自动恢复
 
-样机数据通过后再形成正式 ADR，不因 UI 技术偏好提前锁定播放内核。
+样机通过后再把 Rust/Tauri/mpv 由“推荐”提升为已接受 ADR；如果 mpv 多源同步或实时预览不达标，再比较 libmpv Render API 或 GStreamer，不直接推翻 Rust 核心。
 
 ## 4. 核心领域模型
 
@@ -327,3 +344,7 @@ RTX 4060 与 RTX 5070 均具备现代硬件视频能力；RTX 5070 官方规格�
 - [酷狗音乐：用户服务协议](https://www.kugou.com/about/protocol.html)
 - [酷狗音乐：会员服务协议](https://h5.kugou.com/voo/v-a019d10d/index.html)
 - [酷狗音乐：开放平台](https://open.kugou.com/docs)
+- [Tauri 2：Windows 开发依赖与 WebView2](https://v2.tauri.app/start/prerequisites/)
+- [Tauri 2：进程模型](https://v2.tauri.app/concept/process-model/)
+- [mpv：官方手册与 JSON IPC](https://mpv.io/manual/master/#json-ipc)
+- [Axum：Rust HTTP/WebSocket 框架文档](https://docs.rs/axum/latest/axum/)
