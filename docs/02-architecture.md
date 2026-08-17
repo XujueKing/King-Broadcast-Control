@@ -143,7 +143,10 @@ Qu-16 官方 MIDI 协议支持 USB-B MIDI，也支持经 Network 口的 TCP MIDI
 ## 4. 核心领域模型
 
 - `MediaAsset`：歌曲、视频、图片或音频素材
-- `Song`：歌曲信息及原声/伴唱配置
+- `Song`：歌曲元数据、默认音频来源、默认画面来源及原声/伴唱配置
+- `AudioSource`：MP4 音轨、独立 MP3/FLAC/WAV 或后续授权流媒体
+- `VisualSource`：原 MP4 视频、自有视频、静态图片或默认背景
+- `MediaComposition`：音频、画面、循环、裁切、回退和同步策略
 - `LightingPreset`：灯光台 Cue/Playback 的逻辑引用
 - `ScreenLayout`：物理屏、像素画布、异形遮罩和安全区
 - `ProgramTemplate`：星期节目模板
@@ -155,6 +158,31 @@ Qu-16 官方 MIDI 协议支持 USB-B MIDI，也支持经 Network 口的 TCP MIDI
 - `CommandLog`：操作与外设指令审计
 
 歌曲、视频和灯光之间不应做固定一对一关系。一首歌有默认组合，但单次播放可以覆盖；同一视频和灯光预设也可被多首歌复用。
+
+歌曲播放不能直接把一个文件交给播放器窗口，而应先生成组合计划：
+
+```text
+Song + PlaylistItem 覆盖配置
+  → 解析 AudioSource
+  → 解析 VisualSource
+  → 生成 MediaComposition
+  → 播放引擎同步启动声音和画面
+```
+
+播放内核技术验证必须覆盖两种管线：单个 MP4 的音视频同步播放，以及从不同文件解码音频和视频后使用同一播放时钟同步。后者是“MP3 + 自有视频”和“MP4 音频 + 替换视频”的基础，也是 LibVLCSharp/mpv 选型的关键测试项。
+
+当自有视频循环时只循环视频轨，不能重启音频；切换原声/伴唱时也不能重启画面。播放结束时间始终以歌曲音频为准。
+
+运行时控制通过统一 `PlaybackCommand` 进入编排器，不允许 UI 直接操作播放器或外设：
+
+- `Play`、`Pause`、`Stop`、`Seek`
+- `Previous`、`Next`、`SetPlaybackMode`
+- `SetVocalMode`
+- `SetVisualSource`
+- `SetMute`、`SetVolume`
+- `Standby`、`Blackout`
+
+命令携带唯一 ID 并进行幂等处理，避免按钮连点造成重复切歌。编排器返回“已接收、执行中、成功或失败”，UI 按真实结果更新，而不是点击后直接假设成功。
 
 歌单定义与播放队列分离：
 
@@ -206,6 +234,7 @@ UI 必须分别显示“准备发送/已发送”和“设备已确认/未确认
 - 读取 Windows 显示器列表并稳定锁定 LED 输出目标
 - 验证异形屏像素画布、遮罩和安全区
 - 对真实素材完成播放、预览、切歌和原伴唱测试
+- 验证完整 MP4、MP4 音频加替换视频、MP3 加循环视频三种组合的同步和回退
 - 验证 Qu-16 固件、USB/TCP MIDI、状态读取与目标动作
 - 验证 Tiger Touch Pro 的版本和可用触发方式
 - 验证主控电脑长时间播放的 CPU、GPU、内存和温度
