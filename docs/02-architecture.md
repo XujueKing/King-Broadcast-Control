@@ -1,6 +1,6 @@
 # 技术选型与架构
 
-状态：方案草案，等待现场参数与技术验证
+状态：主技术栈已确认，设备接口与播放样机待验证
 
 版本：0.2
 
@@ -109,7 +109,7 @@ Qu-16 官方 MIDI 协议支持 USB-B MIDI，也支持经 Network 口的 TCP MIDI
 
 ## 3. 技术栈方案
 
-### 当前推荐：Rust 核心 + Tauri 2 控制台 + mpv 播放进程
+### 已确认：Rust 核心 + Tauri 2 控制台 + mpv 播放进程
 
 Rust 适合承担需要长期稳定运行的核心逻辑，但不要求所有 UI 都使用纯 Rust 绘制。建议技术栈：
 
@@ -155,7 +155,7 @@ Tauri 在 Windows 上使用系统 WebView2 渲染控制界面。WebView 只负�
 - UI 关闭或重启时播放输出的预期行为
 - 输出进程异常后的安全黑场与自动恢复
 
-样机通过后再把 Rust/Tauri/mpv 由“推荐”提升为已接受 ADR；如果 mpv 多源同步或实时预览不达标，再比较 libmpv Render API 或 GStreamer，不直接推翻 Rust 核心。
+技术栈已由 [ADR 0001](decisions/0001-rust-tauri-react-mpv.md) 正式接受。样机用于确定 mpv 集成和媒体组合细节；如果多源同步或实时预览不达标，优先比较 libmpv Render API 或 GStreamer，不直接推翻 Rust/Tauri/React 主技术栈。
 
 ## 4. 核心领域模型
 
@@ -319,10 +319,8 @@ RTX 4060 与 RTX 5070 均具备现代硬件视频能力；RTX 5070 官方规格�
 
 ## 10. 尚未接受的架构决策
 
-以下项目必须通过验证后写入 ADR：
+以下项目仍需通过验证后写入 ADR：
 
-- UI 框架
-- 播放内核
 - Qu-16 使用 USB 还是 TCP MIDI
 - Tiger Touch Pro 触发协议
 - 主屏像素画布和异形遮罩格式

@@ -19,6 +19,7 @@
 
 ## 阶段 1：选型与架构
 
+- [已确认] Rust + Tauri 2 + React/TypeScript + mpv 主技术栈
 - 用真实电脑、屏幕和素材验证 Rust + Tauri 2 + mpv 技术样机
 - 验证 Qu-16 和 Tiger Touch Pro 控制链路
 - 获取候选音乐供应商的书面授权范围、API 文档和测试账号

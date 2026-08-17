@@ -14,3 +14,6 @@
 
 在需求尚未确认前，不创建具体技术决策。
 
+## 已记录决策
+
+- [ADR 0001：采用 Rust、Tauri 2、React/TypeScript 与 mpv](0001-rust-tauri-react-mpv.md) — 已接受
