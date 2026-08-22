@@ -1,0 +1,673 @@
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    env,
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+#[cfg(windows)]
+use std::{
+    os::windows::{io::AsRawHandle, process::CommandExt},
+    ptr,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    },
+};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+const MPV_START_TIMEOUT: Duration = Duration::from_secs(5);
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+pub struct MpvManager(pub Mutex<MpvManagerInner>);
+
+pub struct MpvManagerInner {
+    binary: Option<PathBuf>,
+    instances: HashMap<u8, MpvInstance>,
+    process_job: ProcessJob,
+}
+
+struct MpvInstance {
+    child: Child,
+    pipe_path: String,
+    loaded_path: Option<PathBuf>,
+}
+
+#[cfg(windows)]
+struct ProcessJob(HANDLE);
+
+#[cfg(not(windows))]
+struct ProcessJob;
+
+#[cfg(windows)]
+unsafe impl Send for ProcessJob {}
+
+impl ProcessJob {
+    #[cfg(windows)]
+    fn new() -> Result<Self, String> {
+        let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        if handle.is_null() {
+            return Err(format!(
+                "无法创建 mpv Windows Job Object：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut information: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &information as *const _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            unsafe { CloseHandle(handle) };
+            return Err(format!(
+                "无法配置 mpv Windows Job Object：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self(handle))
+    }
+
+    #[cfg(not(windows))]
+    fn new() -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    #[cfg(windows)]
+    fn assign(&self, child: &Child) -> Result<(), String> {
+        let assigned = unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) };
+        if assigned == 0 {
+            Err(format!(
+                "无法把 mpv 加入 Windows Job Object：{}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn assign(&self, _child: &Child) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessJob {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+impl Default for MpvManager {
+    fn default() -> Self {
+        Self(Mutex::new(MpvManagerInner {
+            binary: discover_mpv_binary(),
+            instances: HashMap::new(),
+            process_job: ProcessJob::new().expect("create mpv process job"),
+        }))
+    }
+}
+
+impl Drop for MpvManagerInner {
+    fn drop(&mut self) {
+        for instance in self.instances.values_mut() {
+            let _ = instance.child.kill();
+            let _ = instance.child.wait();
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MpvRuntimeStatus {
+    pub available: bool,
+    pub binary_path: Option<String>,
+    pub version: Option<String>,
+    pub active_decks: Vec<u8>,
+    pub message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MpvDeckState {
+    pub deck: u8,
+    pub running: bool,
+    pub path: Option<String>,
+    pub paused: bool,
+    pub time_pos: f64,
+    pub duration: f64,
+    pub volume: f64,
+    pub eof_reached: bool,
+}
+
+fn executable_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = env::var_os("KING_MPV_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(directory) = current_exe.parent() {
+            candidates.push(directory.join("mpv.exe"));
+            candidates.push(directory.join("resources").join("mpv.exe"));
+        }
+    }
+    if let Ok(current_directory) = env::current_dir() {
+        for ancestor in current_directory.ancestors().take(4) {
+            candidates.push(ancestor.join(".local-tools").join("mpv").join("mpv.exe"));
+        }
+        candidates.push(
+            current_directory
+                .join("ui-prototype")
+                .join(".local-tools")
+                .join("mpv")
+                .join("mpv.exe"),
+        );
+    }
+    candidates
+}
+
+fn discover_mpv_binary() -> Option<PathBuf> {
+    executable_candidates()
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .or_else(|| command_works(Path::new("mpv.exe")).then(|| PathBuf::from("mpv.exe")))
+}
+
+fn command_works(binary: &Path) -> bool {
+    let mut command = Command::new(binary);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.status().is_ok_and(|status| status.success())
+}
+
+fn mpv_version(binary: &Path) -> Option<String> {
+    let mut command = Command::new(binary);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
+    output.status.success().then(|| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    })
+}
+
+fn validate_deck(deck: u8) -> Result<(), String> {
+    if matches!(deck, 1 | 2) {
+        Ok(())
+    } else {
+        Err(format!("无效 Deck 编号：{deck}"))
+    }
+}
+
+fn pipe_path(deck: u8) -> String {
+    format!(r"\\.\pipe\king-club-mpv-{}-{deck}", std::process::id())
+}
+
+fn open_pipe(path: &str) -> std::io::Result<File> {
+    OpenOptions::new().read(true).write(true).open(path)
+}
+
+fn open_pipe_with_timeout(path: &str, timeout: Duration) -> std::io::Result<File> {
+    let started_at = Instant::now();
+    loop {
+        match open_pipe(path) {
+            Ok(pipe) => return Ok(pipe),
+            Err(_) if started_at.elapsed() < timeout => thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn wait_for_pipe(path: &str, child: &mut Child) -> Result<(), String> {
+    let started_at = Instant::now();
+    loop {
+        if open_pipe(path).is_ok() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!("mpv 启动后立即退出：{status}"));
+        }
+        if started_at.elapsed() >= MPV_START_TIMEOUT {
+            return Err("等待 mpv JSON IPC 超时".to_string());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn spawn_deck(binary: &Path, deck: u8, process_job: &ProcessJob) -> Result<MpvInstance, String> {
+    let pipe_path = pipe_path(deck);
+    let mut command = Command::new(binary);
+    command
+        .args([
+            "--idle=yes",
+            "--no-terminal",
+            "--no-config",
+            "--load-scripts=no",
+            "--video=no",
+            "--audio-display=no",
+            "--keep-open=yes",
+            "--pause=yes",
+            "--gapless-audio=yes",
+            "--audio-client-name=KING CLUB Broadcast Control",
+            "--input-default-bindings=no",
+            "--input-vo-keyboard=no",
+            &format!("--input-ipc-server={pipe_path}"),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动 mpv：{error}"))?;
+    if let Err(error) = process_job.assign(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Err(error) = wait_for_pipe(&pipe_path, &mut child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    Ok(MpvInstance {
+        child,
+        pipe_path,
+        loaded_path: None,
+    })
+}
+
+fn send_command(pipe_path: &str, command: Value) -> Result<Value, String> {
+    let mut pipe = open_pipe_with_timeout(pipe_path, Duration::from_secs(2))
+        .map_err(|error| format!("无法连接 mpv IPC：{error}"))?;
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let request = json!({ "command": command, "request_id": request_id });
+    serde_json::to_writer(&mut pipe, &request).map_err(|error| error.to_string())?;
+    pipe.write_all(b"\n").map_err(|error| error.to_string())?;
+    pipe.flush().map_err(|error| error.to_string())?;
+
+    let mut reader = BufReader::new(pipe);
+    loop {
+        let mut response_line = String::new();
+        let bytes_read = reader
+            .read_line(&mut response_line)
+            .map_err(|error| format!("读取 mpv IPC 响应失败：{error}"))?;
+        if bytes_read == 0 {
+            return Err("mpv IPC 在返回命令结果前断开".to_string());
+        }
+        let response: Value = serde_json::from_str(&response_line)
+            .map_err(|error| format!("mpv IPC 返回了无效 JSON：{error}"))?;
+        if response.get("request_id").and_then(Value::as_u64) != Some(request_id) {
+            // loadfile and seek can emit start-file/file-loaded/property-change events
+            // before the command result. Events are not failures and must be skipped.
+            continue;
+        }
+        if response.get("error").and_then(Value::as_str) != Some("success") {
+            return Err(format!(
+                "mpv 命令失败：{}",
+                response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ));
+        }
+        return Ok(response.get("data").cloned().unwrap_or(Value::Null));
+    }
+}
+
+fn ensure_instance<'a>(
+    manager: &'a mut MpvManagerInner,
+    deck: u8,
+) -> Result<&'a mut MpvInstance, String> {
+    validate_deck(deck)?;
+    let should_restart = match manager.instances.get_mut(&deck) {
+        Some(instance) => instance
+            .child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some(),
+        None => true,
+    };
+    if should_restart {
+        manager.instances.remove(&deck);
+        let binary = manager
+            .binary
+            .clone()
+            .or_else(discover_mpv_binary)
+            .ok_or_else(|| "未找到 mpv。请运行 npm run setup:mpv。".to_string())?;
+        manager.binary = Some(binary.clone());
+        let instance = spawn_deck(&binary, deck, &manager.process_job)?;
+        manager.instances.insert(deck, instance);
+    }
+    manager
+        .instances
+        .get_mut(&deck)
+        .ok_or_else(|| format!("Deck {deck} mpv 实例未就绪"))
+}
+
+pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> {
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    if manager.binary.is_none() {
+        manager.binary = discover_mpv_binary();
+    }
+    let binary = manager.binary.clone();
+    let mut active_decks = Vec::new();
+    manager.instances.retain(|deck, instance| {
+        let running = instance.child.try_wait().ok().flatten().is_none();
+        if running {
+            active_decks.push(*deck);
+        }
+        running
+    });
+    active_decks.sort_unstable();
+    let version = binary.as_deref().and_then(mpv_version);
+    Ok(MpvRuntimeStatus {
+        available: binary.is_some() && version.is_some(),
+        binary_path: binary
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        version,
+        active_decks,
+        message: if binary.is_some() {
+            "mpv 播放引擎可用".to_string()
+        } else {
+            "未找到 mpv；当前使用 WebView2 回退播放".to_string()
+        },
+    })
+}
+
+pub fn load_deck(manager: &MpvManager, deck: u8, path: &Path) -> Result<MpvDeckState, String> {
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("媒体文件不存在：{error}"))?;
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let instance = ensure_instance(&mut manager, deck)?;
+    send_command(
+        &instance.pipe_path,
+        json!(["loadfile", canonical_path.to_string_lossy(), "replace"]),
+    )?;
+    send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+    instance.loaded_path = Some(canonical_path);
+    deck_state_for_instance(deck, instance)
+}
+
+pub fn switch_source_preserving_state(
+    manager: &MpvManager,
+    deck: u8,
+    path: &Path,
+) -> Result<MpvDeckState, String> {
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("媒体文件不存在：{error}"))?;
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let instance = ensure_instance(&mut manager, deck)?;
+    let previous = deck_state_for_instance(deck, instance)?;
+    send_command(
+        &instance.pipe_path,
+        json!(["loadfile", canonical_path.to_string_lossy(), "replace"]),
+    )?;
+    send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+    instance.loaded_path = Some(canonical_path);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut duration = 0.0;
+    while std::time::Instant::now() < deadline {
+        duration = property_f64(&instance.pipe_path, "duration");
+        if duration > 0.0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    if previous.time_pos > 0.0 {
+        let target = if duration > 0.0 {
+            previous.time_pos.min(duration)
+        } else {
+            previous.time_pos
+        };
+        send_command(
+            &instance.pipe_path,
+            json!(["seek", target, "absolute+exact"]),
+        )?;
+    }
+    send_command(
+        &instance.pipe_path,
+        json!(["set_property", "volume", previous.volume.clamp(0.0, 100.0)]),
+    )?;
+    send_command(
+        &instance.pipe_path,
+        json!(["set_property", "pause", previous.paused]),
+    )?;
+    deck_state_for_instance(deck, instance)
+}
+
+pub fn set_paused(manager: &MpvManager, deck: u8, paused: bool) -> Result<MpvDeckState, String> {
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let instance = ensure_instance(&mut manager, deck)?;
+    send_command(
+        &instance.pipe_path,
+        json!(["set_property", "pause", paused]),
+    )?;
+    deck_state_for_instance(deck, instance)
+}
+
+pub fn seek(manager: &MpvManager, deck: u8, seconds: f64) -> Result<MpvDeckState, String> {
+    if !seconds.is_finite() {
+        return Err("Seek 时间必须是有限数字".to_string());
+    }
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let instance = ensure_instance(&mut manager, deck)?;
+    send_command(
+        &instance.pipe_path,
+        json!(["seek", seconds.max(0.0), "absolute+exact"]),
+    )?;
+    deck_state_for_instance(deck, instance)
+}
+
+pub fn set_volume(manager: &MpvManager, deck: u8, volume: f64) -> Result<MpvDeckState, String> {
+    if !volume.is_finite() {
+        return Err("音量必须是有限数字".to_string());
+    }
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let instance = ensure_instance(&mut manager, deck)?;
+    send_command(
+        &instance.pipe_path,
+        json!(["set_property", "volume", volume.clamp(0.0, 100.0)]),
+    )?;
+    deck_state_for_instance(deck, instance)
+}
+
+pub fn deck_state(manager: &MpvManager, deck: u8) -> Result<MpvDeckState, String> {
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let instance = ensure_instance(&mut manager, deck)?;
+    deck_state_for_instance(deck, instance)
+}
+
+fn property(pipe_path: &str, name: &str) -> Result<Value, String> {
+    send_command(pipe_path, json!(["get_property", name]))
+}
+
+fn property_f64(pipe_path: &str, name: &str) -> f64 {
+    property(pipe_path, name)
+        .ok()
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0)
+}
+
+fn deck_state_for_instance(deck: u8, instance: &mut MpvInstance) -> Result<MpvDeckState, String> {
+    if instance
+        .child
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err(format!("Deck {deck} mpv 实例已经退出"));
+    }
+    Ok(MpvDeckState {
+        deck,
+        running: true,
+        path: instance
+            .loaded_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        paused: property(&instance.pipe_path, "pause")
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        time_pos: property_f64(&instance.pipe_path, "time-pos"),
+        duration: property_f64(&instance.pipe_path, "duration"),
+        volume: property_f64(&instance.pipe_path, "volume"),
+        eof_reached: property(&instance.pipe_path, "eof-reached")
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+pub fn shutdown_deck(manager: &MpvManager, deck: u8) -> Result<(), String> {
+    validate_deck(deck)?;
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    if let Some(mut instance) = manager.instances.remove(&deck) {
+        let _ = send_command(&instance.pipe_path, json!(["quit"]));
+        if instance.child.try_wait().ok().flatten().is_none() {
+            let _ = instance.child.kill();
+        }
+        let _ = instance.child.wait();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_two_decks_are_valid() {
+        assert!(validate_deck(1).is_ok());
+        assert!(validate_deck(2).is_ok());
+        assert!(validate_deck(0).is_err());
+        assert!(validate_deck(3).is_err());
+    }
+
+    #[test]
+    fn local_mpv_candidate_is_discoverable_when_provisioned() {
+        let candidates = executable_candidates();
+        assert!(candidates
+            .iter()
+            .any(|path| path.ends_with(Path::new(".local-tools/mpv/mpv.exe"))));
+    }
+
+    #[test]
+    fn real_mpv_loads_plays_seeks_and_reports_audio_state_when_fixture_is_available() {
+        let audio_path = env::var_os("KING_MEDIA_FIXTURE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("KING_MEDIA_FIXTURE_DIR")
+                    .map(PathBuf::from)
+                    .map(|directory| directory.join("t-rex-roar.mp3"))
+            });
+        let Some(audio_path) = audio_path else {
+            return;
+        };
+        assert!(audio_path.is_file(), "missing real MP3 fixture");
+
+        let manager = MpvManager::default();
+        let runtime = runtime_status(&manager).expect("read mpv runtime status");
+        assert!(runtime.available, "{}", runtime.message);
+
+        let loaded = load_deck(&manager, 1, &audio_path).expect("load real MP3 into Deck 1");
+        assert!(loaded.running);
+        assert!(loaded.paused);
+        set_volume(&manager, 1, 0.0).expect("mute test Deck");
+        set_paused(&manager, 1, false).expect("start real mpv playback");
+        thread::sleep(Duration::from_millis(350));
+        let playing = deck_state(&manager, 1).expect("query live mpv Deck state");
+        assert!(!playing.paused);
+        assert!(playing.duration > 0.0);
+        assert!(playing.time_pos > 0.0);
+
+        let sought = seek(&manager, 1, 0.1).expect("seek real mpv playback");
+        assert!(sought.time_pos >= 0.0);
+        set_paused(&manager, 1, true).expect("pause real mpv playback");
+        let reloaded = load_deck(&manager, 1, &audio_path)
+            .expect("replace an already loaded Deck while mpv emits file events");
+        assert!(reloaded.paused);
+        assert_eq!(
+            reloaded.path.as_deref().map(Path::new),
+            Some(audio_path.canonicalize().unwrap().as_path())
+        );
+        thread::sleep(Duration::from_millis(150));
+        seek(&manager, 1, 1.0).expect("position Deck before source switch");
+        set_volume(&manager, 1, 37.0).expect("set Deck volume before source switch");
+        let switch_path = env::var_os("KING_MEDIA_SWITCH_FIXTURE")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| audio_path.clone());
+        let switched = switch_source_preserving_state(&manager, 1, &switch_path)
+            .expect("switch source while preserving Deck state");
+        assert!(switched.paused);
+        assert!((switched.volume - 37.0).abs() < 0.1);
+        assert!(switched.time_pos >= 0.5);
+        shutdown_deck(&manager, 1).expect("shutdown real mpv Deck");
+    }
+}

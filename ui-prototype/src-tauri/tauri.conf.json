@@ -1,0 +1,74 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "KING CLUB Broadcast Control",
+  "version": "0.1.0",
+  "identifier": "club.king.broadcast-control",
+  "build": {
+    "frontendDist": "../dist/client",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev -- --port 1420 --strictPort",
+    "beforeBuildCommand": "npm run build:web"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "KING CLUB Broadcast Control",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1180,
+        "minHeight": 720,
+        "center": true,
+        "visible": true,
+        "focus": true,
+        "maximized": true,
+        "theme": "Dark",
+        "resizable": true,
+        "fullscreen": false
+      },
+      {
+        "label": "output",
+        "title": "KING CLUB LED Output",
+        "url": "output.html",
+        "width": 960,
+        "height": 1080,
+        "visible": false,
+        "focus": false,
+        "decorations": false,
+        "resizable": false,
+        "closable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "theme": "Dark",
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../.local-tools/mpv/mpv.exe": "mpv.exe",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "android": {
+      "debugApplicationIdSuffix": ".debug"
+    }
+  }
+}

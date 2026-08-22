@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2048 2304" role="img" aria-labelledby="title desc">
+  <title id="title">KING CLUB LED main screen mask</title>
+  <desc id="desc">T-shaped LED screen with a centered 1024 by 1152 upper area and a 2048 by 1152 lower area.</desc>
+  <path fill="#fff" d="M512 0h1024v1152h512v1152H0V1152h512z"/>
+</svg>

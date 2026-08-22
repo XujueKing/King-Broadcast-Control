@@ -13,4 +13,22 @@ Thumbs.db
 *.log
 tmp/
 temp/
+target/
+target-analysis-check/
 
+# JavaScript dependencies and build output
+node_modules/
+dist/
+.vite/
+coverage/
+.local-tools/
+ui-prototype/.local-tools/
+ui-prototype/.venv-audio-ai/
+__pycache__/
+*.pyc
+
+# Local UI design-QA captures
+ui-prototype/implementation-*.png
+ui-prototype/public/qa-comparison.html
+ui-prototype/public/assets/reference-ui.png
+ui-prototype/public/assets/implementation-*.png

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8"><title>KING CLUB media playback test</title></head>
+  <body>
+    <video id="video" muted playsinline preload="auto"></video>
+    <audio id="audio" muted preload="auto"></audio>
+    <pre id="result" data-status="pending">pending</pre>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const video = document.querySelector("#video");
+      const audio = document.querySelector("#audio");
+      const result = document.querySelector("#result");
+
+      const inspect = (element, source) => new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`timeout: ${source}`)), 4000);
+        element.addEventListener("loadedmetadata", async () => {
+          clearTimeout(timeout);
+          try {
+            await element.play();
+            element.pause();
+            resolve({ duration: element.duration, readyState: element.readyState });
+          } catch (error) {
+            reject(error);
+          }
+        }, { once: true });
+        element.addEventListener("error", () => {
+          clearTimeout(timeout);
+          reject(new Error(`decode error: ${source}`));
+        }, { once: true });
+        element.src = source;
+        element.load();
+      });
+
+      Promise.all([
+        inspect(video, params.get("video")),
+        inspect(audio, params.get("audio")),
+      ]).then(([videoState, audioState]) => {
+        const payload = { video: videoState, audio: audioState };
+        result.dataset.status = "pass";
+        result.textContent = JSON.stringify(payload);
+      }).catch((error) => {
+        result.dataset.status = "fail";
+        result.textContent = String(error);
+      });
+    </script>
+  </body>
+</html>

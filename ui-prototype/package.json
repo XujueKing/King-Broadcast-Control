@@ -1,0 +1,42 @@
+{
+  "name": "king-broadcast-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --configLoader native",
+    "build:web": "vite build --configLoader native",
+    "build": "npm run build:web && node scripts/prepare-sites-build.mjs",
+    "desktop": "tauri dev",
+    "desktop:build": "tauri build",
+    "setup:mpv": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-mpv.ps1 -Variant v3",
+    "setup:audio-ai": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-audio-ai.ps1",
+    "check:audio-ai": "python ai-worker/worker.py --preflight",
+    "tauri": "tauri",
+    "preview": "vite preview",
+    "test:runtime": "node --test tests/media-runtime.test.mjs",
+    "test:media": "node --test tests/media-playback.test.mjs",
+    "test:media-scan": "node --test tests/media-scan-stability.test.mjs",
+    "test:rhythm": "node --test tests/rhythm-runtime.test.mjs",
+    "test:rhythm-automation": "node --test tests/rhythm-automation.test.mjs",
+    "test:lyrics": "node --test tests/lyrics-runtime.test.mjs",
+    "test:desktop-smoke": "node --test tests/tauri-runtime-smoke.test.mjs",
+    "test:desktop-output": "node --test tests/tauri-second-display.test.mjs",
+    "test:desktop-mpv": "node --test tests/tauri-mpv-deck.test.mjs",
+    "test:desktop-mpv-modes": "node --test tests/tauri-mpv-playback-modes.test.mjs",
+    "test:desktop-video": "node --test tests/tauri-video-program.test.mjs",
+    "test:desktop-text-parity": "node --test tests/tauri-text-output-parity.test.mjs",
+    "test:sites": "node --test tests/sites-worker.test.mjs"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "@tauri-apps/api": "^2.11.1",
+    "@vitejs/plugin-react": "5.0.4",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "vite": "6.4.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}

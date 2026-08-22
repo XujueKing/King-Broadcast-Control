@@ -1,0 +1,26 @@
+{
+  "pipelineVersion": "king-audio-ai-v1",
+  "pythonVersion": "3.12",
+  "concurrency": 1,
+  "separator": {
+    "model": "htdemucs",
+    "stems": ["vocals", "no_vocals"]
+  },
+  "asr": {
+    "model": "Qwen/Qwen3-ASR-1.7B",
+    "localDirectory": ".local-tools/models/Qwen3-ASR-1.7B",
+    "fallback": "faster-whisper"
+  },
+  "aligner": {
+    "model": "Qwen/Qwen3-ForcedAligner-0.6B",
+    "localDirectory": ".local-tools/models/Qwen3-ForcedAligner-0.6B"
+  },
+  "artifacts": [
+    "vocals.flac",
+    "no_vocals.flac",
+    "lyrics.txt",
+    "lyrics.lrc",
+    "lyrics.words.json",
+    "manifest.json"
+  ]
+}
