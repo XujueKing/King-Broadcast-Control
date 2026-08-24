@@ -1,4 +1,7 @@
-use crate::{EngineError, INTERNAL_FORMAT, SAMPLE_RATE};
+use crate::{
+    pitch::{PitchObservation, PitchTracker, PitchTrackerConfig},
+    EngineError, INTERNAL_FORMAT, SAMPLE_RATE,
+};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use serde::Serialize;
 use std::{
@@ -90,9 +93,17 @@ pub struct SimulationReport {
     pub nan_samples: u64,
     pub raw_peak: f32,
     pub processed_peak: f32,
+    pub pitch_observations: u64,
+    pub voiced_observations: u64,
+    pub voiced_ratio: f64,
+    pub f0_mean_hz: Option<f32>,
+    pub f0_min_hz: Option<f32>,
+    pub f0_max_hz: Option<f32>,
+    pub confidence_mean: f32,
     pub raw_wav: String,
     pub processed_wav: String,
     pub metrics_json: String,
+    pub pitch_json: String,
 }
 
 pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, EngineError> {
@@ -117,6 +128,8 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let mut underrun_events = 0_u64;
     let mut dropped_frames = 0_u64;
     let mut disconnect_events = 0_u64;
+    let mut pitch_tracker = PitchTracker::new(PitchTrackerConfig::default())?;
+    let mut pitch_observations = Vec::<PitchObservation>::new();
 
     let disconnect_start = raw.len() / 2;
     let disconnect_end = (disconnect_start + SAMPLE_RATE as usize / 4).min(raw.len());
@@ -146,6 +159,11 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
             }
         }
 
+        let pitch_input: &[f32] = if inject_disconnect { output } else { input };
+        if let Some(observation) = pitch_tracker.process_block(pitch_input) {
+            pitch_observations.push(observation);
+        }
+
         if config.fault == SimulationFault::CpuOverload && block_index > 0 && block_index % 50 == 0
         {
             std::thread::sleep(Duration::from_secs_f64(block_budget * 1.5));
@@ -160,11 +178,14 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let raw_path = config.output_dir.join("raw.wav");
     let processed_path = config.output_dir.join("processed.wav");
     let metrics_path = config.output_dir.join("metrics.json");
+    let pitch_path = config.output_dir.join("pitch.json");
     write_float32_wav(&raw_path, &raw)?;
     write_float32_wav(&processed_path, &processed)?;
 
     let (processing_mean_ms, processing_max_ms, processing_p95_ms, processing_p99_ms) =
         processing_summary(&mut processing_ms);
+    let (voiced_observations, f0_mean_hz, f0_min_hz, f0_max_hz, confidence_mean) =
+        pitch_summary(&pitch_observations);
     let report = SimulationReport {
         schema_version: 1,
         stage: if config.fault == SimulationFault::None && deadline_misses == 0 {
@@ -205,10 +226,26 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
             .count() as u64,
         raw_peak: peak(&raw),
         processed_peak: peak(&processed),
+        pitch_observations: pitch_observations.len() as u64,
+        voiced_observations,
+        voiced_ratio: if pitch_observations.is_empty() {
+            0.0
+        } else {
+            voiced_observations as f64 / pitch_observations.len() as f64
+        },
+        f0_mean_hz,
+        f0_min_hz,
+        f0_max_hz,
+        confidence_mean,
         raw_wav: raw_path.display().to_string(),
         processed_wav: processed_path.display().to_string(),
         metrics_json: metrics_path.display().to_string(),
+        pitch_json: pitch_path.display().to_string(),
     };
+    let encoded_pitch = serde_json::to_vec_pretty(&pitch_observations)
+        .map_err(|error| EngineError(format!("无法编码 F0 轨迹：{error}")))?;
+    fs::write(&pitch_path, encoded_pitch)
+        .map_err(|error| EngineError(format!("无法写入 F0 轨迹：{error}")))?;
     let encoded = serde_json::to_vec_pretty(&report)
         .map_err(|error| EngineError(format!("无法编码模拟指标：{error}")))?;
     fs::write(&metrics_path, encoded)
@@ -339,6 +376,31 @@ fn peak(samples: &[f32]) -> f32 {
     samples.iter().copied().map(f32::abs).fold(0.0, f32::max)
 }
 
+fn pitch_summary(
+    observations: &[PitchObservation],
+) -> (u64, Option<f32>, Option<f32>, Option<f32>, f32) {
+    let voiced = observations
+        .iter()
+        .filter(|observation| observation.voiced)
+        .collect::<Vec<_>>();
+    if voiced.is_empty() {
+        return (0, None, None, None, 0.0);
+    }
+    let frequencies = voiced
+        .iter()
+        .filter_map(|observation| observation.f0_hz)
+        .collect::<Vec<_>>();
+    let mean = frequencies.iter().sum::<f32>() / frequencies.len() as f32;
+    let min = frequencies.iter().copied().reduce(f32::min);
+    let max = frequencies.iter().copied().reduce(f32::max);
+    let confidence = voiced
+        .iter()
+        .map(|observation| observation.confidence)
+        .sum::<f32>()
+        / voiced.len() as f32;
+    (voiced.len() as u64, Some(mean), min, max, confidence)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,7 +410,7 @@ mod tests {
     }
 
     fn remove_evidence(directory: &Path) {
-        for name in ["raw.wav", "processed.wav", "metrics.json"] {
+        for name in ["raw.wav", "processed.wav", "metrics.json", "pitch.json"] {
             let _ = fs::remove_file(directory.join(name));
         }
         let _ = fs::remove_dir(directory);
@@ -370,6 +432,8 @@ mod tests {
         assert!(output_dir.join("raw.wav").is_file());
         assert!(output_dir.join("processed.wav").is_file());
         assert!(output_dir.join("metrics.json").is_file());
+        assert!(output_dir.join("pitch.json").is_file());
+        assert!(report.voiced_observations > 0);
         remove_evidence(&output_dir);
     }
 

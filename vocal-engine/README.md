@@ -18,7 +18,7 @@ cargo run -- simulate --seconds 5 --block-frames 128 `
   --output-dir artifacts\simulation-baseline
 ```
 
-`simulate` 是不依赖 Qu-16 的虚拟 USB 试验台。默认生成可重复的类人声测试信号；也可以用 `--input-wav PATH` 重放真实演唱，输入必须为 48 kHz WAV。每次生成 `raw.wav`、`processed.wav` 和 `metrics.json`。
+`simulate` 是不依赖 Qu-16 的虚拟 USB 试验台。默认生成可重复的类人声测试信号；也可以用 `--input-wav PATH` 重放真实演唱，输入必须为 48 kHz WAV。每次生成 `raw.wav`、`processed.wav`、`metrics.json` 和流式 F0 轨迹 `pitch.json`。
 
 故障模式用于提前开发 fallback：
 
