@@ -26,6 +26,7 @@ pub mod preset;
 pub mod quality;
 pub mod reference;
 pub mod simulation;
+pub mod site;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_FORMAT: &str = "float32";

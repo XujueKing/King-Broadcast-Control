@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "evidenceClass": "read_only_device_inventory",
+  "audioHost": "Wasapi",
+  "qu16InputEndpoints": [],
+  "qu16OutputEndpoints": [],
+  "qu16UsbAudioDetected": false,
+  "microphoneLanes": [
+    {
+      "id": "mic1",
+      "quInputChannel": 1,
+      "sourceLabel": "Shure SLX4",
+      "hardwareStatus": "confirmed_receiver_route_pending",
+      "phantomPower": false
+    },
+    {
+      "id": "mic2",
+      "quInputChannel": 2,
+      "sourceLabel": "UHF Receiver A",
+      "hardwareStatus": "provisional_requires_rear_panel_and_route_check",
+      "phantomPower": false
+    },
+    {
+      "id": "mic3",
+      "quInputChannel": 3,
+      "sourceLabel": "UHF Receiver B",
+      "hardwareStatus": "provisional_requires_rear_panel_and_route_check",
+      "phantomPower": false
+    }
+  ],
+  "currentMode": "disarmed",
+  "writesPerformed": false,
+  "audioOutputStarted": false,
+  "readinessBlockers": [
+    "qu16_usb_input_endpoint_not_detected",
+    "qu16_usb_return_endpoint_not_detected",
+    "qu16_usb_send_mapping_not_verified",
+    "qu16_usb_return_mapping_not_verified",
+    "direct_dry_fallback_not_verified",
+    "physical_round_trip_not_measured",
+    "uhf_receiver_model_and_outputs_not_verified"
+  ]
+}

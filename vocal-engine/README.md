@@ -1,4 +1,4 @@
-# KING Vocal Engine — P10
+# KING Vocal Engine — P12
 
 这是与 Tauri/React UI、播放器和离线 AI Worker 分离的实时音频进程。当前范围严格限定为：
 
@@ -100,6 +100,8 @@ P8 默认参数为 80 Hz 高通、3.2 kHz 轻微存在感、5.8 kHz 齿音检测
 P11 已加入 `natural / professional / strong / auto` 四种控制模式。切换请求以一个原子快照进入实时线程，修音强度、死区、最大修正比例、干湿混合和动态处理湿度用 120 ms 曲线连续过渡，不在音频回调中分配内存或加锁。`--vocal-preset` 只在启用了相应人声处理链时产生听感变化。
 
 三支无线麦采用固定的独立控制面模型：CH1 暂记为已确认的 Shure SLX4；CH2/CH3 暂记为待核对的 UHF A/B。三路预设状态互不共享，且三路均明确关闭 48V。当前代码没有把未经现场核对的 Qu-16 USB 返回通道写死；真实多通道 USB 输入、处理后回送、耳返和主扩分流仍需接机验证。
+
+P12 增加只读 `site-check` 和分级接机安全门。扫描仅枚举本机音频端点，不连接或写入 Qu-16，也不启动音频流。接机顺序固定为 `disarmed → input_meter_only → headphone_return → pa_return`；任何回送模式都必须指定唯一麦克风通道并确认 48V 关闭和安全输入增益，耳机回送还要求主扩静音与专用 USB Return 已确认，PA 回送则必须先通过 Qu-16 direct dry fallback。
 
 开始前应关闭扬声器或在 Qu-16 上建立安全的独立 USB Return。没有 `--arm` 时程序拒绝启动。
 
