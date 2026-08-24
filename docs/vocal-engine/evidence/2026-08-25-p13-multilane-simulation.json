@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "stage": "P13_MULTILANE_SIMULATION_PASSED",
+  "evidenceClass": "deterministic_software_only",
+  "sampleRate": 48000,
+  "blockFrames": 128,
+  "durationSeconds": 3.0,
+  "channelCount": 3,
+  "channels": [
+    {
+      "lane": "mic1",
+      "preset": "natural",
+      "syntheticDetuneCents": 0.0,
+      "inputRms": 0.15307434,
+      "outputRms": 0.14817026,
+      "outputPeak": 0.23413947,
+      "latestQualityScore": 96.23514,
+      "latestCorrectedMix": 0.0,
+      "nonFiniteSamples": 0
+    },
+    {
+      "lane": "mic2",
+      "preset": "professional",
+      "syntheticDetuneCents": 35.0,
+      "inputRms": 0.15307663,
+      "outputRms": 0.14617428,
+      "outputPeak": 0.23569351,
+      "latestQualityScore": 84.33984,
+      "latestCorrectedMix": 0.0115539795,
+      "nonFiniteSamples": 0
+    },
+    {
+      "lane": "mic3",
+      "preset": "strong",
+      "syntheticDetuneCents": -35.0,
+      "inputRms": 0.15307002,
+      "outputRms": 0.14606597,
+      "outputPeak": 0.24103978,
+      "latestQualityScore": 84.30209,
+      "latestCorrectedMix": 0.01221015,
+      "nonFiniteSamples": 0
+    }
+  ],
+  "crosstalkProbeMaximum": 0.0,
+  "processingMeanMsPerBlock": 0.1524532444444445,
+  "processingP99MsPerBlock": 0.1674,
+  "realtimeBlockBudgetMs": 2.6666666666666665,
+  "deadlineMisses": 0,
+  "backendContract": {
+    "sampleRate": 48000,
+    "internalFormat": "float32",
+    "blockFrames": 128,
+    "requiredHost": "ASIO",
+    "deviceNameHint": "Qu ASIO Driver",
+    "quInputChannels": [
+      1,
+      2,
+      3
+    ],
+    "driverInputIndices": [
+      null,
+      null,
+      null
+    ],
+    "driverReturnIndices": [
+      null,
+      null,
+      null
+    ],
+    "hardwareBindingStatus": "unbound_requires_qu16_hardware_validation"
+  },
+  "physicalAudioStarted": false
+}

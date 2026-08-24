@@ -21,6 +21,7 @@ pub mod blend;
 pub mod correction;
 pub mod dynamics;
 pub mod formant;
+pub mod multilane;
 pub mod pitch;
 pub mod preset;
 pub mod quality;
@@ -184,7 +185,7 @@ struct EngineDescriptor {
     adaptive_vocal_blend_enabled: bool,
 }
 
-struct LiveVocalProcessor {
+pub(crate) struct LiveVocalProcessor {
     tracker: pitch::PitchTracker,
     planner: correction::CorrectionPlanner,
     shifter: formant::FormantPreservingPitchShifter,
@@ -202,7 +203,7 @@ struct LiveVocalProcessor {
 }
 
 impl LiveVocalProcessor {
-    fn new(
+    pub(crate) fn new(
         config: &LoopbackConfig,
         preset_receiver: preset::VocalPresetReceiver,
     ) -> Result<Self, EngineError> {
@@ -274,7 +275,7 @@ impl LiveVocalProcessor {
         })
     }
 
-    fn process_sample(
+    pub(crate) fn process_sample(
         &mut self,
         sample: f32,
     ) -> (f32, Option<quality::VocalQualityObservation>, Option<f32>) {

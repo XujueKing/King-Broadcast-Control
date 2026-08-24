@@ -2,6 +2,7 @@ use king_vocal_engine::{
     benchmark_transfer,
     correction::{parse_tonic, ScaleMode},
     enumerate_devices,
+    multilane::run_multilane_simulation,
     preset::VocalPreset,
     run_for_duration,
     simulation::{run_simulation, SimulationConfig, SimulationFault},
@@ -36,11 +37,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("bench") => run_benchmark(&arguments[1..]),
         Some("simulate") => run_simulator(&arguments[1..]),
         Some("site-check") => run_site_check(&arguments[1..]),
+        Some("simulate-multilane") => run_multilane_simulator(&arguments[1..]),
         _ => {
             print_help();
             Ok(())
         }
     }
+}
+
+fn run_multilane_simulator(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let duration_seconds = number_argument(arguments, "--seconds")?.unwrap_or(3.0);
+    let block_frames = number_argument(arguments, "--block-frames")?.unwrap_or(128);
+    let report = run_multilane_simulation(duration_seconds, block_frames)?;
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_site_check(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -206,6 +223,9 @@ fn print_help() {
 
   site-check [--output PATH]
       P12 只读现场就绪扫描；不写 Qu-16、不启动输入流或音频输出。
+
+  simulate-multilane [--seconds 3] [--block-frames 128] [--output PATH]
+      P13 固定三路 Vocal Engine 模拟；验证隔离、串音和处理预算，不启动物理音频。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。

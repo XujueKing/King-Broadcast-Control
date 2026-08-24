@@ -1,4 +1,4 @@
-# KING Vocal Engine — P12
+# KING Vocal Engine — P13
 
 这是与 Tauri/React UI、播放器和离线 AI Worker 分离的实时音频进程。当前范围严格限定为：
 
@@ -102,6 +102,8 @@ P11 已加入 `natural / professional / strong / auto` 四种控制模式。切�
 三支无线麦采用固定的独立控制面模型：CH1 暂记为已确认的 Shure SLX4；CH2/CH3 暂记为待核对的 UHF A/B。三路预设状态互不共享，且三路均明确关闭 48V。当前代码没有把未经现场核对的 Qu-16 USB 返回通道写死；真实多通道 USB 输入、处理后回送、耳返和主扩分流仍需接机验证。
 
 P12 增加只读 `site-check` 和分级接机安全门。扫描仅枚举本机音频端点，不连接或写入 Qu-16，也不启动音频流。接机顺序固定为 `disarmed → input_meter_only → headphone_return → pa_return`；任何回送模式都必须指定唯一麦克风通道并确认 48V 关闭和安全输入增益，耳机回送还要求主扩静音与专用 USB Return 已确认，PA 回送则必须先通过 Qu-16 direct dry fallback。
+
+P13 把 Vocal Engine 核心提升为固定三路逐帧处理器。三路各自拥有完整的 Tracker、Planner、Formant、Dynamics、Quality、Blend 与原子预设状态；`simulate-multilane` 生成三路独立信号，验证通道顺序、非有限值、数字串音和 128-frame 实时预算。Qu ASIO 的 driver input/return index 保持 `null`，必须现场读取后才能绑定，不能用 WASAPI 的 ST1/ST2/ST3 名称猜测多通道路由。
 
 开始前应关闭扬声器或在 Qu-16 上建立安全的独立 USB Return。没有 `--arm` 时程序拒绝启动。
 
