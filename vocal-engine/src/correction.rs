@@ -146,6 +146,22 @@ impl CorrectionPlanner {
         })
     }
 
+    pub fn set_runtime_controls(
+        &mut self,
+        strength: f32,
+        deadband_cents: f32,
+        maximum_correction_cents: f32,
+    ) {
+        if strength.is_finite()
+            && deadband_cents.is_finite()
+            && maximum_correction_cents.is_finite()
+        {
+            self.config.strength = strength.clamp(0.0, 1.0);
+            self.config.deadband_cents = deadband_cents.clamp(0.0, 50.0);
+            self.config.maximum_correction_cents = maximum_correction_cents.clamp(1.0, 200.0);
+        }
+    }
+
     pub fn process(&mut self, observation: PitchObservation) -> CorrectionDecision {
         self.process_with_reference(observation, None)
     }

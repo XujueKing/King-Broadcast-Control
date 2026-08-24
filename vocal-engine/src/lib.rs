@@ -22,6 +22,7 @@ pub mod correction;
 pub mod dynamics;
 pub mod formant;
 pub mod pitch;
+pub mod preset;
 pub mod quality;
 pub mod reference;
 pub mod simulation;
@@ -62,6 +63,7 @@ pub struct LoopbackConfig {
     pub vocal_dynamics_enabled: bool,
     pub vocal_quality_enabled: bool,
     pub adaptive_vocal_blend_enabled: bool,
+    pub vocal_preset: preset::VocalPreset,
 }
 
 impl Default for LoopbackConfig {
@@ -85,6 +87,7 @@ impl Default for LoopbackConfig {
             vocal_dynamics_enabled: false,
             vocal_quality_enabled: false,
             adaptive_vocal_blend_enabled: false,
+            vocal_preset: preset::VocalPreset::Professional,
         }
     }
 }
@@ -158,6 +161,7 @@ pub struct RunningLoopback {
     _output_stream: Stream,
     metrics: Arc<AtomicMetrics>,
     descriptor: EngineDescriptor,
+    preset_control: preset::VocalPresetControl,
 }
 
 #[derive(Clone)]
@@ -191,10 +195,16 @@ struct LiveVocalProcessor {
     quality_scorer: quality::VocalQualityScorer,
     adaptive_blender: Option<blend::AdaptiveVocalBlender>,
     dry_delay: Option<blend::FixedDryDelay>,
+    preset_smoother: preset::VocalPresetSmoother,
+    latest_quality_score: f32,
+    maximum_correction_cents: f32,
 }
 
 impl LiveVocalProcessor {
-    fn new(config: &LoopbackConfig) -> Result<Self, EngineError> {
+    fn new(
+        config: &LoopbackConfig,
+        preset_receiver: preset::VocalPresetReceiver,
+    ) -> Result<Self, EngineError> {
         if config.key_tonic.is_some() != config.scale_mode.is_some() {
             return Err(EngineError("--key 与 --scale 必须同时提供".into()));
         }
@@ -257,6 +267,9 @@ impl LiveVocalProcessor {
                     )
                 })
                 .transpose()?,
+            preset_smoother: preset::VocalPresetSmoother::with_default_morph(preset_receiver)?,
+            latest_quality_score: 100.0,
+            maximum_correction_cents: config.maximum_correction_cents,
         })
     }
 
@@ -264,6 +277,21 @@ impl LiveVocalProcessor {
         &mut self,
         sample: f32,
     ) -> (f32, Option<quality::VocalQualityObservation>, Option<f32>) {
+        let preset = self
+            .preset_smoother
+            .process_sample(self.latest_quality_score);
+        self.planner.set_runtime_controls(
+            preset.correction_strength,
+            preset.deadband_cents,
+            self.maximum_correction_cents * preset.maximum_correction_scale,
+        );
+        if let Some(blender) = &mut self.adaptive_blender {
+            blender.set_corrected_mix_scale(preset.corrected_mix_scale);
+            blender.set_quality_score(self.latest_quality_score);
+        }
+        if let Some(dynamics) = &mut self.dynamics {
+            dynamics.set_wet_mix(preset.dynamics_scale);
+        }
         let input = [sample];
         let mut quality_update = None;
         if self.pitch_enabled || self.quality_enabled {
@@ -282,6 +310,9 @@ impl LiveVocalProcessor {
                         (&mut self.adaptive_blender, quality_update)
                     {
                         blender.set_quality_score(quality.quality_score);
+                    }
+                    if let Some(quality) = quality_update {
+                        self.latest_quality_score = quality.quality_score;
                     }
                 }
                 if self.pitch_enabled {
@@ -515,10 +546,11 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
             .map_err(|_| EngineError("无法预填充实时环形缓冲区".into()))?;
     }
 
+    let preset_control = preset::VocalPresetControl::new(config.vocal_preset);
     let mut live_pitch = (config.pitch_correction_enabled
         || config.vocal_dynamics_enabled
         || config.vocal_quality_enabled)
-        .then(|| LiveVocalProcessor::new(config))
+        .then(|| LiveVocalProcessor::new(config, preset_control.receiver()))
         .transpose()?;
 
     let input_metrics = Arc::clone(&metrics);
@@ -647,6 +679,7 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
         _input_stream: input_stream,
         _output_stream: output_stream,
         metrics,
+        preset_control,
         descriptor: EngineDescriptor {
             input_device: input_name,
             output_device: output_name,
@@ -755,6 +788,14 @@ fn stream_config(supported: &SupportedStreamConfig, buffer_frames: u32) -> Strea
 }
 
 impl RunningLoopback {
+    pub fn set_vocal_preset(&self, preset: preset::VocalPreset) -> u64 {
+        self.preset_control.request(preset)
+    }
+
+    pub fn vocal_preset(&self) -> (preset::VocalPreset, u64) {
+        self.preset_control.snapshot()
+    }
+
     pub fn metrics(&self) -> LatencyMetrics {
         let processing_count = self.metrics.processing_count.load(Ordering::Relaxed);
         let processing_total_ns = self.metrics.processing_total_ns.load(Ordering::Relaxed);
@@ -960,7 +1001,8 @@ mod tests {
             scale_mode: None,
             ..LoopbackConfig::default()
         };
-        assert!(LiveVocalProcessor::new(&config).is_err());
+        let control = preset::VocalPresetControl::new(config.vocal_preset);
+        assert!(LiveVocalProcessor::new(&config, control.receiver()).is_err());
     }
 
     #[test]
@@ -969,7 +1011,9 @@ mod tests {
             pitch_correction_enabled: true,
             ..LoopbackConfig::default()
         };
-        let mut processor = LiveVocalProcessor::new(&config).expect("valid live processor");
+        let control = preset::VocalPresetControl::new(config.vocal_preset);
+        let mut processor =
+            LiveVocalProcessor::new(&config, control.receiver()).expect("valid live processor");
         for _ in 0..4096 {
             assert!(processor.process_sample(0.0).0.is_finite());
         }
@@ -981,6 +1025,7 @@ mod tests {
             adaptive_vocal_blend_enabled: true,
             ..LoopbackConfig::default()
         };
-        assert!(LiveVocalProcessor::new(&config).is_err());
+        let control = preset::VocalPresetControl::new(config.vocal_preset);
+        assert!(LiveVocalProcessor::new(&config, control.receiver()).is_err());
     }
 }

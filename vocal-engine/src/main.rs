@@ -1,7 +1,9 @@
 use king_vocal_engine::{
     benchmark_transfer,
     correction::{parse_tonic, ScaleMode},
-    enumerate_devices, run_for_duration,
+    enumerate_devices,
+    preset::VocalPreset,
+    run_for_duration,
     simulation::{run_simulation, SimulationConfig, SimulationFault},
     LoopbackConfig,
 };
@@ -77,6 +79,10 @@ fn run_loopback(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         adaptive_vocal_blend_enabled: arguments
             .iter()
             .any(|argument| argument == "--enable-adaptive-blend"),
+        vocal_preset: string_argument(arguments, "--vocal-preset")
+            .map(|value| value.parse::<VocalPreset>())
+            .transpose()?
+            .unwrap_or_default(),
     };
     let seconds = number_argument::<u64>(arguments, "--seconds")?.unwrap_or(10);
     let metrics_path = string_argument(arguments, "--metrics").map(PathBuf::from);
@@ -178,7 +184,7 @@ where
 
 fn print_help() {
     println!(
-        r#"KING Vocal Engine P10
+        r#"KING Vocal Engine P11
 
   devices
       枚举本机 48kHz float32 输入/输出能力
@@ -230,6 +236,7 @@ Options:
                         启用实时分项演唱评分；修音开启时自动启用
   --enable-adaptive-blend
                         启用 P10 平滑混合；必须同时启用 Pitch Correction
+  --vocal-preset MODE   natural/professional/strong/auto；默认 professional
   --seconds N           default 10; 0 means until Ctrl+C
   --metrics PATH"#
     );

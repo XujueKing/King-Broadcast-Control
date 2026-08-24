@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "stage": "P11_SOFTWARE_GATE_PASSED",
+  "evidenceClass": "deterministic_software_only",
+  "sampleRate": 48000,
+  "presetModes": ["natural", "professional", "strong", "auto"],
+  "atomicSnapshot": {
+    "storage": "AtomicU64",
+    "contents": ["revision", "requestedPreset"],
+    "audioThreadLocks": 0,
+    "audioThreadAllocations": 0
+  },
+  "morph": {
+    "timeConstantMs": 120.0,
+    "verifiedMaximumParameterStep": "<0.0002",
+    "verifiedOneSecondConvergenceError": "<0.001"
+  },
+  "microphoneLanes": [
+    {
+      "lane": "mic1",
+      "plannedQuInput": 1,
+      "source": "Shure SLX4",
+      "status": "confirmed_receiver_route_pending",
+      "phantomPower": false
+    },
+    {
+      "lane": "mic2",
+      "plannedQuInput": 2,
+      "source": "UHF Receiver A",
+      "status": "provisional_requires_rear_panel_and_route_check",
+      "phantomPower": false
+    },
+    {
+      "lane": "mic3",
+      "plannedQuInput": 3,
+      "source": "UHF Receiver B",
+      "status": "provisional_requires_rear_panel_and_route_check",
+      "phantomPower": false
+    }
+  ],
+  "verification": {
+    "cargoFmt": "passed",
+    "cargoClippyAllTargetsDenyWarnings": "passed",
+    "cargoTest": "passed_48_of_48",
+    "cargoReleaseBuild": "passed"
+  },
+  "notProven": [
+    "Qu-16 real three-channel USB send and return mapping",
+    "UHF receiver exact model and independent rear outputs",
+    "monitor and PA split routing",
+    "physical round-trip latency",
+    "human singer listening quality"
+  ]
+}

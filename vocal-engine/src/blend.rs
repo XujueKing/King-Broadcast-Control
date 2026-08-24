@@ -100,6 +100,7 @@ pub struct AdaptiveVocalBlender {
     fall_alpha: f32,
     previous_output: f32,
     metrics: AdaptiveVocalBlendMetrics,
+    corrected_mix_scale: f32,
 }
 
 impl AdaptiveVocalBlender {
@@ -113,11 +114,19 @@ impl AdaptiveVocalBlender {
             corrected_mix: 0.0,
             previous_output: 0.0,
             metrics: AdaptiveVocalBlendMetrics::default(),
+            corrected_mix_scale: 1.0,
         })
     }
 
     pub fn set_quality_score(&mut self, quality_score: f32) {
-        self.target_corrected_mix = self.corrected_mix_for_score(quality_score);
+        self.target_corrected_mix =
+            self.corrected_mix_for_score(quality_score) * self.corrected_mix_scale;
+    }
+
+    pub fn set_corrected_mix_scale(&mut self, scale: f32) {
+        if scale.is_finite() {
+            self.corrected_mix_scale = scale.clamp(0.0, 1.0);
+        }
     }
 
     pub fn corrected_mix_for_score(&self, quality_score: f32) -> f32 {

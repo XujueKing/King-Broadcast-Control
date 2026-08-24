@@ -62,6 +62,7 @@ pub struct VocalDynamicsProcessor {
     compressor_gain: f32,
     limiter_gain: f32,
     metrics: VocalDynamicsMetrics,
+    wet_mix: f32,
 }
 
 impl VocalDynamicsProcessor {
@@ -77,7 +78,14 @@ impl VocalDynamicsProcessor {
             compressor_gain: 1.0,
             limiter_gain: 1.0,
             metrics: VocalDynamicsMetrics::default(),
+            wet_mix: 1.0,
         })
+    }
+
+    pub fn set_wet_mix(&mut self, wet_mix: f32) {
+        if wet_mix.is_finite() {
+            self.wet_mix = wet_mix.clamp(0.0, 1.0);
+        }
     }
 
     pub fn metrics(&self) -> VocalDynamicsMetrics {
@@ -178,10 +186,10 @@ impl VocalDynamicsProcessor {
                 self.metrics.invalid_fallback_samples += 1;
                 dry.clamp(-ceiling, ceiling)
             };
-            *destination = safe;
+            *destination = (dry + self.wet_mix * (safe - dry)).clamp(-ceiling, ceiling);
             self.metrics.processed_samples += 1;
             self.metrics.maximum_absolute_output =
-                self.metrics.maximum_absolute_output.max(safe.abs());
+                self.metrics.maximum_absolute_output.max(destination.abs());
         }
     }
 }
