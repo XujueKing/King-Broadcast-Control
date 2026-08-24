@@ -1,0 +1,45 @@
+{
+  "capturedAt": "2026-08-24",
+  "backend": "virtual_qu16_usb",
+  "evidenceClass": "simulation_only",
+  "sampleRate": 48000,
+  "internalFormat": "float32",
+  "blockFrames": 128,
+  "durationSecondsPerCase": 1.0,
+  "cases": [
+    {
+      "fault": "none",
+      "stage": "SIMULATION_PASSED",
+      "frames": 48000,
+      "blocks": 375,
+      "deadlineMisses": 0,
+      "underrunEvents": 0,
+      "droppedFrames": 0,
+      "disconnectEvents": 0,
+      "nanSamples": 0
+    },
+    {
+      "fault": "underrun",
+      "stage": "EXPECTED_FAULT_OBSERVED",
+      "underrunEvents": 7,
+      "droppedFrames": 896
+    },
+    {
+      "fault": "disconnect",
+      "stage": "EXPECTED_FAULT_OBSERVED",
+      "disconnectEvents": 1,
+      "droppedFrames": 12160
+    },
+    {
+      "fault": "cpu_overload",
+      "stage": "EXPECTED_FAULT_OBSERVED",
+      "deadlineMisses": 7,
+      "processingP99Ms": 4.4928
+    }
+  ],
+  "simulatedInputBufferMs": 2.6666666666666665,
+  "simulatedOutputBufferMs": 2.6666666666666665,
+  "simulatedTransportMs": 5.333333333333333,
+  "roundTripMs": null,
+  "roundTripEvidence": "not measured: simulation cannot prove Qu-16 USB or physical RTT"
+}

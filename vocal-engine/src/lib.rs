@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod simulation;
+
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_FORMAT: &str = "float32";
 const HISTOGRAM_BUCKET_US: u64 = 50;

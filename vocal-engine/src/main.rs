@@ -1,4 +1,8 @@
-use king_vocal_engine::{benchmark_transfer, enumerate_devices, run_for_duration, LoopbackConfig};
+use king_vocal_engine::{
+    benchmark_transfer, enumerate_devices, run_for_duration,
+    simulation::{run_simulation, SimulationConfig, SimulationFault},
+    LoopbackConfig,
+};
 use std::{
     env, fs,
     path::PathBuf,
@@ -25,6 +29,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("run") => run_loopback(&arguments[1..]),
         Some("bench") => run_benchmark(&arguments[1..]),
+        Some("simulate") => run_simulator(&arguments[1..]),
         _ => {
             print_help();
             Ok(())
@@ -75,6 +80,26 @@ fn run_benchmark(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+fn run_simulator(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let config = SimulationConfig {
+        input_wav: string_argument(arguments, "--input-wav").map(PathBuf::from),
+        output_dir: string_argument(arguments, "--output-dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("artifacts/simulation")),
+        duration_seconds: number_argument(arguments, "--seconds")?.unwrap_or(5.0),
+        block_frames: number_argument(arguments, "--block-frames")?.unwrap_or(128),
+        gain_db: number_argument(arguments, "--gain-db")?.unwrap_or(0.0),
+        fault: string_argument(arguments, "--fault")
+            .unwrap_or_else(|| "none".into())
+            .parse::<SimulationFault>()?,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&run_simulation(&config)?)?
+    );
+    Ok(())
+}
+
 fn string_argument(arguments: &[String], key: &str) -> Option<String> {
     arguments
         .iter()
@@ -102,6 +127,6 @@ where
 
 fn print_help() {
     println!(
-        "KING Vocal Engine P0\n\n  devices\n      枚举本机 48kHz float32 输入/输出能力\n\n  bench [--block-frames 128] [--blocks 10000]\n      仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。\n\n  run --arm [options]\n      启动低延迟直通。--arm 是防啸叫硬门。\n\nOptions:\n  --input NAME\n  --output NAME\n  --input-channel N\n  --output-channel N\n  --buffer-frames N     default 128\n  --ring-frames N       default 4096\n  --prefill-frames N    default 256\n  --gain-db DB          default -18\n  --seconds N           default 10; 0 means until Ctrl+C\n  --metrics PATH"
+        "KING Vocal Engine P0\n\n  devices\n      枚举本机 48kHz float32 输入/输出能力\n\n  bench [--block-frames 128] [--blocks 10000]\n      仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。\n\n  simulate [options]\n      虚拟 Qu-16 USB 试验台，生成 raw.wav、processed.wav 和 metrics.json。\n      --input-wav PATH   optional; 必须为 48kHz\n      --output-dir PATH  default artifacts/simulation\n      --seconds N        default 5\n      --block-frames N   default 128\n      --gain-db DB       default 0\n      --fault MODE       none/underrun/disconnect/cpu-overload\n\n  run --arm [options]\n      启动低延迟直通。--arm 是防啸叫硬门。\n\nOptions:\n  --input NAME\n  --output NAME\n  --input-channel N\n  --output-channel N\n  --buffer-frames N     default 128\n  --ring-frames N       default 4096\n  --prefill-frames N    default 256\n  --gain-db DB          default -18\n  --seconds N           default 10; 0 means until Ctrl+C\n  --metrics PATH"
     );
 }

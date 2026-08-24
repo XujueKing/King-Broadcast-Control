@@ -15,6 +15,7 @@ tmp/
 temp/
 target/
 target-analysis-check/
+vocal-engine/artifacts/
 
 # JavaScript dependencies and build output
 node_modules/

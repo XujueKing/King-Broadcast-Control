@@ -42,6 +42,18 @@
 
 合成 benchmark 只覆盖内存中的传输内核，不包含驱动、调度、USB 或物理 RTT，不能替代真机证据。
 
+## 离线开发：虚拟 Qu-16
+
+不在酒吧时使用 `simulate` 建立确定性的 48 kHz/float32 虚拟 Qu-16 USB 回路。它可读取真实 48 kHz WAV，也可生成带基频、谐波、振幅包络和颤音的类人声测试信号，并固定输出：
+
+- `raw.wav`：进入处理链的原始单声道人声；
+- `processed.wav`：当前处理链输出；P0 baseline 为 0 dB bypass；
+- `metrics.json`：buffer、处理耗时、deadline、断流、掉帧、断连和 NaN 指标。
+
+已经验证正常、underrun、disconnect、cpu-overload 四种场景。正常 1 秒/128 帧运行完成 375 块、48,000 帧，无 deadline miss、无掉帧、无 NaN；三种故障均被指标捕获并标记为 `EXPECTED_FAULT_OBSERVED`。
+
+这套试验台允许后续 F0、修音、Formant 和局部补声模块离线开发与回归，但其证据类别固定为 `simulation_only`，`roundTripMs` 固定为 `null`。只有接入 Qu-16 后才能把阶段标记由 `SIMULATION_PASSED` 提升为 `SITE_VERIFIED`。
+
 ## 接入 Qu-16 后的门禁顺序
 
 1. 安装官方 Qu Windows 驱动，USB-B 连接电脑，确认输入和输出端点均可见且设置为 48 kHz。
@@ -50,4 +62,3 @@
 4. 以 `--gain-db -18`、10 秒短测启动，再逐步延长；保存 `metrics.json`。
 5. P1 完成明确的 Qu USB 路由；P2 使用物理输出→输入回接与相关性测量生成 `latency.json`。
 6. 完成 2 小时、拔 USB、kill engine、CPU 过载、故意 underrun 和异常参数测试后，才可宣布 Audio/Latency/Safety 门通过。
-

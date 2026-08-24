@@ -14,7 +14,21 @@
 cd vocal-engine
 cargo run -- devices
 cargo run -- bench --block-frames 128 --blocks 100000
+cargo run -- simulate --seconds 5 --block-frames 128 `
+  --output-dir artifacts\simulation-baseline
 ```
+
+`simulate` 是不依赖 Qu-16 的虚拟 USB 试验台。默认生成可重复的类人声测试信号；也可以用 `--input-wav PATH` 重放真实演唱，输入必须为 48 kHz WAV。每次生成 `raw.wav`、`processed.wav` 和 `metrics.json`。
+
+故障模式用于提前开发 fallback：
+
+```powershell
+cargo run -- simulate --fault underrun --output-dir artifacts\simulation-underrun
+cargo run -- simulate --fault disconnect --output-dir artifacts\simulation-disconnect
+cargo run -- simulate --fault cpu-overload --output-dir artifacts\simulation-overload
+```
+
+模拟结果只允许标记为 `SIMULATION_PASSED` 或 `EXPECTED_FAULT_OBSERVED`，不能替代 Qu-16 驱动、USB 路由和物理 RTT 证据。
 
 真实回送具有啸叫风险，必须显式解锁：
 
@@ -34,4 +48,3 @@ cargo run --release -- run --arm `
 `estimatedSoftwarePathMs` 是驱动回调帧数、无锁队列深度及回调处理时间的合计估算，不等于真实声学/电气 RTT。`roundTripMs` 在物理输出回接输入并完成相关性测量之前固定为 `null`。
 
 驱动可忽略或修正请求的 buffer。程序会记录 `bufferFramesRequested` 以及输入、输出各自的 `*BufferFramesConfigured`，并根据实际回调帧数计算 buffer 延迟。
-
