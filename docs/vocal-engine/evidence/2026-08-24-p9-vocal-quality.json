@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-24",
+  "status": "DETERMINISTIC_SOFTWARE_SCORE_PASSED",
+  "scope": "synthetic 48kHz two-pass reference test; no human calibration",
+  "weights": {
+    "pitch": 0.45,
+    "timing": 0.15,
+    "stability": 0.15,
+    "voicing": 0.10,
+    "energy": 0.075,
+    "confidence": 0.075
+  },
+  "thresholds": {
+    "preserve": 85.0,
+    "gentle": 65.0,
+    "strong": 40.0
+  },
+  "baseline": {
+    "qualityMean": 81.70235,
+    "qualityMinimum": 78.61426,
+    "qualityLatest": 82.493706,
+    "gentleObservations": 1860
+  },
+  "detuned100Cents": {
+    "qualityMean": 56.396427,
+    "qualityMinimum": 51.05441,
+    "qualityLatest": 55.198765,
+    "gentleObservations": 36,
+    "strongObservations": 1824,
+    "measuredPitchShiftCents": -51.963642
+  },
+  "performance": {
+    "processingMeanMs": 0.0428093,
+    "processingP99Ms": 0.0516,
+    "processingMaximumMs": 0.1125,
+    "deadlineMisses": 0,
+    "droppedFrames": 0,
+    "nanSamples": 0
+  },
+  "limitations": {
+    "humanCalibrated": false,
+    "phonemeTiming": false,
+    "physicalRoundTripMs": null,
+    "onsiteValidated": false
+  }
+}

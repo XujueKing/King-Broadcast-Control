@@ -21,6 +21,7 @@ pub mod correction;
 pub mod dynamics;
 pub mod formant;
 pub mod pitch;
+pub mod quality;
 pub mod reference;
 pub mod simulation;
 
@@ -58,6 +59,7 @@ pub struct LoopbackConfig {
     pub scale_mode: Option<correction::ScaleMode>,
     pub reference_map: Option<PathBuf>,
     pub vocal_dynamics_enabled: bool,
+    pub vocal_quality_enabled: bool,
 }
 
 impl Default for LoopbackConfig {
@@ -79,6 +81,7 @@ impl Default for LoopbackConfig {
             scale_mode: None,
             reference_map: None,
             vocal_dynamics_enabled: false,
+            vocal_quality_enabled: false,
         }
     }
 }
@@ -126,6 +129,9 @@ pub struct LatencyMetrics {
     pub transform_algorithmic_latency_ms: f64,
     pub pitch_analysis_window_ms: f64,
     pub vocal_dynamics_enabled: bool,
+    pub vocal_quality_enabled: bool,
+    pub quality_score_latest: Option<f32>,
+    pub quality_class_latest: Option<quality::VocalQualityClass>,
     pub round_trip_ms: Option<f64>,
     pub round_trip_evidence: String,
     pub xruns: u64,
@@ -164,6 +170,7 @@ struct EngineDescriptor {
     transform_algorithmic_latency_ms: f64,
     pitch_analysis_window_ms: f64,
     vocal_dynamics_enabled: bool,
+    vocal_quality_enabled: bool,
 }
 
 struct LiveVocalProcessor {
@@ -174,6 +181,8 @@ struct LiveVocalProcessor {
     correction_cents: f32,
     pitch_enabled: bool,
     dynamics: Option<dynamics::VocalDynamicsProcessor>,
+    quality_enabled: bool,
+    quality_scorer: quality::VocalQualityScorer,
 }
 
 impl LiveVocalProcessor {
@@ -191,7 +200,8 @@ impl LiveVocalProcessor {
         if let (Some(tonic), Some(mode)) = (config.key_tonic, config.scale_mode) {
             planner_config.allowed_pitch_classes = correction::scale_mask(tonic, mode);
         }
-        let reference = if config.pitch_correction_enabled {
+        let quality_enabled = config.vocal_quality_enabled || config.pitch_correction_enabled;
+        let reference = if config.pitch_correction_enabled || quality_enabled {
             config
                 .reference_map
                 .as_deref()
@@ -216,21 +226,35 @@ impl LiveVocalProcessor {
                     dynamics::VocalDynamicsProcessor::new(dynamics::VocalDynamicsConfig::default())
                 })
                 .transpose()?,
+            quality_enabled,
+            quality_scorer: quality::VocalQualityScorer::new(
+                quality::VocalQualityConfig::default(),
+            )?,
         })
     }
 
-    fn process_sample(&mut self, sample: f32) -> f32 {
+    fn process_sample(&mut self, sample: f32) -> (f32, Option<quality::VocalQualityObservation>) {
         let input = [sample];
-        if self.pitch_enabled {
+        let mut quality_update = None;
+        if self.pitch_enabled || self.quality_enabled {
             if let Some(observation) = self.tracker.process_block(&input) {
                 let target = self
                     .reference
                     .as_ref()
                     .and_then(|map| map.target_at(observation.sample_position));
-                self.correction_cents = self
-                    .planner
-                    .process_with_reference(observation, target)
-                    .applied_correction_cents;
+                if self.quality_enabled {
+                    quality_update = Some(self.quality_scorer.process(
+                        observation,
+                        target,
+                        self.reference.is_some(),
+                    ));
+                }
+                if self.pitch_enabled {
+                    self.correction_cents = self
+                        .planner
+                        .process_with_reference(observation, target)
+                        .applied_correction_cents;
+                }
             }
         }
         let mut shifted = input;
@@ -242,7 +266,7 @@ impl LiveVocalProcessor {
         if let Some(dynamics) = &mut self.dynamics {
             dynamics.process_block(&shifted, &mut processed);
         }
-        processed[0]
+        (processed[0], quality_update)
     }
 }
 
@@ -277,6 +301,9 @@ struct AtomicMetrics {
     overflow_events: AtomicU64,
     dropped_frames: AtomicU64,
     stream_errors: AtomicU64,
+    quality_updates: AtomicU64,
+    quality_score_milli: AtomicU64,
+    quality_class: AtomicU64,
 }
 
 impl AtomicMetrics {
@@ -298,6 +325,9 @@ impl AtomicMetrics {
             overflow_events: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
             stream_errors: AtomicU64::new(0),
+            quality_updates: AtomicU64::new(0),
+            quality_score_milli: AtomicU64::new(0),
+            quality_class: AtomicU64::new(quality::VocalQualityClass::RepairCandidate.code()),
         }
     }
 
@@ -436,7 +466,9 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
             .map_err(|_| EngineError("无法预填充实时环形缓冲区".into()))?;
     }
 
-    let mut live_pitch = (config.pitch_correction_enabled || config.vocal_dynamics_enabled)
+    let mut live_pitch = (config.pitch_correction_enabled
+        || config.vocal_dynamics_enabled
+        || config.vocal_quality_enabled)
         .then(|| LiveVocalProcessor::new(config))
         .transpose()?;
 
@@ -452,9 +484,21 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
                 let mut dropped = 0u64;
                 for frame in data.chunks_exact(input_channels as usize) {
                     let input = frame[input_channel];
-                    let routed = live_pitch
+                    let (routed, quality_update) = live_pitch
                         .as_mut()
-                        .map_or(input, |processor| processor.process_sample(input));
+                        .map_or((input, None), |processor| processor.process_sample(input));
+                    if let Some(quality) = quality_update {
+                        input_metrics.quality_score_milli.store(
+                            (quality.quality_score * 1_000.0).round() as u64,
+                            Ordering::Relaxed,
+                        );
+                        input_metrics
+                            .quality_class
+                            .store(quality.quality_class.code(), Ordering::Relaxed);
+                        input_metrics
+                            .quality_updates
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                     if producer.push(routed).is_err() {
                         dropped += 1;
                     }
@@ -570,6 +614,7 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
                 0.0
             },
             vocal_dynamics_enabled: config.vocal_dynamics_enabled,
+            vocal_quality_enabled: config.vocal_quality_enabled || config.pitch_correction_enabled,
         },
     })
 }
@@ -673,6 +718,7 @@ impl RunningLoopback {
         let underrun_events = self.metrics.underrun_events.load(Ordering::Relaxed);
         let overflow_events = self.metrics.overflow_events.load(Ordering::Relaxed);
         let stream_errors = self.metrics.stream_errors.load(Ordering::Relaxed);
+        let quality_updates = self.metrics.quality_updates.load(Ordering::Relaxed);
         LatencyMetrics {
             schema_version: 1,
             status: if underrun_events + overflow_events + stream_errors == 0 {
@@ -704,6 +750,14 @@ impl RunningLoopback {
             transform_algorithmic_latency_ms: self.descriptor.transform_algorithmic_latency_ms,
             pitch_analysis_window_ms: self.descriptor.pitch_analysis_window_ms,
             vocal_dynamics_enabled: self.descriptor.vocal_dynamics_enabled,
+            vocal_quality_enabled: self.descriptor.vocal_quality_enabled,
+            quality_score_latest: (quality_updates > 0)
+                .then(|| self.metrics.quality_score_milli.load(Ordering::Relaxed) as f32 / 1_000.0),
+            quality_class_latest: (quality_updates > 0).then(|| {
+                quality::VocalQualityClass::from_code(
+                    self.metrics.quality_class.load(Ordering::Relaxed),
+                )
+            }),
             round_trip_ms: None,
             round_trip_evidence:
                 "not measured: physical output-to-input loopback evidence required".into(),
@@ -855,7 +909,7 @@ mod tests {
         };
         let mut processor = LiveVocalProcessor::new(&config).expect("valid live processor");
         for _ in 0..4096 {
-            assert!(processor.process_sample(0.0).is_finite());
+            assert!(processor.process_sample(0.0).0.is_finite());
         }
     }
 }

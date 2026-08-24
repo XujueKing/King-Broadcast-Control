@@ -6,6 +6,7 @@ use crate::{
     dynamics::{VocalDynamicsConfig, VocalDynamicsProcessor},
     formant::{FormantPreservingPitchShifter, FormantShifterConfig},
     pitch::{PitchObservation, PitchTracker, PitchTrackerConfig},
+    quality::{VocalQualityClass, VocalQualityConfig, VocalQualityObservation, VocalQualityScorer},
     reference::{ReferenceBuildConfig, ReferenceVocalMap},
     EngineError, INTERNAL_FORMAT, SAMPLE_RATE,
 };
@@ -156,11 +157,20 @@ pub struct SimulationReport {
     pub maximum_compressor_reduction_db: f32,
     pub maximum_limiter_reduction_db: f32,
     pub invalid_dynamics_fallback_samples: u64,
+    pub quality_observations: u64,
+    pub quality_score_mean: f32,
+    pub quality_score_minimum: f32,
+    pub quality_score_latest: f32,
+    pub quality_preserve_observations: u64,
+    pub quality_gentle_observations: u64,
+    pub quality_strong_observations: u64,
+    pub quality_repair_candidate_observations: u64,
     pub raw_wav: String,
     pub processed_wav: String,
     pub metrics_json: String,
     pub pitch_json: String,
     pub correction_json: String,
+    pub quality_json: String,
     pub generated_reference_json: String,
 }
 
@@ -209,6 +219,11 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         ..CorrectionPlannerConfig::default()
     })?;
     let mut correction_decisions = Vec::<CorrectionDecision>::new();
+    let mut quality_scorer = VocalQualityScorer::new(VocalQualityConfig {
+        hop_frames: config.block_frames,
+        ..VocalQualityConfig::default()
+    })?;
+    let mut quality_observations = Vec::<VocalQualityObservation>::new();
     let mut pitch_shifter = FormantPreservingPitchShifter::new(FormantShifterConfig {
         maximum_correction_cents: config.maximum_correction_cents,
         ..FormantShifterConfig::default()
@@ -240,6 +255,11 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
             let reference_target = loaded_reference
                 .as_ref()
                 .and_then(|map| map.target_at(observation.sample_position));
+            quality_observations.push(quality_scorer.process(
+                observation,
+                reference_target,
+                loaded_reference.is_some(),
+            ));
             let decision = correction_planner.process_with_reference(observation, reference_target);
             current_correction_cents = decision.applied_correction_cents;
             correction_decisions.push(decision);
@@ -285,6 +305,7 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let metrics_path = config.output_dir.join("metrics.json");
     let pitch_path = config.output_dir.join("pitch.json");
     let correction_path = config.output_dir.join("correction.json");
+    let quality_path = config.output_dir.join("quality.json");
     let generated_reference_path = config.output_dir.join("reference.json");
     let raw_rms_before = rms(&raw);
     let level_match_gain_db = if (config.audio_transform_enabled || config.vocal_dynamics_enabled)
@@ -320,6 +341,7 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         .as_ref()
         .map(VocalDynamicsProcessor::metrics)
         .unwrap_or_default();
+    let quality = quality_summary(&quality_observations);
     let generated_reference = ReferenceVocalMap::build(
         source.clone(),
         config.block_frames,
@@ -421,11 +443,20 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         maximum_compressor_reduction_db: dynamics_metrics.maximum_compressor_reduction_db,
         maximum_limiter_reduction_db: dynamics_metrics.maximum_limiter_reduction_db,
         invalid_dynamics_fallback_samples: dynamics_metrics.invalid_fallback_samples,
+        quality_observations: quality_observations.len() as u64,
+        quality_score_mean: quality.mean,
+        quality_score_minimum: quality.minimum,
+        quality_score_latest: quality.latest,
+        quality_preserve_observations: quality.preserve,
+        quality_gentle_observations: quality.gentle,
+        quality_strong_observations: quality.strong,
+        quality_repair_candidate_observations: quality.repair_candidate,
         raw_wav: raw_path.display().to_string(),
         processed_wav: processed_path.display().to_string(),
         metrics_json: metrics_path.display().to_string(),
         pitch_json: pitch_path.display().to_string(),
         correction_json: correction_path.display().to_string(),
+        quality_json: quality_path.display().to_string(),
         generated_reference_json: generated_reference_path.display().to_string(),
     };
     let encoded_pitch = serde_json::to_vec_pretty(&pitch_observations)
@@ -436,6 +467,10 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         .map_err(|error| EngineError(format!("无法编码修正控制轨：{error}")))?;
     fs::write(&correction_path, encoded_correction)
         .map_err(|error| EngineError(format!("无法写入修正控制轨：{error}")))?;
+    let encoded_quality = serde_json::to_vec_pretty(&quality_observations)
+        .map_err(|error| EngineError(format!("无法编码 Vocal Quality 轨迹：{error}")))?;
+    fs::write(&quality_path, encoded_quality)
+        .map_err(|error| EngineError(format!("无法写入 Vocal Quality 轨迹：{error}")))?;
     let encoded = serde_json::to_vec_pretty(&report)
         .map_err(|error| EngineError(format!("无法编码模拟指标：{error}")))?;
     fs::write(&metrics_path, encoded)
@@ -734,6 +769,47 @@ fn correction_summary(decisions: &[CorrectionDecision]) -> CorrectionSummary {
     }
 }
 
+#[derive(Default)]
+struct QualitySummary {
+    mean: f32,
+    minimum: f32,
+    latest: f32,
+    preserve: u64,
+    gentle: u64,
+    strong: u64,
+    repair_candidate: u64,
+}
+
+fn quality_summary(observations: &[VocalQualityObservation]) -> QualitySummary {
+    if observations.is_empty() {
+        return QualitySummary::default();
+    }
+    let mut summary = QualitySummary {
+        mean: observations
+            .iter()
+            .map(|observation| observation.quality_score)
+            .sum::<f32>()
+            / observations.len() as f32,
+        minimum: observations
+            .iter()
+            .map(|observation| observation.quality_score)
+            .fold(100.0, f32::min),
+        latest: observations
+            .last()
+            .map_or(0.0, |observation| observation.quality_score),
+        ..QualitySummary::default()
+    };
+    for observation in observations {
+        match observation.quality_class {
+            VocalQualityClass::Preserve => summary.preserve += 1,
+            VocalQualityClass::GentleCorrection => summary.gentle += 1,
+            VocalQualityClass::StrongCorrection => summary.strong += 1,
+            VocalQualityClass::RepairCandidate => summary.repair_candidate += 1,
+        }
+    }
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,6 +825,7 @@ mod tests {
             "metrics.json",
             "pitch.json",
             "correction.json",
+            "quality.json",
             "reference.json",
         ] {
             let _ = fs::remove_file(directory.join(name));
@@ -774,6 +851,7 @@ mod tests {
         assert!(output_dir.join("metrics.json").is_file());
         assert!(output_dir.join("pitch.json").is_file());
         assert!(output_dir.join("correction.json").is_file());
+        assert!(output_dir.join("quality.json").is_file());
         assert!(output_dir.join("reference.json").is_file());
         assert!(report.voiced_observations > 0);
         assert_eq!(report.correction_observations, report.pitch_observations);
@@ -807,14 +885,14 @@ mod tests {
         remove_evidence(&singer_dir);
         let ideal = run_simulation(&SimulationConfig {
             output_dir: ideal_dir.clone(),
-            duration_seconds: 0.2,
+            duration_seconds: 0.5,
             ..SimulationConfig::default()
         })
         .expect("reference preparation should pass");
         assert!(ideal.generated_reference_segments > 0);
         let singer = run_simulation(&SimulationConfig {
             output_dir: singer_dir.clone(),
-            duration_seconds: 0.2,
+            duration_seconds: 0.5,
             synthetic_detune_cents: 100.0,
             reference_map: Some(ideal_dir.join("reference.json")),
             ..SimulationConfig::default()
@@ -825,6 +903,8 @@ mod tests {
         assert!(singer
             .measured_pitch_shift_cents
             .is_some_and(|cents| cents < -15.0));
+        assert!(singer.quality_score_mean < ideal.quality_score_mean - 15.0);
+        assert!(singer.quality_strong_observations > 0);
         assert_eq!(singer.invalid_transform_fallback_samples, 0);
         remove_evidence(&ideal_dir);
         remove_evidence(&singer_dir);
