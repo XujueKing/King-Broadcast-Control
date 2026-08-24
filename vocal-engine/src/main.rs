@@ -1,5 +1,7 @@
 use king_vocal_engine::{
-    benchmark_transfer, enumerate_devices, run_for_duration,
+    benchmark_transfer,
+    correction::{parse_tonic, ScaleMode},
+    enumerate_devices, run_for_duration,
     simulation::{run_simulation, SimulationConfig, SimulationFault},
     LoopbackConfig,
 };
@@ -81,6 +83,12 @@ fn run_benchmark(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>>
 }
 
 fn run_simulator(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let key_tonic = string_argument(arguments, "--key")
+        .map(|value| parse_tonic(&value))
+        .transpose()?;
+    let scale_mode = string_argument(arguments, "--scale")
+        .map(|value| value.parse::<ScaleMode>())
+        .transpose()?;
     let config = SimulationConfig {
         input_wav: string_argument(arguments, "--input-wav").map(PathBuf::from),
         output_dir: string_argument(arguments, "--output-dir")
@@ -96,6 +104,11 @@ fn run_simulator(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>>
         correction_deadband_cents: number_argument(arguments, "--deadband-cents")?.unwrap_or(8.0),
         maximum_correction_cents: number_argument(arguments, "--max-correction-cents")?
             .unwrap_or(45.0),
+        key_tonic,
+        scale_mode,
+        reference_map: string_argument(arguments, "--reference").map(PathBuf::from),
+        synthetic_detune_cents: number_argument(arguments, "--synthetic-detune-cents")?
+            .unwrap_or(0.0),
     };
     println!(
         "{}",
@@ -131,6 +144,6 @@ where
 
 fn print_help() {
     println!(
-        "KING Vocal Engine P0\n\n  devices\n      枚举本机 48kHz float32 输入/输出能力\n\n  bench [--block-frames 128] [--blocks 10000]\n      仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。\n\n  simulate [options]\n      虚拟 Qu-16 USB 试验台，生成 raw/processed WAV、metrics、pitch 和 correction JSON。\n      --input-wav PATH             optional; 必须为 48kHz\n      --output-dir PATH            default artifacts/simulation\n      --seconds N                  default 5\n      --block-frames N             default 128\n      --gain-db DB                 default 0\n      --correction-strength N      default 0.75; range 0..1\n      --deadband-cents N           default 8\n      --max-correction-cents N     default 45\n      --fault MODE                 none/underrun/disconnect/cpu-overload\n\n  run --arm [options]\n      启动低延迟直通。--arm 是防啸叫硬门。\n\nOptions:\n  --input NAME\n  --output NAME\n  --input-channel N\n  --output-channel N\n  --buffer-frames N     default 128\n  --ring-frames N       default 4096\n  --prefill-frames N    default 256\n  --gain-db DB          default -18\n  --seconds N           default 10; 0 means until Ctrl+C\n  --metrics PATH"
+        "KING Vocal Engine P0\n\n  devices\n      枚举本机 48kHz float32 输入/输出能力\n\n  bench [--block-frames 128] [--blocks 10000]\n      仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。\n\n  simulate [options]\n      虚拟 Qu-16 USB 试验台，生成 raw/processed WAV、metrics、pitch、correction 和 reference JSON。\n      --input-wav PATH             optional; 必须为 48kHz\n      --output-dir PATH            default artifacts/simulation\n      --seconds N                  default 5\n      --block-frames N             default 128\n      --gain-db DB                 default 0\n      --correction-strength N      default 0.75; range 0..1\n      --deadband-cents N           default 8\n      --max-correction-cents N     default 45\n      --key NOTE --scale MODE      optional; example C major / F# minor\n      --reference PATH             optional reference.json from a prior preparation run\n      --synthetic-detune-cents N   test-only synthetic singer detune, range ±1200\n      --fault MODE                 none/underrun/disconnect/cpu-overload\n\n  run --arm [options]\n      启动低延迟直通。--arm 是防啸叫硬门。\n\nOptions:\n  --input NAME\n  --output NAME\n  --input-channel N\n  --output-channel N\n  --buffer-frames N     default 128\n  --ring-frames N       default 4096\n  --prefill-frames N    default 256\n  --gain-db DB          default -18\n  --seconds N           default 10; 0 means until Ctrl+C\n  --metrics PATH"
     );
 }

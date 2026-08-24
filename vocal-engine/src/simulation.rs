@@ -1,6 +1,10 @@
 use crate::{
-    correction::{CorrectionDecision, CorrectionPlanner, CorrectionPlannerConfig, CorrectionState},
+    correction::{
+        scale_mask, CorrectionDecision, CorrectionPlanner, CorrectionPlannerConfig,
+        CorrectionState, ScaleMode, TargetSource, CHROMATIC_MASK,
+    },
     pitch::{PitchObservation, PitchTracker, PitchTrackerConfig},
+    reference::{ReferenceBuildConfig, ReferenceVocalMap},
     EngineError, INTERNAL_FORMAT, SAMPLE_RATE,
 };
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
@@ -50,6 +54,10 @@ pub struct SimulationConfig {
     pub correction_strength: f32,
     pub correction_deadband_cents: f32,
     pub maximum_correction_cents: f32,
+    pub key_tonic: Option<u8>,
+    pub scale_mode: Option<ScaleMode>,
+    pub reference_map: Option<PathBuf>,
+    pub synthetic_detune_cents: f32,
 }
 
 impl Default for SimulationConfig {
@@ -64,6 +72,10 @@ impl Default for SimulationConfig {
             correction_strength: 0.75,
             correction_deadband_cents: 8.0,
             maximum_correction_cents: 45.0,
+            key_tonic: None,
+            scale_mode: None,
+            reference_map: None,
+            synthetic_detune_cents: 0.0,
         }
     }
 }
@@ -114,23 +126,38 @@ pub struct SimulationReport {
     pub mean_absolute_cents_error: f32,
     pub mean_absolute_applied_cents: f32,
     pub maximum_absolute_applied_cents: f32,
+    pub chromatic_target_observations: u64,
+    pub scale_target_observations: u64,
+    pub reference_target_observations: u64,
+    pub generated_reference_segments: u64,
+    pub reference_input: Option<String>,
     pub raw_wav: String,
     pub processed_wav: String,
     pub metrics_json: String,
     pub pitch_json: String,
     pub correction_json: String,
+    pub generated_reference_json: String,
 }
 
 pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, EngineError> {
     validate(config)?;
     fs::create_dir_all(&config.output_dir)
         .map_err(|error| EngineError(format!("无法创建模拟证据目录：{error}")))?;
+    let loaded_reference = config
+        .reference_map
+        .as_deref()
+        .map(ReferenceVocalMap::load)
+        .transpose()?;
+    let reference_input = config
+        .reference_map
+        .as_ref()
+        .map(|path| path.display().to_string());
 
     let (source, raw) = match &config.input_wav {
         Some(path) => (path.display().to_string(), read_mono_float32_48k(path)?),
         None => (
             "synthetic_vocal_like_signal".into(),
-            synthetic_vocal(config.duration_seconds),
+            synthetic_vocal(config.duration_seconds, config.synthetic_detune_cents),
         ),
     };
     let requested_frames = (config.duration_seconds * SAMPLE_RATE as f64).round() as usize;
@@ -150,6 +177,10 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         strength: config.correction_strength,
         deadband_cents: config.correction_deadband_cents,
         maximum_correction_cents: config.maximum_correction_cents,
+        allowed_pitch_classes: match (config.key_tonic, config.scale_mode) {
+            (Some(tonic), Some(mode)) => scale_mask(tonic, mode),
+            _ => CHROMATIC_MASK,
+        },
         ..CorrectionPlannerConfig::default()
     })?;
     let mut correction_decisions = Vec::<CorrectionDecision>::new();
@@ -185,7 +216,11 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         let pitch_input: &[f32] = if inject_disconnect { output } else { input };
         if let Some(observation) = pitch_tracker.process_block(pitch_input) {
             pitch_observations.push(observation);
-            correction_decisions.push(correction_planner.process(observation));
+            let reference_target = loaded_reference
+                .as_ref()
+                .and_then(|map| map.target_at(observation.sample_position));
+            correction_decisions
+                .push(correction_planner.process_with_reference(observation, reference_target));
         }
 
         if config.fault == SimulationFault::CpuOverload && block_index > 0 && block_index % 50 == 0
@@ -204,6 +239,7 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let metrics_path = config.output_dir.join("metrics.json");
     let pitch_path = config.output_dir.join("pitch.json");
     let correction_path = config.output_dir.join("correction.json");
+    let generated_reference_path = config.output_dir.join("reference.json");
     write_float32_wav(&raw_path, &raw)?;
     write_float32_wav(&processed_path, &processed)?;
 
@@ -212,6 +248,13 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let (voiced_observations, f0_mean_hz, f0_min_hz, f0_max_hz, confidence_mean) =
         pitch_summary(&pitch_observations);
     let correction = correction_summary(&correction_decisions);
+    let generated_reference = ReferenceVocalMap::build(
+        source.clone(),
+        config.block_frames,
+        &pitch_observations,
+        &ReferenceBuildConfig::default(),
+    )?;
+    generated_reference.save(&generated_reference_path)?;
     let report = SimulationReport {
         schema_version: 1,
         stage: if config.fault == SimulationFault::None && deadline_misses == 0 {
@@ -270,11 +313,17 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         mean_absolute_cents_error: correction.mean_absolute_error,
         mean_absolute_applied_cents: correction.mean_absolute_applied,
         maximum_absolute_applied_cents: correction.maximum_absolute_applied,
+        chromatic_target_observations: correction.chromatic_targets,
+        scale_target_observations: correction.scale_targets,
+        reference_target_observations: correction.reference_targets,
+        generated_reference_segments: generated_reference.segments.len() as u64,
+        reference_input,
         raw_wav: raw_path.display().to_string(),
         processed_wav: processed_path.display().to_string(),
         metrics_json: metrics_path.display().to_string(),
         pitch_json: pitch_path.display().to_string(),
         correction_json: correction_path.display().to_string(),
+        generated_reference_json: generated_reference_path.display().to_string(),
     };
     let encoded_pitch = serde_json::to_vec_pretty(&pitch_observations)
         .map_err(|error| EngineError(format!("无法编码 F0 轨迹：{error}")))?;
@@ -306,6 +355,16 @@ fn validate(config: &SimulationConfig) -> Result<(), EngineError> {
         || !(1.0..=200.0).contains(&config.maximum_correction_cents)
     {
         return Err(EngineError("模拟修音控制参数无效".into()));
+    }
+    if config.key_tonic.is_some() != config.scale_mode.is_some()
+        || config.key_tonic.is_some_and(|tonic| tonic > 11)
+    {
+        return Err(EngineError("--key 与 --scale 必须成对且主音有效".into()));
+    }
+    if !config.synthetic_detune_cents.is_finite()
+        || !(-1_200.0..=1_200.0).contains(&config.synthetic_detune_cents)
+    {
+        return Err(EngineError("synthetic_detune_cents 必须在 ±1200".into()));
     }
     Ok(())
 }
@@ -350,13 +409,14 @@ fn read_mono_float32_48k(path: &Path) -> Result<Vec<f32>, EngineError> {
         .collect())
 }
 
-fn synthetic_vocal(seconds: f64) -> Vec<f32> {
+fn synthetic_vocal(seconds: f64, detune_cents: f32) -> Vec<f32> {
     let frames = (seconds * SAMPLE_RATE as f64).round() as usize;
     let mut phase = 0.0_f32;
+    let detune_ratio = 2.0_f32.powf(detune_cents / 1_200.0);
     (0..frames)
         .map(|index| {
             let time = index as f32 / SAMPLE_RATE as f32;
-            let fundamental = 196.0 + 10.0 * (TAU * 4.8 * time).sin();
+            let fundamental = (196.0 + 10.0 * (TAU * 4.8 * time).sin()) * detune_ratio;
             phase = (phase + TAU * fundamental / SAMPLE_RATE as f32) % TAU;
             let syllable = (0.58 + 0.42 * (TAU * 1.7 * time).sin()).max(0.0);
             let sample = phase.sin() + 0.34 * (2.0 * phase).sin() + 0.16 * (3.0 * phase).sin();
@@ -452,6 +512,9 @@ struct CorrectionSummary {
     mean_absolute_error: f32,
     mean_absolute_applied: f32,
     maximum_absolute_applied: f32,
+    chromatic_targets: u64,
+    scale_targets: u64,
+    reference_targets: u64,
 }
 
 fn correction_summary(decisions: &[CorrectionDecision]) -> CorrectionSummary {
@@ -487,6 +550,18 @@ fn correction_summary(decisions: &[CorrectionDecision]) -> CorrectionSummary {
         .iter()
         .map(|decision| decision.applied_correction_cents.abs())
         .fold(0.0, f32::max);
+    let chromatic_targets = decisions
+        .iter()
+        .filter(|decision| decision.target_source == TargetSource::Chromatic)
+        .count() as u64;
+    let scale_targets = decisions
+        .iter()
+        .filter(|decision| decision.target_source == TargetSource::Scale)
+        .count() as u64;
+    let reference_targets = decisions
+        .iter()
+        .filter(|decision| decision.target_source == TargetSource::Reference)
+        .count() as u64;
     CorrectionSummary {
         active,
         deadband,
@@ -494,6 +569,9 @@ fn correction_summary(decisions: &[CorrectionDecision]) -> CorrectionSummary {
         mean_absolute_error,
         mean_absolute_applied,
         maximum_absolute_applied,
+        chromatic_targets,
+        scale_targets,
+        reference_targets,
     }
 }
 
@@ -512,6 +590,7 @@ mod tests {
             "metrics.json",
             "pitch.json",
             "correction.json",
+            "reference.json",
         ] {
             let _ = fs::remove_file(directory.join(name));
         }
@@ -536,6 +615,7 @@ mod tests {
         assert!(output_dir.join("metrics.json").is_file());
         assert!(output_dir.join("pitch.json").is_file());
         assert!(output_dir.join("correction.json").is_file());
+        assert!(output_dir.join("reference.json").is_file());
         assert!(report.voiced_observations > 0);
         assert_eq!(report.correction_observations, report.pitch_observations);
         remove_evidence(&output_dir);
@@ -558,5 +638,32 @@ mod tests {
         assert!(report.dropped_frames > 0);
         assert_eq!(report.evidence_class, "simulation_only");
         remove_evidence(&output_dir);
+    }
+
+    #[test]
+    fn second_pass_uses_reference_to_detect_a_full_semitone_error() {
+        let ideal_dir = test_directory("reference-ideal");
+        let singer_dir = test_directory("reference-singer");
+        remove_evidence(&ideal_dir);
+        remove_evidence(&singer_dir);
+        let ideal = run_simulation(&SimulationConfig {
+            output_dir: ideal_dir.clone(),
+            duration_seconds: 0.2,
+            ..SimulationConfig::default()
+        })
+        .expect("reference preparation should pass");
+        assert!(ideal.generated_reference_segments > 0);
+        let singer = run_simulation(&SimulationConfig {
+            output_dir: singer_dir.clone(),
+            duration_seconds: 0.2,
+            synthetic_detune_cents: 100.0,
+            reference_map: Some(ideal_dir.join("reference.json")),
+            ..SimulationConfig::default()
+        })
+        .expect("reference guided singer pass should complete");
+        assert!(singer.reference_target_observations > 0);
+        assert!(singer.mean_absolute_cents_error > 70.0);
+        remove_evidence(&ideal_dir);
+        remove_evidence(&singer_dir);
     }
 }

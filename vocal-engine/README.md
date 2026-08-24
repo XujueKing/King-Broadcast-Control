@@ -31,6 +31,28 @@ cargo run -- simulate --seconds 5 `
 
 `correction.json` 只是目标音与修正量计划；当前 `processed.wav` 仍为旁路声音，尚未通过该控制轨做实际移调。
 
+P5 Key/Scale 约束：
+
+```powershell
+cargo run -- simulate --key C --scale major `
+  --output-dir artifacts\p5-c-major
+```
+
+P6 Reference 两遍流程：
+
+```powershell
+# 制作阶段：从理想/原唱人声生成 reference.json
+cargo run -- simulate --seconds 5 --output-dir artifacts\reference-ideal
+
+# 演唱阶段：读取同一时间轴参考；+100 cents 仅用于确定性测试
+cargo run -- simulate --seconds 5 `
+  --synthetic-detune-cents 100 `
+  --reference artifacts\reference-ideal\reference.json `
+  --output-dir artifacts\reference-singer
+```
+
+目标优先级固定为 `Reference > Key/Scale > Chromatic`。Reference 不覆盖的空白、间奏或低置信度区域才回退到 Key/Scale 或 Chromatic。
+
 故障模式用于提前开发 fallback：
 
 ```powershell

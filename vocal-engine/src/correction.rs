@@ -1,5 +1,61 @@
 use crate::{pitch::PitchObservation, EngineError, SAMPLE_RATE};
 use serde::Serialize;
+use std::str::FromStr;
+
+pub const CHROMATIC_MASK: u16 = 0x0fff;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScaleMode {
+    Major,
+    NaturalMinor,
+}
+
+impl FromStr for ScaleMode {
+    type Err = EngineError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "major" | "maj" => Ok(Self::Major),
+            "minor" | "natural-minor" | "min" => Ok(Self::NaturalMinor),
+            _ => Err(EngineError(format!("未知调式 {value}；可选 major/minor"))),
+        }
+    }
+}
+
+pub fn parse_tonic(value: &str) -> Result<u8, EngineError> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "C" => Ok(0),
+        "C#" | "DB" => Ok(1),
+        "D" => Ok(2),
+        "D#" | "EB" => Ok(3),
+        "E" | "FB" => Ok(4),
+        "F" | "E#" => Ok(5),
+        "F#" | "GB" => Ok(6),
+        "G" => Ok(7),
+        "G#" | "AB" => Ok(8),
+        "A" => Ok(9),
+        "A#" | "BB" => Ok(10),
+        "B" | "CB" => Ok(11),
+        _ => Err(EngineError(format!("未知主音 {value}"))),
+    }
+}
+
+pub fn scale_mask(tonic: u8, mode: ScaleMode) -> u16 {
+    let intervals: &[u8] = match mode {
+        ScaleMode::Major => &[0, 2, 4, 5, 7, 9, 11],
+        ScaleMode::NaturalMinor => &[0, 2, 3, 5, 7, 8, 10],
+    };
+    intervals.iter().fold(0_u16, |mask, interval| {
+        mask | 1 << ((tonic + interval) % 12)
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ReferenceTarget {
+    pub midi_note: u8,
+    pub target_hz: f32,
+}
 
 #[derive(Clone, Debug)]
 pub struct CorrectionPlannerConfig {
@@ -12,6 +68,7 @@ pub struct CorrectionPlannerConfig {
     pub attack_ms: f32,
     pub release_ms: f32,
     pub reset_target_after_ms: f32,
+    pub allowed_pitch_classes: u16,
 }
 
 impl Default for CorrectionPlannerConfig {
@@ -26,6 +83,7 @@ impl Default for CorrectionPlannerConfig {
             attack_ms: 18.0,
             release_ms: 55.0,
             reset_target_after_ms: 180.0,
+            allowed_pitch_classes: CHROMATIC_MASK,
         }
     }
 }
@@ -38,6 +96,15 @@ pub enum CorrectionState {
     Unvoiced,
     LowConfidence,
     InvalidPitch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetSource {
+    None,
+    Chromatic,
+    Scale,
+    Reference,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -54,6 +121,7 @@ pub struct CorrectionDecision {
     pub applied_correction_cents: f32,
     pub correction_percent: f32,
     pub confidence: f32,
+    pub target_source: TargetSource,
 }
 
 pub struct CorrectionPlanner {
@@ -79,6 +147,14 @@ impl CorrectionPlanner {
     }
 
     pub fn process(&mut self, observation: PitchObservation) -> CorrectionDecision {
+        self.process_with_reference(observation, None)
+    }
+
+    pub fn process_with_reference(
+        &mut self,
+        observation: PitchObservation,
+        reference: Option<ReferenceTarget>,
+    ) -> CorrectionDecision {
         if !observation.voiced {
             return self.bypass(observation, CorrectionState::Unvoiced);
         }
@@ -94,18 +170,35 @@ impl CorrectionPlanner {
 
         self.unvoiced_hops = 0;
         let measured_midi = 69.0 + 12.0 * (f0_hz / 440.0).log2();
-        let nearest = measured_midi.round().clamp(0.0, 127.0) as u8;
-        let target_midi = match self.target_midi {
-            Some(current)
-                if (measured_midi - current as f32).abs()
-                    <= 0.5 + self.config.target_hysteresis_cents / 100.0 =>
-            {
-                current
-            }
-            _ => nearest,
+        let nearest = nearest_allowed_midi(measured_midi, self.config.allowed_pitch_classes);
+        let (target_midi, target_hz, target_source) = if let Some(reference) = reference {
+            (
+                reference.midi_note,
+                reference.target_hz,
+                TargetSource::Reference,
+            )
+        } else {
+            let selected = match self.target_midi {
+                Some(current)
+                    if pitch_class_allowed(current, self.config.allowed_pitch_classes)
+                        && (measured_midi - current as f32).abs()
+                            <= 0.5 + self.config.target_hysteresis_cents / 100.0 =>
+                {
+                    current
+                }
+                _ => nearest,
+            };
+            (
+                selected,
+                midi_to_hz(selected),
+                if self.config.allowed_pitch_classes == CHROMATIC_MASK {
+                    TargetSource::Chromatic
+                } else {
+                    TargetSource::Scale
+                },
+            )
         };
         self.target_midi = Some(target_midi);
-        let target_hz = midi_to_hz(target_midi);
         let cents_error = 1_200.0 * (f0_hz / target_hz).log2();
         let outside_deadband = (cents_error.abs() - self.config.deadband_cents).max(0.0);
         let desired = (-cents_error.signum() * outside_deadband * self.config.strength).clamp(
@@ -141,6 +234,7 @@ impl CorrectionPlanner {
                 * 100.0)
                 .clamp(0.0, 100.0),
             confidence: observation.confidence,
+            target_source,
         }
     }
 
@@ -173,12 +267,28 @@ impl CorrectionPlanner {
                 * 100.0)
                 .clamp(0.0, 100.0),
             confidence: observation.confidence,
+            target_source: TargetSource::None,
         }
     }
 }
 
 pub fn midi_to_hz(note: u8) -> f32 {
     440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0)
+}
+
+fn pitch_class_allowed(note: u8, mask: u16) -> bool {
+    mask & (1 << (note % 12)) != 0
+}
+
+fn nearest_allowed_midi(measured_midi: f32, mask: u16) -> u8 {
+    (0_u8..=127)
+        .filter(|note| pitch_class_allowed(*note, mask))
+        .min_by(|left, right| {
+            (measured_midi - *left as f32)
+                .abs()
+                .total_cmp(&(measured_midi - *right as f32).abs())
+        })
+        .unwrap_or_else(|| measured_midi.round().clamp(0.0, 127.0) as u8)
 }
 
 fn smooth(current: f32, target: f32, hop_frames: usize, time_ms: f32) -> f32 {
@@ -200,6 +310,8 @@ fn validate(config: &CorrectionPlannerConfig) -> Result<(), EngineError> {
         || config.attack_ms < 0.0
         || config.release_ms < 0.0
         || config.reset_target_after_ms <= 0.0
+        || config.allowed_pitch_classes == 0
+        || config.allowed_pitch_classes & !CHROMATIC_MASK != 0
     {
         return Err(EngineError("Pitch correction planner 配置无效".into()));
     }
@@ -290,5 +402,38 @@ mod tests {
         let decision = planner.process(observation(Some(shifted(440.0, 40.0)), 0.99));
         assert_eq!(decision.desired_correction_cents, -20.0);
         assert_eq!(decision.correction_percent, 100.0);
+    }
+
+    #[test]
+    fn c_major_rejects_a_c_sharp_target() {
+        let mut planner = CorrectionPlanner::new(CorrectionPlannerConfig {
+            strength: 1.0,
+            deadband_cents: 0.0,
+            attack_ms: 0.0,
+            allowed_pitch_classes: scale_mask(parse_tonic("C").unwrap(), ScaleMode::Major),
+            ..CorrectionPlannerConfig::default()
+        })
+        .unwrap();
+        let c_sharp = midi_to_hz(61);
+        let decision = planner.process(observation(Some(c_sharp), 0.99));
+        assert_eq!(decision.target_midi, Some(60));
+        assert_eq!(decision.target_source, TargetSource::Scale);
+    }
+
+    #[test]
+    fn reference_target_overrides_a_valid_wrong_semitone() {
+        let mut planner = immediate_planner();
+        let sung_c_sharp = midi_to_hz(61);
+        let decision = planner.process_with_reference(
+            observation(Some(sung_c_sharp), 0.99),
+            Some(ReferenceTarget {
+                midi_note: 60,
+                target_hz: midi_to_hz(60),
+            }),
+        );
+        assert_eq!(decision.target_midi, Some(60));
+        assert_eq!(decision.target_source, TargetSource::Reference);
+        assert!((decision.cents_error.unwrap() - 100.0).abs() < 0.01);
+        assert_eq!(decision.desired_correction_cents, -45.0);
     }
 }

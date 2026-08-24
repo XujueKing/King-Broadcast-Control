@@ -18,6 +18,7 @@ use std::{
 
 pub mod correction;
 pub mod pitch;
+pub mod reference;
 pub mod simulation;
 
 pub const SAMPLE_RATE: u32 = 48_000;

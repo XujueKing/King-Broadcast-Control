@@ -1,0 +1,31 @@
+{
+  "capturedAt": "2026-08-24",
+  "stage": "TARGET_SIMULATION_PASSED",
+  "audioTransform": "NOT_IMPLEMENTED",
+  "hardwareStatus": "HARDWARE_PENDING",
+  "priority": ["reference", "scale", "chromatic"],
+  "p5": {
+    "key": "C",
+    "scale": "major",
+    "durationSeconds": 1.0,
+    "scaleTargetObservations": 360,
+    "chromaticTargetObservations": 0,
+    "deadlineMisses": 0
+  },
+  "p6": {
+    "referenceDurationSeconds": 2.0,
+    "referencePitchObservations": 735,
+    "generatedReferenceSegments": 38,
+    "singerDetuneCents": 100.0,
+    "referenceTargetObservations": 735,
+    "correctionObservations": 735,
+    "meanAbsoluteCentsError": 98.47424,
+    "meanAbsoluteAppliedCents": 43.86925,
+    "maximumAbsoluteAppliedCents": 44.989338,
+    "processingP99Ms": 0.0539,
+    "processingMaxMs": 0.0903,
+    "deadlineMisses": 0
+  },
+  "roundTripMs": null,
+  "processedWav": "0 dB bypass; target planning only"
+}
