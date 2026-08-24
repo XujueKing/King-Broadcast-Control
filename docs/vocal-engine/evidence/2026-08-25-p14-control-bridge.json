@@ -1,0 +1,31 @@
+{
+  "phase": "P14",
+  "date": "2026-08-25",
+  "mode": "offline-control-only",
+  "physicalAudioStarted": false,
+  "hardwareBound": false,
+  "calibrationMode": "disarmed",
+  "checks": {
+    "vocalEngineFmt": "pass",
+    "vocalEngineClippy": "pass",
+    "vocalEngineTests": { "passed": 59, "failed": 0 },
+    "vocalEngineReleaseBuild": "pass",
+    "tauriCheck": "pass",
+    "tauriLibraryTests": { "passed": 59, "failed": 0 },
+    "frontendRuntimeTests": { "passed": 6, "failed": 0 },
+    "viteProductionBuild": "pass",
+    "tauriClippy": {
+      "status": "blocked-by-pre-existing-warnings",
+      "warningCount": 8,
+      "newVocalRuntimeWarningObserved": false
+    }
+  },
+  "protocolProbe": {
+    "requests": ["status", "set_preset:mic2:strong", "disarm"],
+    "lanePresetsAfterChange": ["professional", "strong", "professional"],
+    "physicalAudioStartedAfterEveryResponse": false,
+    "hardwareBoundAfterEveryResponse": false
+  },
+  "onsiteValidation": "not-executed",
+  "notes": "No Qu-16 or ASIO route was claimed or started during P14."
+}

@@ -1,5 +1,5 @@
 use crate::{EngineError, SAMPLE_RATE};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     array,
     str::FromStr,
@@ -12,7 +12,7 @@ use std::{
 const PRESET_BITS: u64 = 0xff;
 const DEFAULT_MORPH_MS: f32 = 120.0;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 pub enum VocalPreset {
@@ -223,7 +223,7 @@ fn smooth(current: f32, target: f32, alpha: f32) -> f32 {
     current + alpha * (target - current)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VocalLaneId {
     Mic1,
@@ -277,6 +277,7 @@ pub fn three_microphone_plan() -> [VocalLaneDefinition; 3] {
     ]
 }
 
+#[derive(Clone)]
 pub struct ThreeLanePresetBank {
     controls: [VocalPresetControl; 3],
 }

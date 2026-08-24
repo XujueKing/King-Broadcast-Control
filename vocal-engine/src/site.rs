@@ -2,9 +2,9 @@ use crate::{
     preset::{three_microphone_plan, VocalLaneDefinition, VocalLaneId},
     AudioDeviceInventory,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationMode {
     #[default]
@@ -14,7 +14,8 @@ pub enum CalibrationMode {
     PaReturn,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CalibrationArmRequest {
     pub mode: CalibrationMode,
     pub lane: Option<VocalLaneId>,

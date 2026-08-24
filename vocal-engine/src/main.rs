@@ -10,7 +10,7 @@ use king_vocal_engine::{
     LoopbackConfig,
 };
 use std::{
-    env, fs,
+    env, fs, io,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -38,6 +38,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("simulate") => run_simulator(&arguments[1..]),
         Some("site-check") => run_site_check(&arguments[1..]),
         Some("simulate-multilane") => run_multilane_simulator(&arguments[1..]),
+        Some("control-stdio") => {
+            king_vocal_engine::control::serve_control_lines(
+                io::stdin().lock(),
+                io::stdout().lock(),
+            )?;
+            Ok(())
+        }
         _ => {
             print_help();
             Ok(())
@@ -226,6 +233,9 @@ fn print_help() {
 
   simulate-multilane [--seconds 3] [--block-frames 128] [--output PATH]
       P13 固定三路 Vocal Engine 模拟；验证隔离、串音和处理预算，不启动物理音频。
+
+  control-stdio
+      P14 NDJSON 控制/遥测桥；启动时固定未武装，不会启动物理音频。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。
