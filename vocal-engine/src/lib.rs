@@ -9,6 +9,7 @@ use std::{
     array,
     error::Error,
     fmt,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -17,6 +18,7 @@ use std::{
 };
 
 pub mod correction;
+pub mod formant;
 pub mod pitch;
 pub mod reference;
 pub mod simulation;
@@ -47,6 +49,13 @@ pub struct LoopbackConfig {
     pub ring_capacity_frames: usize,
     pub prefill_frames: usize,
     pub gain_db: f32,
+    pub pitch_correction_enabled: bool,
+    pub correction_strength: f32,
+    pub correction_deadband_cents: f32,
+    pub maximum_correction_cents: f32,
+    pub key_tonic: Option<u8>,
+    pub scale_mode: Option<correction::ScaleMode>,
+    pub reference_map: Option<PathBuf>,
 }
 
 impl Default for LoopbackConfig {
@@ -60,6 +69,13 @@ impl Default for LoopbackConfig {
             ring_capacity_frames: 4096,
             prefill_frames: 256,
             gain_db: -18.0,
+            pitch_correction_enabled: false,
+            correction_strength: 0.75,
+            correction_deadband_cents: 8.0,
+            maximum_correction_cents: 45.0,
+            key_tonic: None,
+            scale_mode: None,
+            reference_map: None,
         }
     }
 }
@@ -103,6 +119,9 @@ pub struct LatencyMetrics {
     pub output_buffer_ms: f64,
     pub queue_delay_ms: f64,
     pub estimated_software_path_ms: f64,
+    pub pitch_correction_enabled: bool,
+    pub transform_algorithmic_latency_ms: f64,
+    pub pitch_analysis_window_ms: f64,
     pub round_trip_ms: Option<f64>,
     pub round_trip_evidence: String,
     pub xruns: u64,
@@ -137,6 +156,68 @@ struct EngineDescriptor {
     buffer_frames_requested: u32,
     input_buffer_frames_configured: u32,
     output_buffer_frames_configured: u32,
+    pitch_correction_enabled: bool,
+    transform_algorithmic_latency_ms: f64,
+    pitch_analysis_window_ms: f64,
+}
+
+struct LivePitchProcessor {
+    tracker: pitch::PitchTracker,
+    planner: correction::CorrectionPlanner,
+    shifter: formant::FormantPreservingPitchShifter,
+    reference: Option<reference::ReferenceVocalMap>,
+    correction_cents: f32,
+}
+
+impl LivePitchProcessor {
+    fn new(config: &LoopbackConfig) -> Result<Self, EngineError> {
+        if config.key_tonic.is_some() != config.scale_mode.is_some() {
+            return Err(EngineError("--key 与 --scale 必须同时提供".into()));
+        }
+        let pitch_config = pitch::PitchTrackerConfig::default();
+        let mut planner_config = correction::CorrectionPlannerConfig {
+            strength: config.correction_strength,
+            deadband_cents: config.correction_deadband_cents,
+            maximum_correction_cents: config.maximum_correction_cents,
+            ..correction::CorrectionPlannerConfig::default()
+        };
+        if let (Some(tonic), Some(mode)) = (config.key_tonic, config.scale_mode) {
+            planner_config.allowed_pitch_classes = correction::scale_mask(tonic, mode);
+        }
+        let reference = config
+            .reference_map
+            .as_deref()
+            .map(reference::ReferenceVocalMap::load)
+            .transpose()?;
+        Ok(Self {
+            tracker: pitch::PitchTracker::new(pitch_config)?,
+            planner: correction::CorrectionPlanner::new(planner_config)?,
+            shifter: formant::FormantPreservingPitchShifter::new(formant::FormantShifterConfig {
+                maximum_correction_cents: config.maximum_correction_cents,
+                ..formant::FormantShifterConfig::default()
+            })?,
+            reference,
+            correction_cents: 0.0,
+        })
+    }
+
+    fn process_sample(&mut self, sample: f32) -> f32 {
+        let input = [sample];
+        if let Some(observation) = self.tracker.process_block(&input) {
+            let target = self
+                .reference
+                .as_ref()
+                .and_then(|map| map.target_at(observation.sample_position));
+            self.correction_cents = self
+                .planner
+                .process_with_reference(observation, target)
+                .applied_correction_cents;
+        }
+        let mut output = [0.0];
+        self.shifter
+            .process_block(&input, &mut output, self.correction_cents);
+        output[0]
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -329,6 +410,11 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
             .map_err(|_| EngineError("无法预填充实时环形缓冲区".into()))?;
     }
 
+    let mut live_pitch = config
+        .pitch_correction_enabled
+        .then(|| LivePitchProcessor::new(config))
+        .transpose()?;
+
     let input_metrics = Arc::clone(&metrics);
     let input_error_metrics = Arc::clone(&metrics);
     let input_channel = config.input_channel;
@@ -340,7 +426,11 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
                 let frames = data.len() / input_channels as usize;
                 let mut dropped = 0u64;
                 for frame in data.chunks_exact(input_channels as usize) {
-                    if producer.push(frame[input_channel]).is_err() {
+                    let input = frame[input_channel];
+                    let routed = live_pitch
+                        .as_mut()
+                        .map_or(input, |processor| processor.process_sample(input));
+                    if producer.push(routed).is_err() {
                         dropped += 1;
                     }
                 }
@@ -442,6 +532,18 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
             buffer_frames_requested: config.buffer_frames,
             input_buffer_frames_configured: input_buffer_frames,
             output_buffer_frames_configured: output_buffer_frames,
+            pitch_correction_enabled: config.pitch_correction_enabled,
+            transform_algorithmic_latency_ms: if config.pitch_correction_enabled {
+                formant::FormantPreservingPitchShifter::algorithmic_latency_ms() as f64
+            } else {
+                0.0
+            },
+            pitch_analysis_window_ms: if config.pitch_correction_enabled {
+                pitch::PitchTrackerConfig::default().window_frames as f64 / SAMPLE_RATE as f64
+                    * 1_000.0
+            } else {
+                0.0
+            },
         },
     })
 }
@@ -570,7 +672,11 @@ impl RunningLoopback {
             estimated_software_path_ms: input_buffer_ms
                 + processing_ms
                 + queue_delay_ms
-                + output_buffer_ms,
+                + output_buffer_ms
+                + self.descriptor.transform_algorithmic_latency_ms,
+            pitch_correction_enabled: self.descriptor.pitch_correction_enabled,
+            transform_algorithmic_latency_ms: self.descriptor.transform_algorithmic_latency_ms,
+            pitch_analysis_window_ms: self.descriptor.pitch_analysis_window_ms,
             round_trip_ms: None,
             round_trip_evidence:
                 "not measured: physical output-to-input loopback evidence required".into(),
@@ -663,6 +769,7 @@ mod tests {
         assert_eq!(INTERNAL_FORMAT, "float32");
         assert!(config.ring_capacity_frames > config.prefill_frames);
         assert!(config.buffer_frames > 0);
+        assert!(!config.pitch_correction_enabled);
     }
 
     #[test]
@@ -700,5 +807,28 @@ mod tests {
         assert_eq!(result.transferred_frames, 4096);
         assert!(result.elapsed_ms >= 0.0);
         assert!(result.checksum > 0.0);
+    }
+
+    #[test]
+    fn live_pitch_processor_rejects_an_incomplete_scale_target() {
+        let config = LoopbackConfig {
+            pitch_correction_enabled: true,
+            key_tonic: Some(0),
+            scale_mode: None,
+            ..LoopbackConfig::default()
+        };
+        assert!(LivePitchProcessor::new(&config).is_err());
+    }
+
+    #[test]
+    fn live_pitch_processor_has_a_finite_silence_path() {
+        let config = LoopbackConfig {
+            pitch_correction_enabled: true,
+            ..LoopbackConfig::default()
+        };
+        let mut processor = LivePitchProcessor::new(&config).expect("valid live processor");
+        for _ in 0..4096 {
+            assert!(processor.process_sample(0.0).is_finite());
+        }
     }
 }

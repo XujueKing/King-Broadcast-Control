@@ -1,12 +1,13 @@
-# KING Vocal Engine — P0
+# KING Vocal Engine — P7
 
 这是与 Tauri/React UI、播放器和离线 AI Worker 分离的实时音频进程。当前范围严格限定为：
 
 - 48 kHz、内部 `float32` 的单通道输入到单通道输出；
 - 回调之间使用预分配 SPSC 环形缓冲区；
-- 回调内只做拷贝、增益、限幅、原子指标更新；
+- 回调内只使用预分配状态，禁止文件 I/O、锁和堆分配；
 - 输出 buffer、处理耗时、队列延迟、underrun、overflow、dropped frames 和 stream errors；
-- 不包含 F0、Pitch Correction、模型推理或 UI 改造。
+- 支持 Reference/Key/Scale 目标、流式 F0、自然修音和保留共振峰的实际移调；
+- 生成式重建、真实 Qu-16/SLX4 驱动闭环和物理 RTT 仍不在已验证范围内。
 
 ## 命令
 
@@ -29,7 +30,7 @@ cargo run -- simulate --seconds 5 `
   --max-correction-cents 45
 ```
 
-`correction.json` 只是目标音与修正量计划；当前 `processed.wav` 仍为旁路声音，尚未通过该控制轨做实际移调。
+`correction.json` 保存目标音与修正量计划；`processed.wav` 默认已经执行保留共振峰的实际移调。A/B 基准会做离线 RMS 匹配，避免把音量差误认为音质提升。需要只看控制轨时可加 `--bypass-transform`。
 
 P5 Key/Scale 约束：
 
@@ -74,10 +75,22 @@ cargo run --release -- run --arm `
   --seconds 10 --metrics artifacts\metrics.json
 ```
 
+实时修音必须再显式打开一次：
+
+```powershell
+cargo run --release -- run --arm --enable-pitch-correction `
+  --input "输入设备完整名称" --output "输出设备完整名称" `
+  --reference artifacts\reference-ideal\reference.json `
+  --correction-strength 0.75 --deadband-cents 8 `
+  --max-correction-cents 45 --gain-db -18
+```
+
+没有 Reference 时可使用 `--key C --scale major`；优先级仍为 `Reference > Key/Scale > Chromatic`。实时路径不做自动增益匹配，以免改变现场增益结构。
+
 开始前应关闭扬声器或在 Qu-16 上建立安全的独立 USB Return。没有 `--arm` 时程序拒绝启动。
 
 ## 指标边界
 
-`estimatedSoftwarePathMs` 是驱动回调帧数、无锁队列深度及回调处理时间的合计估算，不等于真实声学/电气 RTT。`roundTripMs` 在物理输出回接输入并完成相关性测量之前固定为 `null`。
+`estimatedSoftwarePathMs` 是驱动回调帧数、无锁队列深度、回调处理时间及移调器固定延迟的合计估算，不等于真实声学/电气 RTT。`transformAlgorithmicLatencyMs` 当前为 4 ms；`pitchAnalysisWindowMs` 当前为 42.67 ms，它表示控制判断所需历史窗口，不应误写成音频通路固定延迟。`roundTripMs` 在物理输出回接输入并完成相关性测量之前固定为 `null`。
 
 驱动可忽略或修正请求的 buffer。程序会记录 `bufferFramesRequested` 以及输入、输出各自的 `*BufferFramesConfigured`，并根据实际回调帧数计算 buffer 延迟。

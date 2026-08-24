@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-24",
+  "status": "SOFTWARE_A_B_PASSED",
+  "scope": "deterministic synthetic 48kHz two-pass reference test; no physical device loopback",
+  "transform": {
+    "algorithm": "LPC envelope with granular residual pitch shift",
+    "algorithmicLatencyFrames": 192,
+    "algorithmicLatencyMs": 4.0,
+    "formantPreservation": true
+  },
+  "input": {
+    "syntheticDetuneCents": 100.0,
+    "meanRawReferenceErrorCents": 98.474,
+    "rawRmsDbfs": -16.792149
+  },
+  "output": {
+    "meanPlannedCorrectionCents": 44.573,
+    "maximumPlannedCorrectionCents": 45.0,
+    "measuredPitchShiftCents": -51.097,
+    "meanProcessedReferenceErrorCents": 47.690,
+    "processedRmsDbfs": -16.792149,
+    "offlineLevelMatchGainDb": 0.671,
+    "invalidTransformFallbackSamples": 0
+  },
+  "performance": {
+    "meanProcessingMs": 0.03975,
+    "maximumProcessingMs": 0.1069,
+    "p99ProcessingMs": 0.0511,
+    "deadlineMisses": 0,
+    "droppedFrames": 0
+  },
+  "hardware": {
+    "physicalRoundTripMs": null,
+    "qu16UsbValidated": false,
+    "note": "Requires onsite electrical loopback and safe Qu-16 routing."
+  }
+}

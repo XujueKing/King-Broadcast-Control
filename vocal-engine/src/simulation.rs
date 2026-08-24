@@ -3,6 +3,7 @@ use crate::{
         scale_mask, CorrectionDecision, CorrectionPlanner, CorrectionPlannerConfig,
         CorrectionState, ScaleMode, TargetSource, CHROMATIC_MASK,
     },
+    formant::{FormantPreservingPitchShifter, FormantShifterConfig},
     pitch::{PitchObservation, PitchTracker, PitchTrackerConfig},
     reference::{ReferenceBuildConfig, ReferenceVocalMap},
     EngineError, INTERNAL_FORMAT, SAMPLE_RATE,
@@ -58,6 +59,7 @@ pub struct SimulationConfig {
     pub scale_mode: Option<ScaleMode>,
     pub reference_map: Option<PathBuf>,
     pub synthetic_detune_cents: f32,
+    pub audio_transform_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -76,6 +78,7 @@ impl Default for SimulationConfig {
             scale_mode: None,
             reference_map: None,
             synthetic_detune_cents: 0.0,
+            audio_transform_enabled: true,
         }
     }
 }
@@ -131,6 +134,17 @@ pub struct SimulationReport {
     pub reference_target_observations: u64,
     pub generated_reference_segments: u64,
     pub reference_input: Option<String>,
+    pub audio_transform: String,
+    pub formant_preservation: bool,
+    pub transform_algorithmic_latency_ms: f32,
+    pub transient_bypass_samples: u64,
+    pub invalid_transform_fallback_samples: u64,
+    pub level_match_gain_db: f32,
+    pub raw_rms_dbfs: f32,
+    pub processed_rms_dbfs: f32,
+    pub processed_f0_mean_hz: Option<f32>,
+    pub measured_pitch_shift_cents: Option<f32>,
+    pub mean_processed_reference_error_cents: Option<f32>,
     pub raw_wav: String,
     pub processed_wav: String,
     pub metrics_json: String,
@@ -184,6 +198,11 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         ..CorrectionPlannerConfig::default()
     })?;
     let mut correction_decisions = Vec::<CorrectionDecision>::new();
+    let mut pitch_shifter = FormantPreservingPitchShifter::new(FormantShifterConfig {
+        maximum_correction_cents: config.maximum_correction_cents,
+        ..FormantShifterConfig::default()
+    })?;
+    let mut current_correction_cents = 0.0_f32;
 
     let disconnect_start = raw.len() / 2;
     let disconnect_end = (disconnect_start + SAMPLE_RATE as usize / 4).min(raw.len());
@@ -199,6 +218,17 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
             && block_index * config.block_frames < disconnect_end
             && (block_index + 1) * config.block_frames > disconnect_start;
 
+        let pitch_input: &[f32] = if inject_disconnect { output } else { input };
+        if let Some(observation) = pitch_tracker.process_block(pitch_input) {
+            pitch_observations.push(observation);
+            let reference_target = loaded_reference
+                .as_ref()
+                .and_then(|map| map.target_at(observation.sample_position));
+            let decision = correction_planner.process_with_reference(observation, reference_target);
+            current_correction_cents = decision.applied_correction_cents;
+            correction_decisions.push(decision);
+        }
+
         if inject_underrun {
             underrun_events += 1;
             dropped_frames += input.len() as u64;
@@ -207,20 +237,15 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
                 disconnect_events = 1;
             }
             dropped_frames += input.len() as u64;
+        } else if config.audio_transform_enabled {
+            pitch_shifter.process_block(input, output, current_correction_cents);
+            for sample in output {
+                *sample = (*sample * gain).clamp(-1.0, 1.0);
+            }
         } else {
             for (destination, sample) in output.iter_mut().zip(input) {
                 *destination = (*sample * gain).clamp(-1.0, 1.0);
             }
-        }
-
-        let pitch_input: &[f32] = if inject_disconnect { output } else { input };
-        if let Some(observation) = pitch_tracker.process_block(pitch_input) {
-            pitch_observations.push(observation);
-            let reference_target = loaded_reference
-                .as_ref()
-                .and_then(|map| map.target_at(observation.sample_position));
-            correction_decisions
-                .push(correction_planner.process_with_reference(observation, reference_target));
         }
 
         if config.fault == SimulationFault::CpuOverload && block_index > 0 && block_index % 50 == 0
@@ -240,6 +265,13 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let pitch_path = config.output_dir.join("pitch.json");
     let correction_path = config.output_dir.join("correction.json");
     let generated_reference_path = config.output_dir.join("reference.json");
+    let raw_rms_before = rms(&raw);
+    let level_match_gain_db =
+        if config.audio_transform_enabled && config.fault == SimulationFault::None {
+            match_rms(raw_rms_before * gain, &mut processed)
+        } else {
+            0.0
+        };
     write_float32_wav(&raw_path, &raw)?;
     write_float32_wav(&processed_path, &processed)?;
 
@@ -248,6 +280,15 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let (voiced_observations, f0_mean_hz, f0_min_hz, f0_max_hz, confidence_mean) =
         pitch_summary(&pitch_observations);
     let correction = correction_summary(&correction_decisions);
+    let processed_pitch_observations = pitch_track(&processed)?;
+    let (_, processed_f0_mean_hz, _, _, _) = pitch_summary(&processed_pitch_observations);
+    let measured_pitch_shift_cents = f0_mean_hz
+        .zip(processed_f0_mean_hz)
+        .and_then(|(raw_hz, processed_hz)| crate::pitch::cents_between(processed_hz, raw_hz));
+    let mean_processed_reference_error_cents = loaded_reference
+        .as_ref()
+        .and_then(|reference| mean_reference_error(&processed_pitch_observations, reference));
+    let transform_metrics = pitch_shifter.metrics();
     let generated_reference = ReferenceVocalMap::build(
         source.clone(),
         config.block_frames,
@@ -318,6 +359,25 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         reference_target_observations: correction.reference_targets,
         generated_reference_segments: generated_reference.segments.len() as u64,
         reference_input,
+        audio_transform: if config.audio_transform_enabled {
+            "lpc_residual_granular_v1".into()
+        } else {
+            "bypass".into()
+        },
+        formant_preservation: config.audio_transform_enabled,
+        transform_algorithmic_latency_ms: if config.audio_transform_enabled {
+            FormantPreservingPitchShifter::algorithmic_latency_ms()
+        } else {
+            0.0
+        },
+        transient_bypass_samples: transform_metrics.transient_bypass_samples,
+        invalid_transform_fallback_samples: transform_metrics.invalid_fallback_samples,
+        level_match_gain_db,
+        raw_rms_dbfs: amplitude_to_dbfs(raw_rms_before),
+        processed_rms_dbfs: amplitude_to_dbfs(rms(&processed)),
+        processed_f0_mean_hz,
+        measured_pitch_shift_cents,
+        mean_processed_reference_error_cents,
         raw_wav: raw_path.display().to_string(),
         processed_wav: processed_path.display().to_string(),
         metrics_json: metrics_path.display().to_string(),
@@ -478,6 +538,60 @@ fn frames_to_ms(frames: usize) -> f64 {
 
 fn peak(samples: &[f32]) -> f32 {
     samples.iter().copied().map(f32::abs).fold(0.0, f32::max)
+}
+
+fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples
+        .iter()
+        .map(|sample| *sample as f64 * *sample as f64)
+        .sum::<f64>()
+        / samples.len() as f64)
+        .sqrt() as f32
+}
+
+fn amplitude_to_dbfs(amplitude: f32) -> f32 {
+    20.0 * amplitude.max(1.0e-12).log10()
+}
+
+fn match_rms(target_rms: f32, samples: &mut [f32]) -> f32 {
+    let current_rms = rms(samples);
+    if target_rms <= 1.0e-9 || current_rms <= 1.0e-9 {
+        return 0.0;
+    }
+    let gain =
+        (target_rms / current_rms).clamp(10.0_f32.powf(-3.0 / 20.0), 10.0_f32.powf(3.0 / 20.0));
+    for sample in samples {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
+    }
+    20.0 * gain.log10()
+}
+
+fn pitch_track(samples: &[f32]) -> Result<Vec<PitchObservation>, EngineError> {
+    let mut tracker = PitchTracker::new(PitchTrackerConfig::default())?;
+    Ok(samples
+        .chunks(128)
+        .filter_map(|block| tracker.process_block(block))
+        .collect())
+}
+
+fn mean_reference_error(
+    observations: &[PitchObservation],
+    reference: &ReferenceVocalMap,
+) -> Option<f32> {
+    let errors = observations
+        .iter()
+        .filter_map(|observation| {
+            observation
+                .f0_hz
+                .zip(reference.target_at(observation.sample_position))
+        })
+        .filter_map(|(measured, target)| crate::pitch::cents_between(measured, target.target_hz))
+        .map(f32::abs)
+        .collect::<Vec<_>>();
+    (!errors.is_empty()).then(|| errors.iter().sum::<f32>() / errors.len() as f32)
 }
 
 fn pitch_summary(
@@ -663,6 +777,10 @@ mod tests {
         .expect("reference guided singer pass should complete");
         assert!(singer.reference_target_observations > 0);
         assert!(singer.mean_absolute_cents_error > 70.0);
+        assert!(singer
+            .measured_pitch_shift_cents
+            .is_some_and(|cents| cents < -15.0));
+        assert_eq!(singer.invalid_transform_fallback_samples, 0);
         remove_evidence(&ideal_dir);
         remove_evidence(&singer_dir);
     }
