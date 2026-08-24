@@ -1,4 +1,4 @@
-# KING Vocal Engine — P9
+# KING Vocal Engine — P10
 
 这是与 Tauri/React UI、播放器和离线 AI Worker 分离的实时音频进程。当前范围严格限定为：
 
@@ -9,6 +9,7 @@
 - 支持 Reference/Key/Scale 目标、流式 F0、自然修音和保留共振峰的实际移调；
 - 支持固定状态的 HPF/Presence EQ、De-esser、Compressor 和 Limiter；
 - 输出可解释的 Pitch/Timing/Stability/Voicing/Energy/Confidence 与总质量分；
+- 根据质量分平滑混合延迟对齐的真人原声与修音分支；
 - 生成式重建、真实 Qu-16/SLX4 驱动闭环和物理 RTT 仍不在已验证范围内。
 
 ## 命令
@@ -21,7 +22,7 @@ cargo run -- simulate --seconds 5 --block-frames 128 `
   --enable-vocal-dynamics --output-dir artifacts\simulation-p8
 ```
 
-`simulate` 是不依赖 Qu-16 的虚拟 USB 试验台。默认生成可重复的类人声测试信号；也可以用 `--input-wav PATH` 重放真实演唱，输入必须为 48 kHz WAV。每次生成 `raw.wav`、`processed.wav`、`metrics.json`、流式 F0 轨迹 `pitch.json`、P4 修正控制轨 `correction.json` 和 P9 分项评分轨 `quality.json`。
+`simulate` 是不依赖 Qu-16 的虚拟 USB 试验台。默认生成可重复的类人声测试信号；也可以用 `--input-wav PATH` 重放真实演唱，输入必须为 48 kHz WAV。每次生成 `raw.wav`、`processed.wav`、`metrics.json`、流式 F0 轨迹 `pitch.json`、P4 修正控制轨 `correction.json`、P9 分项评分轨 `quality.json` 和 P10 混合轨 `blend.json`。
 
 P4 控制参数可在模拟时调整：
 
@@ -81,6 +82,7 @@ cargo run --release -- run --arm `
 
 ```powershell
 cargo run --release -- run --arm --enable-pitch-correction `
+  --enable-adaptive-blend `
   --input "输入设备完整名称" --output "输出设备完整名称" `
   --reference artifacts\reference-ideal\reference.json `
   --correction-strength 0.75 --deadband-cents 8 `
@@ -90,6 +92,8 @@ cargo run --release -- run --arm --enable-pitch-correction `
 没有 Reference 时可使用 `--key C --scale major`；优先级仍为 `Reference > Key/Scale > Chromatic`。实时路径不做自动增益匹配，以免改变现场增益结构。
 
 只监测演唱质量而不打开修音时可加 `--enable-vocal-quality`。打开实时修音时评分自动启用，最新总分与等级通过实时指标发布；详细逐 hop 分项只在模拟/录制证据中写入 JSON，不在音频线程写文件。
+
+P10 只有显式提供 `--enable-adaptive-blend` 才启用。原声分支会先延迟 192 帧，与修音器固定 4 ms 延迟对齐，再做线性等增益交叉混合：质量分高于 85 时保持真人原声；下降到 65、40 和 0 分时，目标修音占比分别连续增加到 35%、75% 和 100%。修音占比使用 45 ms 上升、180 ms 下降，避免等级边界抖动、突变和爆音。P10 只混合真人与 DSP 修音，不包含生成式重建。
 
 P8 默认参数为 80 Hz 高通、3.2 kHz 轻微存在感、5.8 kHz 齿音检测、-18 dBFS/3:1 压缩、2 dB makeup 和 -1 dBFS limiter。实时路径只有显式提供 `--enable-vocal-dynamics` 才启用；未启用时不经过这条处理链。参数预设和无爆音实时切换留到 P11。
 

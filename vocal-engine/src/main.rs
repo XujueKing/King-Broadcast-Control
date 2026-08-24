@@ -74,6 +74,9 @@ fn run_loopback(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         vocal_quality_enabled: arguments
             .iter()
             .any(|argument| argument == "--enable-vocal-quality"),
+        adaptive_vocal_blend_enabled: arguments
+            .iter()
+            .any(|argument| argument == "--enable-adaptive-blend"),
     };
     let seconds = number_argument::<u64>(arguments, "--seconds")?.unwrap_or(10);
     let metrics_path = string_argument(arguments, "--metrics").map(PathBuf::from);
@@ -137,6 +140,9 @@ fn run_simulator(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>>
         vocal_dynamics_enabled: arguments
             .iter()
             .any(|argument| argument == "--enable-vocal-dynamics"),
+        adaptive_vocal_blend_enabled: arguments
+            .iter()
+            .any(|argument| argument == "--enable-adaptive-blend"),
     };
     println!(
         "{}",
@@ -172,7 +178,7 @@ where
 
 fn print_help() {
     println!(
-        r#"KING Vocal Engine P9
+        r#"KING Vocal Engine P10
 
   devices
       枚举本机 48kHz float32 输入/输出能力
@@ -181,7 +187,7 @@ fn print_help() {
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。
 
   simulate [options]
-      虚拟 Qu-16 USB 试验台，生成 raw/processed WAV、metrics、pitch、correction、quality 和 reference JSON。
+      虚拟 Qu-16 USB 试验台，生成 raw/processed WAV、metrics、pitch、correction、quality、blend 和 reference JSON。
       --input-wav PATH             optional; 必须为 48kHz
       --output-dir PATH            default artifacts/simulation
       --seconds N                  default 5
@@ -195,6 +201,7 @@ fn print_help() {
       --synthetic-detune-cents N   test-only synthetic singer detune, range ±1200
       --bypass-transform           只生成控制轨，不实际修改 processed.wav
       --enable-vocal-dynamics      启用 EQ/De-esser/Compressor/Limiter
+      --enable-adaptive-blend      启用质量驱动的 dry/corrected 平滑混合
       --fault MODE                 none/underrun/disconnect/cpu-overload
 
   run --arm [options]
@@ -221,6 +228,8 @@ Options:
                         启用 EQ/De-esser/Compressor/Limiter
   --enable-vocal-quality
                         启用实时分项演唱评分；修音开启时自动启用
+  --enable-adaptive-blend
+                        启用 P10 平滑混合；必须同时启用 Pitch Correction
   --seconds N           default 10; 0 means until Ctrl+C
   --metrics PATH"#
     );

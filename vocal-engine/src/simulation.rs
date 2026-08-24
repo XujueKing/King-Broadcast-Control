@@ -1,4 +1,5 @@
 use crate::{
+    blend::{AdaptiveVocalBlendConfig, AdaptiveVocalBlender, FixedDryDelay, VocalBlendObservation},
     correction::{
         scale_mask, CorrectionDecision, CorrectionPlanner, CorrectionPlannerConfig,
         CorrectionState, ScaleMode, TargetSource, CHROMATIC_MASK,
@@ -63,6 +64,7 @@ pub struct SimulationConfig {
     pub synthetic_detune_cents: f32,
     pub audio_transform_enabled: bool,
     pub vocal_dynamics_enabled: bool,
+    pub adaptive_vocal_blend_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -83,6 +85,7 @@ impl Default for SimulationConfig {
             synthetic_detune_cents: 0.0,
             audio_transform_enabled: true,
             vocal_dynamics_enabled: false,
+            adaptive_vocal_blend_enabled: false,
         }
     }
 }
@@ -165,12 +168,21 @@ pub struct SimulationReport {
     pub quality_gentle_observations: u64,
     pub quality_strong_observations: u64,
     pub quality_repair_candidate_observations: u64,
+    pub adaptive_vocal_blend: String,
+    pub blend_observations: u64,
+    pub corrected_mix_mean: f32,
+    pub corrected_mix_minimum: f32,
+    pub corrected_mix_maximum: f32,
+    pub corrected_mix_latest: f32,
+    pub invalid_corrected_fallback_samples: u64,
+    pub maximum_blend_output_step: f32,
     pub raw_wav: String,
     pub processed_wav: String,
     pub metrics_json: String,
     pub pitch_json: String,
     pub correction_json: String,
     pub quality_json: String,
+    pub blend_json: String,
     pub generated_reference_json: String,
 }
 
@@ -228,6 +240,17 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         maximum_correction_cents: config.maximum_correction_cents,
         ..FormantShifterConfig::default()
     })?;
+    let mut adaptive_blender = config
+        .adaptive_vocal_blend_enabled
+        .then(|| AdaptiveVocalBlender::new(AdaptiveVocalBlendConfig::default()))
+        .transpose()?;
+    let mut dry_delay = config
+        .adaptive_vocal_blend_enabled
+        .then(|| FixedDryDelay::new(FormantPreservingPitchShifter::algorithmic_latency_frames()))
+        .transpose()?;
+    let mut blend_observations = Vec::<VocalBlendObservation>::new();
+    let mut corrected_scratch = vec![0.0_f32; config.block_frames];
+    let mut dry_scratch = vec![0.0_f32; config.block_frames];
     let mut current_correction_cents = 0.0_f32;
     let mut vocal_dynamics = config
         .vocal_dynamics_enabled
@@ -243,6 +266,7 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         .enumerate()
     {
         let started_at = Instant::now();
+        let mut latest_quality_for_blend = None;
         let inject_underrun =
             config.fault == SimulationFault::Underrun && block_index > 0 && block_index % 50 == 0;
         let inject_disconnect = config.fault == SimulationFault::Disconnect
@@ -255,11 +279,13 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
             let reference_target = loaded_reference
                 .as_ref()
                 .and_then(|map| map.target_at(observation.sample_position));
-            quality_observations.push(quality_scorer.process(
-                observation,
-                reference_target,
-                loaded_reference.is_some(),
-            ));
+            let quality =
+                quality_scorer.process(observation, reference_target, loaded_reference.is_some());
+            if let Some(blender) = &mut adaptive_blender {
+                blender.set_quality_score(quality.quality_score);
+            }
+            latest_quality_for_blend = Some(quality);
+            quality_observations.push(quality);
             let decision = correction_planner.process_with_reference(observation, reference_target);
             current_correction_cents = decision.applied_correction_cents;
             correction_decisions.push(decision);
@@ -274,7 +300,15 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
             }
             dropped_frames += input.len() as u64;
         } else if config.audio_transform_enabled {
-            pitch_shifter.process_block(input, output, current_correction_cents);
+            if let (Some(blender), Some(dry_delay)) = (&mut adaptive_blender, &mut dry_delay) {
+                let corrected = &mut corrected_scratch[..input.len()];
+                let dry = &mut dry_scratch[..input.len()];
+                pitch_shifter.process_block(input, corrected, current_correction_cents);
+                dry_delay.process_block(input, dry);
+                blender.process_block(dry, corrected, output);
+            } else {
+                pitch_shifter.process_block(input, output, current_correction_cents);
+            }
             for sample in output.iter_mut() {
                 *sample = (*sample * gain).clamp(-1.0, 1.0);
             }
@@ -282,6 +316,17 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
             for (destination, sample) in output.iter_mut().zip(input) {
                 *destination = (*sample * gain).clamp(-1.0, 1.0);
             }
+        }
+        if let (Some(quality), Some(blender)) = (latest_quality_for_blend, &adaptive_blender) {
+            blend_observations.push(VocalBlendObservation {
+                sample_position: quality.sample_position,
+                time_seconds: quality.time_seconds,
+                quality_score: quality.quality_score,
+                quality_class: quality.quality_class,
+                target_corrected_mix: blender.target_corrected_mix(),
+                corrected_mix: blender.corrected_mix(),
+                dry_mix: 1.0 - blender.corrected_mix(),
+            });
         }
         if let Some(dynamics) = &mut vocal_dynamics {
             let scratch = &mut dynamics_scratch[..output.len()];
@@ -306,6 +351,7 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let pitch_path = config.output_dir.join("pitch.json");
     let correction_path = config.output_dir.join("correction.json");
     let quality_path = config.output_dir.join("quality.json");
+    let blend_path = config.output_dir.join("blend.json");
     let generated_reference_path = config.output_dir.join("reference.json");
     let raw_rms_before = rms(&raw);
     let level_match_gain_db = if (config.audio_transform_enabled || config.vocal_dynamics_enabled)
@@ -342,6 +388,11 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         .map(VocalDynamicsProcessor::metrics)
         .unwrap_or_default();
     let quality = quality_summary(&quality_observations);
+    let blend = blend_summary(&blend_observations);
+    let blend_metrics = adaptive_blender
+        .as_ref()
+        .map(AdaptiveVocalBlender::metrics)
+        .unwrap_or_default();
     let generated_reference = ReferenceVocalMap::build(
         source.clone(),
         config.block_frames,
@@ -451,12 +502,25 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         quality_gentle_observations: quality.gentle,
         quality_strong_observations: quality.strong,
         quality_repair_candidate_observations: quality.repair_candidate,
+        adaptive_vocal_blend: if config.adaptive_vocal_blend_enabled {
+            "quality_driven_linear_aligned_v1".into()
+        } else {
+            "bypass".into()
+        },
+        blend_observations: blend_observations.len() as u64,
+        corrected_mix_mean: blend.mean,
+        corrected_mix_minimum: blend.minimum,
+        corrected_mix_maximum: blend.maximum,
+        corrected_mix_latest: blend.latest,
+        invalid_corrected_fallback_samples: blend_metrics.invalid_corrected_fallback_samples,
+        maximum_blend_output_step: blend_metrics.maximum_output_step,
         raw_wav: raw_path.display().to_string(),
         processed_wav: processed_path.display().to_string(),
         metrics_json: metrics_path.display().to_string(),
         pitch_json: pitch_path.display().to_string(),
         correction_json: correction_path.display().to_string(),
         quality_json: quality_path.display().to_string(),
+        blend_json: blend_path.display().to_string(),
         generated_reference_json: generated_reference_path.display().to_string(),
     };
     let encoded_pitch = serde_json::to_vec_pretty(&pitch_observations)
@@ -471,6 +535,10 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         .map_err(|error| EngineError(format!("无法编码 Vocal Quality 轨迹：{error}")))?;
     fs::write(&quality_path, encoded_quality)
         .map_err(|error| EngineError(format!("无法写入 Vocal Quality 轨迹：{error}")))?;
+    let encoded_blend = serde_json::to_vec_pretty(&blend_observations)
+        .map_err(|error| EngineError(format!("无法编码 Vocal Blend 轨迹：{error}")))?;
+    fs::write(&blend_path, encoded_blend)
+        .map_err(|error| EngineError(format!("无法写入 Vocal Blend 轨迹：{error}")))?;
     let encoded = serde_json::to_vec_pretty(&report)
         .map_err(|error| EngineError(format!("无法编码模拟指标：{error}")))?;
     fs::write(&metrics_path, encoded)
@@ -493,6 +561,11 @@ fn validate(config: &SimulationConfig) -> Result<(), EngineError> {
         || !(1.0..=200.0).contains(&config.maximum_correction_cents)
     {
         return Err(EngineError("模拟修音控制参数无效".into()));
+    }
+    if config.adaptive_vocal_blend_enabled && !config.audio_transform_enabled {
+        return Err(EngineError(
+            "Adaptive Vocal Blend 需要启用实际音频变调".into(),
+        ));
     }
     if config.key_tonic.is_some() != config.scale_mode.is_some()
         || config.key_tonic.is_some_and(|tonic| tonic > 11)
@@ -810,6 +883,38 @@ fn quality_summary(observations: &[VocalQualityObservation]) -> QualitySummary {
     summary
 }
 
+#[derive(Default)]
+struct BlendSummary {
+    mean: f32,
+    minimum: f32,
+    maximum: f32,
+    latest: f32,
+}
+
+fn blend_summary(observations: &[VocalBlendObservation]) -> BlendSummary {
+    if observations.is_empty() {
+        return BlendSummary::default();
+    }
+    BlendSummary {
+        mean: observations
+            .iter()
+            .map(|observation| observation.corrected_mix)
+            .sum::<f32>()
+            / observations.len() as f32,
+        minimum: observations
+            .iter()
+            .map(|observation| observation.corrected_mix)
+            .fold(1.0, f32::min),
+        maximum: observations
+            .iter()
+            .map(|observation| observation.corrected_mix)
+            .fold(0.0, f32::max),
+        latest: observations
+            .last()
+            .map_or(0.0, |observation| observation.corrected_mix),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,6 +931,7 @@ mod tests {
             "pitch.json",
             "correction.json",
             "quality.json",
+            "blend.json",
             "reference.json",
         ] {
             let _ = fs::remove_file(directory.join(name));
@@ -852,6 +958,7 @@ mod tests {
         assert!(output_dir.join("pitch.json").is_file());
         assert!(output_dir.join("correction.json").is_file());
         assert!(output_dir.join("quality.json").is_file());
+        assert!(output_dir.join("blend.json").is_file());
         assert!(output_dir.join("reference.json").is_file());
         assert!(report.voiced_observations > 0);
         assert_eq!(report.correction_observations, report.pitch_observations);
@@ -874,6 +981,21 @@ mod tests {
         assert!(report.underrun_events > 0);
         assert!(report.dropped_frames > 0);
         assert_eq!(report.evidence_class, "simulation_only");
+        remove_evidence(&output_dir);
+    }
+
+    #[test]
+    fn adaptive_blend_rejects_a_bypassed_transform() {
+        let output_dir = test_directory("invalid-p10-bypass");
+        remove_evidence(&output_dir);
+        let result = run_simulation(&SimulationConfig {
+            output_dir: output_dir.clone(),
+            duration_seconds: 0.05,
+            audio_transform_enabled: false,
+            adaptive_vocal_blend_enabled: true,
+            ..SimulationConfig::default()
+        });
+        assert!(result.is_err());
         remove_evidence(&output_dir);
     }
 
@@ -908,6 +1030,52 @@ mod tests {
         assert_eq!(singer.invalid_transform_fallback_samples, 0);
         remove_evidence(&ideal_dir);
         remove_evidence(&singer_dir);
+    }
+
+    #[test]
+    fn p10_blend_adds_more_corrected_voice_for_a_detuned_singer() {
+        let reference_dir = test_directory("p10-reference");
+        let ideal_dir = test_directory("p10-ideal");
+        let detuned_dir = test_directory("p10-detuned");
+        remove_evidence(&reference_dir);
+        remove_evidence(&ideal_dir);
+        remove_evidence(&detuned_dir);
+        run_simulation(&SimulationConfig {
+            output_dir: reference_dir.clone(),
+            duration_seconds: 1.0,
+            ..SimulationConfig::default()
+        })
+        .expect("P10 reference preparation should pass");
+        let reference = reference_dir.join("reference.json");
+        let ideal = run_simulation(&SimulationConfig {
+            output_dir: ideal_dir.clone(),
+            duration_seconds: 1.0,
+            reference_map: Some(reference.clone()),
+            adaptive_vocal_blend_enabled: true,
+            ..SimulationConfig::default()
+        })
+        .expect("P10 ideal pass should complete");
+        let detuned = run_simulation(&SimulationConfig {
+            output_dir: detuned_dir.clone(),
+            duration_seconds: 1.0,
+            reference_map: Some(reference),
+            synthetic_detune_cents: 100.0,
+            adaptive_vocal_blend_enabled: true,
+            ..SimulationConfig::default()
+        })
+        .expect("P10 detuned pass should complete");
+        assert_eq!(
+            ideal.adaptive_vocal_blend,
+            "quality_driven_linear_aligned_v1"
+        );
+        assert!(ideal.corrected_mix_mean < 0.20);
+        assert!(detuned.corrected_mix_mean > ideal.corrected_mix_mean + 0.20);
+        assert!(detuned.corrected_mix_maximum <= 1.0);
+        assert_eq!(detuned.invalid_corrected_fallback_samples, 0);
+        assert!(detuned.processed_peak <= 1.0);
+        remove_evidence(&reference_dir);
+        remove_evidence(&ideal_dir);
+        remove_evidence(&detuned_dir);
     }
 
     #[test]

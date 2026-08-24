@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-25",
+  "stage": "DETERMINISTIC_SOFTWARE_BLEND_PASSED",
+  "evidenceClass": "simulation_only",
+  "algorithm": "quality_driven_linear_aligned_v1",
+  "sampleRate": 48000,
+  "dryAlignmentFrames": 192,
+  "dryAlignmentMs": 4.0,
+  "correctionRiseMs": 45.0,
+  "correctionFallMs": 180.0,
+  "testsPassed": 43,
+  "cases": [
+    {
+      "name": "reference_aligned_ideal",
+      "durationSeconds": 5.0,
+      "qualityScoreMean": 83.47397,
+      "correctedMixMean": 0.038032845,
+      "correctedMixMaximum": 0.05112218,
+      "processedPeak": 0.3422991,
+      "processingP99Ms": 0.0469,
+      "deadlineMisses": 0,
+      "invalidCorrectedFallbackSamples": 0
+    },
+    {
+      "name": "reference_detuned_plus_100_cents",
+      "durationSeconds": 5.0,
+      "qualityScoreMean": 56.396427,
+      "correctedMixMean": 0.49968302,
+      "correctedMixMaximum": 0.53162855,
+      "processedPeak": 0.46397576,
+      "processingP99Ms": 0.0465,
+      "deadlineMisses": 0,
+      "invalidCorrectedFallbackSamples": 0
+    }
+  ],
+  "limits": [
+    "No human singer listening calibration",
+    "No Qu-16 USB physical loopback evidence",
+    "No Shure SLX4 microphone evidence",
+    "No monitor and PA end-to-end latency measurement",
+    "No generative vocal reconstruction"
+  ]
+}
