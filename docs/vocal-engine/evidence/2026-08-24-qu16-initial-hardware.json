@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-24",
+  "status": "USB_AUDIO_AND_TCP_CONTROL_VERIFIED",
+  "device": {
+    "model": "Allen & Heath Qu-16",
+    "usbVendorId": "22F0",
+    "usbProductId": "0006",
+    "driverVersion": "5.72.0.19425",
+    "driverProvider": "Allen & Heath",
+    "driverSigned": true,
+    "asioRegistered": [
+      "Qu ASIO Driver",
+      "Qu ASIO Driver 1"
+    ]
+  },
+  "wasapiEndpoints": {
+    "input": "Qu-16 Stereo Out (Qu-16)",
+    "outputs": [
+      "Qu-16 ST1 (Qu-16)",
+      "Qu-16 ST2 (Qu-16)",
+      "Qu-16 ST3 (Qu-16)"
+    ],
+    "sampleRate": 48000,
+    "bufferFrames": 480
+  },
+  "safeInputTest": {
+    "routing": "Qu-16 Stereo Out -> local Realtek headphones at -60 dB; no return to Qu-16",
+    "durationSeconds": 5,
+    "inputFrames": 237120,
+    "outputFrames": 240576,
+    "droppedFrames": 0,
+    "streamErrors": 0,
+    "underrunEvents": 7,
+    "status": "degraded",
+    "estimatedSoftwarePathMs": 41.8766,
+    "roundTripMs": null,
+    "interpretation": "USB input and driver stream are operational. Mixed Qu-16/Realtek WASAPI clocks are not a production route."
+  },
+  "network": {
+    "path": "computer Wi-Fi -> router -> Qu-16 Ethernet",
+    "computerInterfaceAlias": "WLAN",
+    "computerIpv4": "192.168.1.237/24",
+    "directEthernetAdapter": "Intel(R) Ethernet Controller I226-V",
+    "directEthernetStatus": "disconnected",
+    "qu16Ipv4": "192.168.1.60",
+    "tcpPort": 51325,
+    "tcp51325Open": true,
+    "readOnlyHandshake": {
+      "request": "F0 00 00 1A 50 11 01 00 7F 10 01 F7",
+      "reply": "F0 00 00 1A 50 11 01 00 00 11 01 01 5A F7",
+      "boxId": 1,
+      "modelValidated": "Qu-16",
+      "midiChannelZeroBased": 0,
+      "midiChannelDisplay": 1,
+      "firmware": "1.90",
+      "writesPerformed": false
+    }
+  },
+  "gates": {
+    "usbDeviceDetected": true,
+    "usbInputStreaming": true,
+    "sameDeviceAsioLoopback": false,
+    "networkControlConnected": true,
+    "physicalRoundTripMeasured": false,
+    "safeDryFallbackVerified": false,
+    "siteVerified": false
+  }
+}
