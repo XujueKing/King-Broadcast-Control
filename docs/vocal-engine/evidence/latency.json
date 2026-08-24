@@ -1,0 +1,13 @@
+{
+  "capturedAt": "2026-08-24",
+  "status": "NOT_MEASURED",
+  "roundTripMs": null,
+  "reason": "Qu-16 USB audio device and ASIO driver are not present; physical output-to-input loopback evidence is required",
+  "realtekTheoreticalBufferFloorMs": 20.0,
+  "realtekInputBufferFrames": 480,
+  "realtekOutputBufferFrames": 480,
+  "sampleRate": 48000,
+  "acceptanceGateMs": 15.0,
+  "gatePassed": false
+}
+

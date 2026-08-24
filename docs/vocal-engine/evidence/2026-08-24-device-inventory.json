@@ -1,0 +1,25 @@
+{
+  "capturedAt": "2026-08-24",
+  "host": "Wasapi",
+  "asioRegistry": "not found",
+  "qu16Detected": false,
+  "inputDevices": [
+    {
+      "name": "麦克风阵列 (Realtek(R) Audio)",
+      "isDefault": true,
+      "supports48kFloat32": true,
+      "channels48kFloat32": [2],
+      "bufferSize": "480-480 frames"
+    }
+  ],
+  "outputDevices": [
+    {
+      "name": "扬声器 (Realtek(R) Audio)",
+      "isDefault": true,
+      "supports48kFloat32": true,
+      "channels48kFloat32": [2],
+      "bufferSize": "480-480 frames"
+    }
+  ]
+}
+

@@ -1,0 +1,11 @@
+{
+  "sampleRate": 48000,
+  "blockFrames": 128,
+  "blocks": 100000,
+  "transferredFrames": 12800000,
+  "elapsedMs": 44.9649,
+  "meanProcessingMsPerBlock": 0.000449649,
+  "realtimeBudgetPercent": 0.0168618375,
+  "scope": "synthetic lock-free transfer core only; excludes driver, USB and physical RTT"
+}
+
