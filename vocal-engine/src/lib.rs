@@ -18,6 +18,7 @@ use std::{
 };
 
 pub mod correction;
+pub mod dynamics;
 pub mod formant;
 pub mod pitch;
 pub mod reference;
@@ -56,6 +57,7 @@ pub struct LoopbackConfig {
     pub key_tonic: Option<u8>,
     pub scale_mode: Option<correction::ScaleMode>,
     pub reference_map: Option<PathBuf>,
+    pub vocal_dynamics_enabled: bool,
 }
 
 impl Default for LoopbackConfig {
@@ -76,6 +78,7 @@ impl Default for LoopbackConfig {
             key_tonic: None,
             scale_mode: None,
             reference_map: None,
+            vocal_dynamics_enabled: false,
         }
     }
 }
@@ -122,6 +125,7 @@ pub struct LatencyMetrics {
     pub pitch_correction_enabled: bool,
     pub transform_algorithmic_latency_ms: f64,
     pub pitch_analysis_window_ms: f64,
+    pub vocal_dynamics_enabled: bool,
     pub round_trip_ms: Option<f64>,
     pub round_trip_evidence: String,
     pub xruns: u64,
@@ -159,17 +163,20 @@ struct EngineDescriptor {
     pitch_correction_enabled: bool,
     transform_algorithmic_latency_ms: f64,
     pitch_analysis_window_ms: f64,
+    vocal_dynamics_enabled: bool,
 }
 
-struct LivePitchProcessor {
+struct LiveVocalProcessor {
     tracker: pitch::PitchTracker,
     planner: correction::CorrectionPlanner,
     shifter: formant::FormantPreservingPitchShifter,
     reference: Option<reference::ReferenceVocalMap>,
     correction_cents: f32,
+    pitch_enabled: bool,
+    dynamics: Option<dynamics::VocalDynamicsProcessor>,
 }
 
-impl LivePitchProcessor {
+impl LiveVocalProcessor {
     fn new(config: &LoopbackConfig) -> Result<Self, EngineError> {
         if config.key_tonic.is_some() != config.scale_mode.is_some() {
             return Err(EngineError("--key 与 --scale 必须同时提供".into()));
@@ -184,11 +191,15 @@ impl LivePitchProcessor {
         if let (Some(tonic), Some(mode)) = (config.key_tonic, config.scale_mode) {
             planner_config.allowed_pitch_classes = correction::scale_mask(tonic, mode);
         }
-        let reference = config
-            .reference_map
-            .as_deref()
-            .map(reference::ReferenceVocalMap::load)
-            .transpose()?;
+        let reference = if config.pitch_correction_enabled {
+            config
+                .reference_map
+                .as_deref()
+                .map(reference::ReferenceVocalMap::load)
+                .transpose()?
+        } else {
+            None
+        };
         Ok(Self {
             tracker: pitch::PitchTracker::new(pitch_config)?,
             planner: correction::CorrectionPlanner::new(planner_config)?,
@@ -198,25 +209,40 @@ impl LivePitchProcessor {
             })?,
             reference,
             correction_cents: 0.0,
+            pitch_enabled: config.pitch_correction_enabled,
+            dynamics: config
+                .vocal_dynamics_enabled
+                .then(|| {
+                    dynamics::VocalDynamicsProcessor::new(dynamics::VocalDynamicsConfig::default())
+                })
+                .transpose()?,
         })
     }
 
     fn process_sample(&mut self, sample: f32) -> f32 {
         let input = [sample];
-        if let Some(observation) = self.tracker.process_block(&input) {
-            let target = self
-                .reference
-                .as_ref()
-                .and_then(|map| map.target_at(observation.sample_position));
-            self.correction_cents = self
-                .planner
-                .process_with_reference(observation, target)
-                .applied_correction_cents;
+        if self.pitch_enabled {
+            if let Some(observation) = self.tracker.process_block(&input) {
+                let target = self
+                    .reference
+                    .as_ref()
+                    .and_then(|map| map.target_at(observation.sample_position));
+                self.correction_cents = self
+                    .planner
+                    .process_with_reference(observation, target)
+                    .applied_correction_cents;
+            }
         }
-        let mut output = [0.0];
-        self.shifter
-            .process_block(&input, &mut output, self.correction_cents);
-        output[0]
+        let mut shifted = input;
+        if self.pitch_enabled {
+            self.shifter
+                .process_block(&input, &mut shifted, self.correction_cents);
+        }
+        let mut processed = shifted;
+        if let Some(dynamics) = &mut self.dynamics {
+            dynamics.process_block(&shifted, &mut processed);
+        }
+        processed[0]
     }
 }
 
@@ -410,9 +436,8 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
             .map_err(|_| EngineError("无法预填充实时环形缓冲区".into()))?;
     }
 
-    let mut live_pitch = config
-        .pitch_correction_enabled
-        .then(|| LivePitchProcessor::new(config))
+    let mut live_pitch = (config.pitch_correction_enabled || config.vocal_dynamics_enabled)
+        .then(|| LiveVocalProcessor::new(config))
         .transpose()?;
 
     let input_metrics = Arc::clone(&metrics);
@@ -544,6 +569,7 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
             } else {
                 0.0
             },
+            vocal_dynamics_enabled: config.vocal_dynamics_enabled,
         },
     })
 }
@@ -677,6 +703,7 @@ impl RunningLoopback {
             pitch_correction_enabled: self.descriptor.pitch_correction_enabled,
             transform_algorithmic_latency_ms: self.descriptor.transform_algorithmic_latency_ms,
             pitch_analysis_window_ms: self.descriptor.pitch_analysis_window_ms,
+            vocal_dynamics_enabled: self.descriptor.vocal_dynamics_enabled,
             round_trip_ms: None,
             round_trip_evidence:
                 "not measured: physical output-to-input loopback evidence required".into(),
@@ -817,7 +844,7 @@ mod tests {
             scale_mode: None,
             ..LoopbackConfig::default()
         };
-        assert!(LivePitchProcessor::new(&config).is_err());
+        assert!(LiveVocalProcessor::new(&config).is_err());
     }
 
     #[test]
@@ -826,7 +853,7 @@ mod tests {
             pitch_correction_enabled: true,
             ..LoopbackConfig::default()
         };
-        let mut processor = LivePitchProcessor::new(&config).expect("valid live processor");
+        let mut processor = LiveVocalProcessor::new(&config).expect("valid live processor");
         for _ in 0..4096 {
             assert!(processor.process_sample(0.0).is_finite());
         }

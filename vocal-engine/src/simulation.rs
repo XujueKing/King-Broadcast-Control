@@ -3,6 +3,7 @@ use crate::{
         scale_mask, CorrectionDecision, CorrectionPlanner, CorrectionPlannerConfig,
         CorrectionState, ScaleMode, TargetSource, CHROMATIC_MASK,
     },
+    dynamics::{VocalDynamicsConfig, VocalDynamicsProcessor},
     formant::{FormantPreservingPitchShifter, FormantShifterConfig},
     pitch::{PitchObservation, PitchTracker, PitchTrackerConfig},
     reference::{ReferenceBuildConfig, ReferenceVocalMap},
@@ -60,6 +61,7 @@ pub struct SimulationConfig {
     pub reference_map: Option<PathBuf>,
     pub synthetic_detune_cents: f32,
     pub audio_transform_enabled: bool,
+    pub vocal_dynamics_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -79,6 +81,7 @@ impl Default for SimulationConfig {
             reference_map: None,
             synthetic_detune_cents: 0.0,
             audio_transform_enabled: true,
+            vocal_dynamics_enabled: false,
         }
     }
 }
@@ -145,6 +148,14 @@ pub struct SimulationReport {
     pub processed_f0_mean_hz: Option<f32>,
     pub measured_pitch_shift_cents: Option<f32>,
     pub mean_processed_reference_error_cents: Option<f32>,
+    pub vocal_dynamics: String,
+    pub dynamics_deesser_active_samples: u64,
+    pub dynamics_compressor_active_samples: u64,
+    pub dynamics_limiter_active_samples: u64,
+    pub maximum_deesser_reduction_db: f32,
+    pub maximum_compressor_reduction_db: f32,
+    pub maximum_limiter_reduction_db: f32,
+    pub invalid_dynamics_fallback_samples: u64,
     pub raw_wav: String,
     pub processed_wav: String,
     pub metrics_json: String,
@@ -203,6 +214,11 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         ..FormantShifterConfig::default()
     })?;
     let mut current_correction_cents = 0.0_f32;
+    let mut vocal_dynamics = config
+        .vocal_dynamics_enabled
+        .then(|| VocalDynamicsProcessor::new(VocalDynamicsConfig::default()))
+        .transpose()?;
+    let mut dynamics_scratch = vec![0.0_f32; config.block_frames];
 
     let disconnect_start = raw.len() / 2;
     let disconnect_end = (disconnect_start + SAMPLE_RATE as usize / 4).min(raw.len());
@@ -239,13 +255,18 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
             dropped_frames += input.len() as u64;
         } else if config.audio_transform_enabled {
             pitch_shifter.process_block(input, output, current_correction_cents);
-            for sample in output {
+            for sample in output.iter_mut() {
                 *sample = (*sample * gain).clamp(-1.0, 1.0);
             }
         } else {
             for (destination, sample) in output.iter_mut().zip(input) {
                 *destination = (*sample * gain).clamp(-1.0, 1.0);
             }
+        }
+        if let Some(dynamics) = &mut vocal_dynamics {
+            let scratch = &mut dynamics_scratch[..output.len()];
+            dynamics.process_block(output, scratch);
+            output.copy_from_slice(scratch);
         }
 
         if config.fault == SimulationFault::CpuOverload && block_index > 0 && block_index % 50 == 0
@@ -266,12 +287,18 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let correction_path = config.output_dir.join("correction.json");
     let generated_reference_path = config.output_dir.join("reference.json");
     let raw_rms_before = rms(&raw);
-    let level_match_gain_db =
-        if config.audio_transform_enabled && config.fault == SimulationFault::None {
-            match_rms(raw_rms_before * gain, &mut processed)
+    let level_match_gain_db = if (config.audio_transform_enabled || config.vocal_dynamics_enabled)
+        && config.fault == SimulationFault::None
+    {
+        let maximum = if config.vocal_dynamics_enabled {
+            10.0_f32.powf(-1.0 / 20.0)
         } else {
-            0.0
+            1.0
         };
+        match_rms(raw_rms_before * gain, &mut processed, maximum)
+    } else {
+        0.0
+    };
     write_float32_wav(&raw_path, &raw)?;
     write_float32_wav(&processed_path, &processed)?;
 
@@ -289,6 +316,10 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         .as_ref()
         .and_then(|reference| mean_reference_error(&processed_pitch_observations, reference));
     let transform_metrics = pitch_shifter.metrics();
+    let dynamics_metrics = vocal_dynamics
+        .as_ref()
+        .map(VocalDynamicsProcessor::metrics)
+        .unwrap_or_default();
     let generated_reference = ReferenceVocalMap::build(
         source.clone(),
         config.block_frames,
@@ -378,6 +409,18 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         processed_f0_mean_hz,
         measured_pitch_shift_cents,
         mean_processed_reference_error_cents,
+        vocal_dynamics: if config.vocal_dynamics_enabled {
+            "hpf_presence_deesser_compressor_limiter_v1".into()
+        } else {
+            "bypass".into()
+        },
+        dynamics_deesser_active_samples: dynamics_metrics.deesser_active_samples,
+        dynamics_compressor_active_samples: dynamics_metrics.compressor_active_samples,
+        dynamics_limiter_active_samples: dynamics_metrics.limiter_active_samples,
+        maximum_deesser_reduction_db: dynamics_metrics.maximum_deesser_reduction_db,
+        maximum_compressor_reduction_db: dynamics_metrics.maximum_compressor_reduction_db,
+        maximum_limiter_reduction_db: dynamics_metrics.maximum_limiter_reduction_db,
+        invalid_dynamics_fallback_samples: dynamics_metrics.invalid_fallback_samples,
         raw_wav: raw_path.display().to_string(),
         processed_wav: processed_path.display().to_string(),
         metrics_json: metrics_path.display().to_string(),
@@ -556,15 +599,17 @@ fn amplitude_to_dbfs(amplitude: f32) -> f32 {
     20.0 * amplitude.max(1.0e-12).log10()
 }
 
-fn match_rms(target_rms: f32, samples: &mut [f32]) -> f32 {
+fn match_rms(target_rms: f32, samples: &mut [f32], maximum: f32) -> f32 {
     let current_rms = rms(samples);
     if target_rms <= 1.0e-9 || current_rms <= 1.0e-9 {
         return 0.0;
     }
-    let gain =
+    let requested_gain =
         (target_rms / current_rms).clamp(10.0_f32.powf(-3.0 / 20.0), 10.0_f32.powf(3.0 / 20.0));
+    let peak_limited_gain = maximum / peak(samples).max(1.0e-12);
+    let gain = requested_gain.min(peak_limited_gain);
     for sample in samples {
-        *sample = (*sample * gain).clamp(-1.0, 1.0);
+        *sample = (*sample * gain).clamp(-maximum, maximum);
     }
     20.0 * gain.log10()
 }
@@ -783,5 +828,27 @@ mod tests {
         assert_eq!(singer.invalid_transform_fallback_samples, 0);
         remove_evidence(&ideal_dir);
         remove_evidence(&singer_dir);
+    }
+
+    #[test]
+    fn p8_dynamics_runs_inside_the_replayable_signal_path() {
+        let output_dir = test_directory("p8-dynamics");
+        remove_evidence(&output_dir);
+        let report = run_simulation(&SimulationConfig {
+            output_dir: output_dir.clone(),
+            duration_seconds: 0.25,
+            audio_transform_enabled: false,
+            vocal_dynamics_enabled: true,
+            ..SimulationConfig::default()
+        })
+        .expect("P8 dynamics simulation should pass");
+        assert_eq!(
+            report.vocal_dynamics,
+            "hpf_presence_deesser_compressor_limiter_v1"
+        );
+        assert!(report.dynamics_compressor_active_samples > 0);
+        assert_eq!(report.invalid_dynamics_fallback_samples, 0);
+        assert!(report.processed_peak <= 10.0_f32.powf(-1.0 / 20.0) + 1.0e-6);
+        remove_evidence(&output_dir);
     }
 }

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-24",
+  "status": "SOFTWARE_SIGNAL_TEST_PASSED",
+  "scope": "deterministic 48kHz full-chain simulation and unit signal tests",
+  "chain": [
+    "high_pass_80hz",
+    "presence_eq_3200hz_plus_1_5db",
+    "split_band_deesser_5800hz",
+    "compressor_minus_18dbfs_3_to_1",
+    "limiter_minus_1dbfs"
+  ],
+  "realtime": {
+    "callbackHeapAllocation": false,
+    "callbackFileIo": false,
+    "callbackLocks": false,
+    "additionalFixedLatencyMs": 0.0
+  },
+  "fullChainSimulation": {
+    "frames": 240000,
+    "blocks": 1875,
+    "processingMeanMs": 0.0429116,
+    "processingP99Ms": 0.0553,
+    "processingMaximumMs": 0.1308,
+    "deadlineMisses": 0,
+    "droppedFrames": 0,
+    "nanSamples": 0,
+    "maximumCompressorReductionDb": 4.4049,
+    "measuredPitchShiftCents": -51.9636,
+    "rawRmsDbfs": -17.0306,
+    "processedRmsDbfs": -17.0306
+  },
+  "signalTests": {
+    "highPass": "passed",
+    "deesser": "passed",
+    "compressor": "passed",
+    "limiterCeiling": "passed",
+    "invalidInputFallback": "passed"
+  },
+  "hardware": {
+    "physicalRoundTripMs": null,
+    "qu16UsbValidated": false,
+    "onsiteVocalAbValidated": false
+  }
+}

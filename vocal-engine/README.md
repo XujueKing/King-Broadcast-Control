@@ -1,4 +1,4 @@
-# KING Vocal Engine — P7
+# KING Vocal Engine — P8
 
 这是与 Tauri/React UI、播放器和离线 AI Worker 分离的实时音频进程。当前范围严格限定为：
 
@@ -7,6 +7,7 @@
 - 回调内只使用预分配状态，禁止文件 I/O、锁和堆分配；
 - 输出 buffer、处理耗时、队列延迟、underrun、overflow、dropped frames 和 stream errors；
 - 支持 Reference/Key/Scale 目标、流式 F0、自然修音和保留共振峰的实际移调；
+- 支持固定状态的 HPF/Presence EQ、De-esser、Compressor 和 Limiter；
 - 生成式重建、真实 Qu-16/SLX4 驱动闭环和物理 RTT 仍不在已验证范围内。
 
 ## 命令
@@ -16,7 +17,7 @@ cd vocal-engine
 cargo run -- devices
 cargo run -- bench --block-frames 128 --blocks 100000
 cargo run -- simulate --seconds 5 --block-frames 128 `
-  --output-dir artifacts\simulation-baseline
+  --enable-vocal-dynamics --output-dir artifacts\simulation-p8
 ```
 
 `simulate` 是不依赖 Qu-16 的虚拟 USB 试验台。默认生成可重复的类人声测试信号；也可以用 `--input-wav PATH` 重放真实演唱，输入必须为 48 kHz WAV。每次生成 `raw.wav`、`processed.wav`、`metrics.json`、流式 F0 轨迹 `pitch.json` 和 P4 修正控制轨 `correction.json`。
@@ -82,10 +83,12 @@ cargo run --release -- run --arm --enable-pitch-correction `
   --input "输入设备完整名称" --output "输出设备完整名称" `
   --reference artifacts\reference-ideal\reference.json `
   --correction-strength 0.75 --deadband-cents 8 `
-  --max-correction-cents 45 --gain-db -18
+  --max-correction-cents 45 --enable-vocal-dynamics --gain-db -18
 ```
 
 没有 Reference 时可使用 `--key C --scale major`；优先级仍为 `Reference > Key/Scale > Chromatic`。实时路径不做自动增益匹配，以免改变现场增益结构。
+
+P8 默认参数为 80 Hz 高通、3.2 kHz 轻微存在感、5.8 kHz 齿音检测、-18 dBFS/3:1 压缩、2 dB makeup 和 -1 dBFS limiter。实时路径只有显式提供 `--enable-vocal-dynamics` 才启用；未启用时不经过这条处理链。参数预设和无爆音实时切换留到 P11。
 
 开始前应关闭扬声器或在 Qu-16 上建立安全的独立 USB Return。没有 `--arm` 时程序拒绝启动。
 

@@ -68,6 +68,9 @@ fn run_loopback(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         key_tonic,
         scale_mode,
         reference_map: string_argument(arguments, "--reference").map(PathBuf::from),
+        vocal_dynamics_enabled: arguments
+            .iter()
+            .any(|argument| argument == "--enable-vocal-dynamics"),
     };
     let seconds = number_argument::<u64>(arguments, "--seconds")?.unwrap_or(10);
     let metrics_path = string_argument(arguments, "--metrics").map(PathBuf::from);
@@ -128,6 +131,9 @@ fn run_simulator(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>>
         audio_transform_enabled: !arguments
             .iter()
             .any(|argument| argument == "--bypass-transform"),
+        vocal_dynamics_enabled: arguments
+            .iter()
+            .any(|argument| argument == "--enable-vocal-dynamics"),
     };
     println!(
         "{}",
@@ -185,6 +191,7 @@ fn print_help() {
       --reference PATH             optional reference.json from a prior preparation run
       --synthetic-detune-cents N   test-only synthetic singer detune, range ±1200
       --bypass-transform           只生成控制轨，不实际修改 processed.wav
+      --enable-vocal-dynamics      启用 EQ/De-esser/Compressor/Limiter
       --fault MODE                 none/underrun/disconnect/cpu-overload
 
   run --arm [options]
@@ -207,6 +214,8 @@ Options:
   --correction-strength N
   --deadband-cents N
   --max-correction-cents N
+  --enable-vocal-dynamics
+                        启用 EQ/De-esser/Compressor/Limiter
   --seconds N           default 10; 0 means until Ctrl+C
   --metrics PATH"#
     );
