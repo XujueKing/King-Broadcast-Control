@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod correction;
 pub mod pitch;
 pub mod simulation;
 

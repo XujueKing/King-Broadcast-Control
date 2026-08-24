@@ -18,7 +18,18 @@ cargo run -- simulate --seconds 5 --block-frames 128 `
   --output-dir artifacts\simulation-baseline
 ```
 
-`simulate` 是不依赖 Qu-16 的虚拟 USB 试验台。默认生成可重复的类人声测试信号；也可以用 `--input-wav PATH` 重放真实演唱，输入必须为 48 kHz WAV。每次生成 `raw.wav`、`processed.wav`、`metrics.json` 和流式 F0 轨迹 `pitch.json`。
+`simulate` 是不依赖 Qu-16 的虚拟 USB 试验台。默认生成可重复的类人声测试信号；也可以用 `--input-wav PATH` 重放真实演唱，输入必须为 48 kHz WAV。每次生成 `raw.wav`、`processed.wav`、`metrics.json`、流式 F0 轨迹 `pitch.json` 和 P4 修正控制轨 `correction.json`。
+
+P4 控制参数可在模拟时调整：
+
+```powershell
+cargo run -- simulate --seconds 5 `
+  --correction-strength 0.75 `
+  --deadband-cents 8 `
+  --max-correction-cents 45
+```
+
+`correction.json` 只是目标音与修正量计划；当前 `processed.wav` 仍为旁路声音，尚未通过该控制轨做实际移调。
 
 故障模式用于提前开发 fallback：
 

@@ -1,4 +1,5 @@
 use crate::{
+    correction::{CorrectionDecision, CorrectionPlanner, CorrectionPlannerConfig, CorrectionState},
     pitch::{PitchObservation, PitchTracker, PitchTrackerConfig},
     EngineError, INTERNAL_FORMAT, SAMPLE_RATE,
 };
@@ -46,6 +47,9 @@ pub struct SimulationConfig {
     pub block_frames: usize,
     pub gain_db: f32,
     pub fault: SimulationFault,
+    pub correction_strength: f32,
+    pub correction_deadband_cents: f32,
+    pub maximum_correction_cents: f32,
 }
 
 impl Default for SimulationConfig {
@@ -57,6 +61,9 @@ impl Default for SimulationConfig {
             block_frames: 128,
             gain_db: 0.0,
             fault: SimulationFault::None,
+            correction_strength: 0.75,
+            correction_deadband_cents: 8.0,
+            maximum_correction_cents: 45.0,
         }
     }
 }
@@ -100,10 +107,18 @@ pub struct SimulationReport {
     pub f0_min_hz: Option<f32>,
     pub f0_max_hz: Option<f32>,
     pub confidence_mean: f32,
+    pub correction_observations: u64,
+    pub active_correction_observations: u64,
+    pub deadband_observations: u64,
+    pub bypassed_correction_observations: u64,
+    pub mean_absolute_cents_error: f32,
+    pub mean_absolute_applied_cents: f32,
+    pub maximum_absolute_applied_cents: f32,
     pub raw_wav: String,
     pub processed_wav: String,
     pub metrics_json: String,
     pub pitch_json: String,
+    pub correction_json: String,
 }
 
 pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, EngineError> {
@@ -130,6 +145,14 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let mut disconnect_events = 0_u64;
     let mut pitch_tracker = PitchTracker::new(PitchTrackerConfig::default())?;
     let mut pitch_observations = Vec::<PitchObservation>::new();
+    let mut correction_planner = CorrectionPlanner::new(CorrectionPlannerConfig {
+        hop_frames: config.block_frames,
+        strength: config.correction_strength,
+        deadband_cents: config.correction_deadband_cents,
+        maximum_correction_cents: config.maximum_correction_cents,
+        ..CorrectionPlannerConfig::default()
+    })?;
+    let mut correction_decisions = Vec::<CorrectionDecision>::new();
 
     let disconnect_start = raw.len() / 2;
     let disconnect_end = (disconnect_start + SAMPLE_RATE as usize / 4).min(raw.len());
@@ -162,6 +185,7 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         let pitch_input: &[f32] = if inject_disconnect { output } else { input };
         if let Some(observation) = pitch_tracker.process_block(pitch_input) {
             pitch_observations.push(observation);
+            correction_decisions.push(correction_planner.process(observation));
         }
 
         if config.fault == SimulationFault::CpuOverload && block_index > 0 && block_index % 50 == 0
@@ -179,6 +203,7 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
     let processed_path = config.output_dir.join("processed.wav");
     let metrics_path = config.output_dir.join("metrics.json");
     let pitch_path = config.output_dir.join("pitch.json");
+    let correction_path = config.output_dir.join("correction.json");
     write_float32_wav(&raw_path, &raw)?;
     write_float32_wav(&processed_path, &processed)?;
 
@@ -186,6 +211,7 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         processing_summary(&mut processing_ms);
     let (voiced_observations, f0_mean_hz, f0_min_hz, f0_max_hz, confidence_mean) =
         pitch_summary(&pitch_observations);
+    let correction = correction_summary(&correction_decisions);
     let report = SimulationReport {
         schema_version: 1,
         stage: if config.fault == SimulationFault::None && deadline_misses == 0 {
@@ -237,15 +263,27 @@ pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, Eng
         f0_min_hz,
         f0_max_hz,
         confidence_mean,
+        correction_observations: correction_decisions.len() as u64,
+        active_correction_observations: correction.active,
+        deadband_observations: correction.deadband,
+        bypassed_correction_observations: correction.bypassed,
+        mean_absolute_cents_error: correction.mean_absolute_error,
+        mean_absolute_applied_cents: correction.mean_absolute_applied,
+        maximum_absolute_applied_cents: correction.maximum_absolute_applied,
         raw_wav: raw_path.display().to_string(),
         processed_wav: processed_path.display().to_string(),
         metrics_json: metrics_path.display().to_string(),
         pitch_json: pitch_path.display().to_string(),
+        correction_json: correction_path.display().to_string(),
     };
     let encoded_pitch = serde_json::to_vec_pretty(&pitch_observations)
         .map_err(|error| EngineError(format!("无法编码 F0 轨迹：{error}")))?;
     fs::write(&pitch_path, encoded_pitch)
         .map_err(|error| EngineError(format!("无法写入 F0 轨迹：{error}")))?;
+    let encoded_correction = serde_json::to_vec_pretty(&correction_decisions)
+        .map_err(|error| EngineError(format!("无法编码修正控制轨：{error}")))?;
+    fs::write(&correction_path, encoded_correction)
+        .map_err(|error| EngineError(format!("无法写入修正控制轨：{error}")))?;
     let encoded = serde_json::to_vec_pretty(&report)
         .map_err(|error| EngineError(format!("无法编码模拟指标：{error}")))?;
     fs::write(&metrics_path, encoded)
@@ -262,6 +300,12 @@ fn validate(config: &SimulationConfig) -> Result<(), EngineError> {
     }
     if !config.gain_db.is_finite() || !(-60.0..=12.0).contains(&config.gain_db) {
         return Err(EngineError("gain_db 必须在 -60..=12 dB".into()));
+    }
+    if !(0.0..=1.0).contains(&config.correction_strength)
+        || !(0.0..=50.0).contains(&config.correction_deadband_cents)
+        || !(1.0..=200.0).contains(&config.maximum_correction_cents)
+    {
+        return Err(EngineError("模拟修音控制参数无效".into()));
     }
     Ok(())
 }
@@ -401,6 +445,58 @@ fn pitch_summary(
     (voiced.len() as u64, Some(mean), min, max, confidence)
 }
 
+struct CorrectionSummary {
+    active: u64,
+    deadband: u64,
+    bypassed: u64,
+    mean_absolute_error: f32,
+    mean_absolute_applied: f32,
+    maximum_absolute_applied: f32,
+}
+
+fn correction_summary(decisions: &[CorrectionDecision]) -> CorrectionSummary {
+    let active = decisions
+        .iter()
+        .filter(|decision| decision.state == CorrectionState::Active)
+        .count() as u64;
+    let deadband = decisions
+        .iter()
+        .filter(|decision| decision.state == CorrectionState::Deadband)
+        .count() as u64;
+    let bypassed = decisions.len() as u64 - active - deadband;
+    let errors = decisions
+        .iter()
+        .filter_map(|decision| decision.cents_error)
+        .map(f32::abs)
+        .collect::<Vec<_>>();
+    let mean_absolute_error = if errors.is_empty() {
+        0.0
+    } else {
+        errors.iter().sum::<f32>() / errors.len() as f32
+    };
+    let mean_absolute_applied = if decisions.is_empty() {
+        0.0
+    } else {
+        decisions
+            .iter()
+            .map(|decision| decision.applied_correction_cents.abs())
+            .sum::<f32>()
+            / decisions.len() as f32
+    };
+    let maximum_absolute_applied = decisions
+        .iter()
+        .map(|decision| decision.applied_correction_cents.abs())
+        .fold(0.0, f32::max);
+    CorrectionSummary {
+        active,
+        deadband,
+        bypassed,
+        mean_absolute_error,
+        mean_absolute_applied,
+        maximum_absolute_applied,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,7 +506,13 @@ mod tests {
     }
 
     fn remove_evidence(directory: &Path) {
-        for name in ["raw.wav", "processed.wav", "metrics.json", "pitch.json"] {
+        for name in [
+            "raw.wav",
+            "processed.wav",
+            "metrics.json",
+            "pitch.json",
+            "correction.json",
+        ] {
             let _ = fs::remove_file(directory.join(name));
         }
         let _ = fs::remove_dir(directory);
@@ -433,7 +535,9 @@ mod tests {
         assert!(output_dir.join("processed.wav").is_file());
         assert!(output_dir.join("metrics.json").is_file());
         assert!(output_dir.join("pitch.json").is_file());
+        assert!(output_dir.join("correction.json").is_file());
         assert!(report.voiced_observations > 0);
+        assert_eq!(report.correction_observations, report.pitch_observations);
         remove_evidence(&output_dir);
     }
 
