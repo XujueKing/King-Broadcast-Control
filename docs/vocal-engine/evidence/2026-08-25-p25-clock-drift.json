@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "mode": "two_hour_timestamp_drift_replay",
+  "simulatedHours": 2.0,
+  "injectedDriftPpm": 75.0,
+  "pairCount": 721,
+  "finalStatus": {
+    "estimator": {
+      "schemaVersion": 1,
+      "mode": "usb_qu16_timestamp_drift_estimator",
+      "state": "locked",
+      "acceptedObservations": 721,
+      "rejectedObservations": 0,
+      "consecutiveOutliers": 0,
+      "baseOffsetFrames": 120,
+      "estimatedDriftPpm": 74.99999999999997,
+      "latestResidualFrames": 1.0913936421275139e-11,
+      "maximumResidualFrames": 60.75,
+      "lastRejection": null,
+      "timestampCorrectionOnly": true,
+      "audioResamplingPerformed": false,
+      "hardwareReady": false
+    },
+    "matcher": {
+      "schemaVersion": 1,
+      "mode": "live_usb_qu16_evidence_matcher",
+      "returnGeneration": 1,
+      "inputQueueDepth": 0,
+      "returnQueueDepth": 0,
+      "matchedPairs": 721,
+      "rejectedFrames": 0,
+      "timeoutRejections": 0,
+      "driftRejections": 0,
+      "generationResets": 0,
+      "disconnects": 0,
+      "maximumObservedSkewFrames": 120,
+      "maximumAllowedSkewFrames": 960,
+      "lastRejection": null,
+      "evidenceLive": true,
+      "outputStreamStarted": false,
+      "qu16WritesPerformed": false,
+      "hardwareReady": false
+    },
+    "rawMaximumSkewFrames": 26040,
+    "correctedMaximumSkewFrames": 120,
+    "unsafeShutdowns": 0,
+    "outputStreamStarted": false,
+    "qu16WritesPerformed": false,
+    "audioResamplingPerformed": false,
+    "hardwareReady": false
+  },
+  "firstPair": {
+    "generation": 1,
+    "input": {
+      "sequence": 1,
+      "framePosition": 48000000,
+      "direction": "input",
+      "peaks": [
+        {
+          "driverIndex": 2,
+          "peakDbfs": -12.0
+        }
+      ]
+    },
+    "rawReturn": {
+      "sequence": 1,
+      "framePosition": 48000120,
+      "direction": "output",
+      "peaks": [
+        {
+          "driverIndex": 1,
+          "peakDbfs": -12.0
+        }
+      ]
+    },
+    "correctedReturn": {
+      "sequence": 1,
+      "framePosition": 48000120,
+      "direction": "output",
+      "peaks": [
+        {
+          "driverIndex": 1,
+          "peakDbfs": -12.0
+        }
+      ]
+    },
+    "rawSkewFrames": 120,
+    "correctedSkewFrames": 120,
+    "appliedCorrectionFrames": 0
+  },
+  "lastPair": {
+    "generation": 1,
+    "input": {
+      "sequence": 721,
+      "framePosition": 393600000,
+      "direction": "input",
+      "peaks": [
+        {
+          "driverIndex": 2,
+          "peakDbfs": -12.0
+        }
+      ]
+    },
+    "rawReturn": {
+      "sequence": 721,
+      "framePosition": 393626040,
+      "direction": "output",
+      "peaks": [
+        {
+          "driverIndex": 1,
+          "peakDbfs": -12.0
+        }
+      ]
+    },
+    "correctedReturn": {
+      "sequence": 721,
+      "framePosition": 393599998,
+      "direction": "output",
+      "peaks": [
+        {
+          "driverIndex": 1,
+          "peakDbfs": -12.0
+        }
+      ]
+    },
+    "rawSkewFrames": 26040,
+    "correctedSkewFrames": 2,
+    "appliedCorrectionFrames": 26038
+  },
+  "outputStreamStarted": false,
+  "qu16WritesPerformed": false,
+  "audioResamplingPerformed": false,
+  "hardwareReady": false
+}

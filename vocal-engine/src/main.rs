@@ -2,6 +2,7 @@ use king_vocal_engine::{
     benchmark_transfer,
     calibration::run_virtual_calibration_wizard,
     capture::run_default_meter_replay,
+    clock_drift::run_default_clock_drift_replay,
     correction::{parse_tonic, ScaleMode},
     desktop_bridge::run_default_desktop_qu16_meter_bridge_replay,
     enumerate_devices,
@@ -54,6 +55,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("replay-qu16-meter-adapter") => run_qu16_meter_adapter_replay(&arguments[1..]),
         Some("replay-desktop-qu16-bridge") => run_desktop_qu16_bridge_replay(&arguments[1..]),
         Some("replay-live-joint-clock") => run_live_joint_clock_replay(&arguments[1..]),
+        Some("replay-clock-drift") => run_clock_drift_replay(&arguments[1..]),
         Some("control-stdio") => {
             king_vocal_engine::control::serve_control_lines(
                 io::stdin().lock(),
@@ -66,6 +68,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn run_clock_drift_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let report = run_default_clock_drift_replay()?;
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_live_joint_clock_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -382,6 +397,9 @@ fn print_help() {
 
   replay-live-joint-clock [--output PATH]
       P24 回放共享 48kHz 时钟上的 USB 输入与 Qu-16 返回双流；验证漂移、超时和断线失败关闭。
+
+  replay-clock-drift [--output PATH]
+      P25 模拟两小时 USB/TCP 时钟漂移；只校正证据时间戳，不重采样或拉伸音频。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。
