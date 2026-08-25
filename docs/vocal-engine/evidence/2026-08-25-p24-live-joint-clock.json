@@ -1,0 +1,405 @@
+{
+  "schemaVersion": 1,
+  "mode": "recorded_live_usb_qu16_shared_clock_replay",
+  "clockAnchor": {
+    "epochFramePosition": 48000000,
+    "localFramePosition": 0
+  },
+  "matcher": {
+    "schemaVersion": 1,
+    "mode": "live_usb_qu16_evidence_matcher",
+    "returnGeneration": null,
+    "inputQueueDepth": 0,
+    "returnQueueDepth": 0,
+    "matchedPairs": 3,
+    "rejectedFrames": 3,
+    "timeoutRejections": 1,
+    "driftRejections": 1,
+    "generationResets": 0,
+    "disconnects": 1,
+    "maximumObservedSkewFrames": 120,
+    "maximumAllowedSkewFrames": 960,
+    "lastRejection": "return_disconnected",
+    "evidenceLive": false,
+    "outputStreamStarted": false,
+    "qu16WritesPerformed": false,
+    "hardwareReady": false
+  },
+  "pairs": [
+    {
+      "returnGeneration": 1,
+      "input": {
+        "sequence": 1,
+        "framePosition": 48000000,
+        "direction": "input",
+        "peaks": [
+          {
+            "driverIndex": 2,
+            "peakDbfs": -12.0
+          }
+        ]
+      },
+      "returned": {
+        "sequence": 1,
+        "framePosition": 48000096,
+        "direction": "output",
+        "peaks": [
+          {
+            "driverIndex": 1,
+            "peakDbfs": -11.0
+          }
+        ]
+      },
+      "skewFrames": 96
+    },
+    {
+      "returnGeneration": 1,
+      "input": {
+        "sequence": 2,
+        "framePosition": 48004800,
+        "direction": "input",
+        "peaks": [
+          {
+            "driverIndex": 5,
+            "peakDbfs": -12.0
+          }
+        ]
+      },
+      "returned": {
+        "sequence": 2,
+        "framePosition": 48004848,
+        "direction": "output",
+        "peaks": [
+          {
+            "driverIndex": 4,
+            "peakDbfs": -11.0
+          }
+        ]
+      },
+      "skewFrames": 48
+    },
+    {
+      "returnGeneration": 1,
+      "input": {
+        "sequence": 3,
+        "framePosition": 48009600,
+        "direction": "input",
+        "peaks": [
+          {
+            "driverIndex": 9,
+            "peakDbfs": -12.0
+          }
+        ]
+      },
+      "returned": {
+        "sequence": 3,
+        "framePosition": 48009720,
+        "direction": "output",
+        "peaks": [
+          {
+            "driverIndex": 8,
+            "peakDbfs": -11.0
+          }
+        ]
+      },
+      "skewFrames": 120
+    }
+  ],
+  "calibration": {
+    "schemaVersion": 1,
+    "mode": "joint_recorded_evidence_replay",
+    "inputSource": "p24_shared_clock_usb_input",
+    "returnSource": "p24_shared_clock_qu16_return",
+    "laneEvidence": [
+      {
+        "lane": "mic1",
+        "inputSequence": 1,
+        "returnSequence": 1,
+        "inputFramePosition": 48000000,
+        "returnFramePosition": 48000096,
+        "skewFrames": 96,
+        "synchronized": true
+      },
+      {
+        "lane": "mic2",
+        "inputSequence": 2,
+        "returnSequence": 2,
+        "inputFramePosition": 48004800,
+        "returnFramePosition": 48004848,
+        "skewFrames": 48,
+        "synchronized": true
+      },
+      {
+        "lane": "mic3",
+        "inputSequence": 3,
+        "returnSequence": 3,
+        "inputFramePosition": 48009600,
+        "returnFramePosition": 48009720,
+        "skewFrames": 120,
+        "synchronized": true
+      }
+    ],
+    "rejectedSyncFrames": 0,
+    "maximumObservedSkewFrames": 120,
+    "maximumAllowedSkewFrames": 960,
+    "allLanesSynchronized": true,
+    "inputSourceExhausted": true,
+    "returnSourceExhausted": true,
+    "outputStreamStarted": false,
+    "calibration": {
+      "schemaVersion": 1,
+      "mode": "virtual_calibration_wizard",
+      "finalState": "complete",
+      "completedLanes": 3,
+      "rejectedObservations": 0,
+      "routingMap": {
+        "schemaVersion": 1,
+        "driverName": "KING Joint USB + Qu-16 Meter Evidence",
+        "sampleRate": 48000,
+        "physicalHardware": false,
+        "qu16MappingVerified": false,
+        "lanes": [
+          {
+            "lane": "mic1",
+            "quInputChannel": 1,
+            "inputDriverIndex": 2,
+            "inputChannelName": "USB Mic A",
+            "returnDriverIndex": 1,
+            "returnChannelName": "Qu-16 Return A",
+            "evidence": "virtual_signal_trace"
+          },
+          {
+            "lane": "mic2",
+            "quInputChannel": 2,
+            "inputDriverIndex": 5,
+            "inputChannelName": "USB Mic B",
+            "returnDriverIndex": 4,
+            "returnChannelName": "Qu-16 Return B",
+            "evidence": "virtual_signal_trace"
+          },
+          {
+            "lane": "mic3",
+            "quInputChannel": 3,
+            "inputDriverIndex": 9,
+            "inputChannelName": "USB Mic C",
+            "returnDriverIndex": 8,
+            "returnChannelName": "Qu-16 Return C",
+            "evidence": "virtual_signal_trace"
+          }
+        ],
+        "createdBy": "virtual_calibration_wizard",
+        "blockers": [
+          "Virtual calibration cannot unlock physical routing",
+          "Qu-16 USB-B onsite trace is still required"
+        ]
+      },
+      "events": [
+        {
+          "sequence": 1,
+          "state": "countdown",
+          "lane": "mic1",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "请只打开当前麦克风，其他麦克风保持静音"
+        },
+        {
+          "sequence": 2,
+          "state": "countdown",
+          "lane": "mic1",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "倒计时 2"
+        },
+        {
+          "sequence": 3,
+          "state": "countdown",
+          "lane": "mic1",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "倒计时 1"
+        },
+        {
+          "sequence": 4,
+          "state": "tracing_input",
+          "lane": "mic1",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "请对当前麦克风持续说话，正在识别唯一 USB 输入"
+        },
+        {
+          "sequence": 5,
+          "state": "tracing_return",
+          "lane": "mic1",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": 2,
+          "peakDbfs": -12.0,
+          "isolationDb": 108.0,
+          "message": "输入通道已锁定，正在识别对应处理返回"
+        },
+        {
+          "sequence": 6,
+          "state": "lane_complete",
+          "lane": "mic1",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": 1,
+          "peakDbfs": -11.0,
+          "isolationDb": 109.0,
+          "message": "当前麦克风输入与返回已绑定"
+        },
+        {
+          "sequence": 7,
+          "state": "countdown",
+          "lane": "mic2",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "请只打开当前麦克风，其他麦克风保持静音"
+        },
+        {
+          "sequence": 8,
+          "state": "countdown",
+          "lane": "mic2",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "倒计时 2"
+        },
+        {
+          "sequence": 9,
+          "state": "countdown",
+          "lane": "mic2",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "倒计时 1"
+        },
+        {
+          "sequence": 10,
+          "state": "tracing_input",
+          "lane": "mic2",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "请对当前麦克风持续说话，正在识别唯一 USB 输入"
+        },
+        {
+          "sequence": 11,
+          "state": "tracing_return",
+          "lane": "mic2",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": 5,
+          "peakDbfs": -12.0,
+          "isolationDb": 108.0,
+          "message": "输入通道已锁定，正在识别对应处理返回"
+        },
+        {
+          "sequence": 12,
+          "state": "lane_complete",
+          "lane": "mic2",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": 4,
+          "peakDbfs": -11.0,
+          "isolationDb": 109.0,
+          "message": "当前麦克风输入与返回已绑定"
+        },
+        {
+          "sequence": 13,
+          "state": "countdown",
+          "lane": "mic3",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "请只打开当前麦克风，其他麦克风保持静音"
+        },
+        {
+          "sequence": 14,
+          "state": "countdown",
+          "lane": "mic3",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "倒计时 2"
+        },
+        {
+          "sequence": 15,
+          "state": "countdown",
+          "lane": "mic3",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "倒计时 1"
+        },
+        {
+          "sequence": 16,
+          "state": "tracing_input",
+          "lane": "mic3",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": null,
+          "peakDbfs": null,
+          "isolationDb": null,
+          "message": "请对当前麦克风持续说话，正在识别唯一 USB 输入"
+        },
+        {
+          "sequence": 17,
+          "state": "tracing_return",
+          "lane": "mic3",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": 9,
+          "peakDbfs": -12.0,
+          "isolationDb": 108.0,
+          "message": "输入通道已锁定，正在识别对应处理返回"
+        },
+        {
+          "sequence": 18,
+          "state": "complete",
+          "lane": "mic3",
+          "accepted": true,
+          "rejection": null,
+          "selectedDriverIndex": 8,
+          "peakDbfs": -11.0,
+          "isolationDb": 109.0,
+          "message": "三路离线校准完成；现场硬件仍保持阻断"
+        }
+      ],
+      "physicalAudioStarted": false,
+      "qu16WritesPerformed": false,
+      "hardwareReady": false
+    },
+    "hardwareReady": false
+  },
+  "outputStreamStarted": false,
+  "qu16WritesPerformed": false,
+  "hardwareReady": false
+}

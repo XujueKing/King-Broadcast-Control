@@ -27,6 +27,7 @@ pub mod dynamics;
 pub mod failover;
 pub mod formant;
 pub mod joint;
+pub mod live_joint;
 pub mod multilane;
 pub mod pitch;
 pub mod preset;

@@ -7,6 +7,7 @@ use king_vocal_engine::{
     enumerate_devices,
     failover::run_failover_matrix,
     joint::run_default_joint_replay,
+    live_joint::run_default_live_joint_replay,
     multilane::run_multilane_simulation,
     preset::VocalPreset,
     qu16_meter::run_default_qu16_meter_adapter_replay,
@@ -52,6 +53,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("replay-joint-evidence") => run_joint_evidence_replay(&arguments[1..]),
         Some("replay-qu16-meter-adapter") => run_qu16_meter_adapter_replay(&arguments[1..]),
         Some("replay-desktop-qu16-bridge") => run_desktop_qu16_bridge_replay(&arguments[1..]),
+        Some("replay-live-joint-clock") => run_live_joint_clock_replay(&arguments[1..]),
         Some("control-stdio") => {
             king_vocal_engine::control::serve_control_lines(
                 io::stdin().lock(),
@@ -64,6 +66,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn run_live_joint_clock_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let report = run_default_live_joint_replay()?;
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_desktop_qu16_bridge_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -364,6 +379,9 @@ fn print_help() {
 
   replay-desktop-qu16-bridge [--output PATH]
       P23 回放桌面 qu16_runtime 原生快照；验证实时桥接、重连换代和断线清帧，不启动输出、不写 Qu-16。
+
+  replay-live-joint-clock [--output PATH]
+      P24 回放共享 48kHz 时钟上的 USB 输入与 Qu-16 返回双流；验证漂移、超时和断线失败关闭。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。

@@ -17,6 +17,7 @@ use std::{
         Arc,
     },
     time::Duration,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -148,8 +149,15 @@ impl CpalInputMeterSource {
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
         let sequence = Arc::new(AtomicU64::new(0));
         let frame_position = Arc::new(AtomicU64::new(0));
-        let stream =
-            build_read_only_input_stream(&device, &config, sender, sequence, frame_position)?;
+        let clock_anchor = crate::live_joint::Usb48kClockAnchor::from_unix_ms(unix_time_ms(), 0);
+        let stream = build_read_only_input_stream(
+            &device,
+            &config,
+            sender,
+            sequence,
+            frame_position,
+            clock_anchor,
+        )?;
         stream
             .play()
             .map_err(|error| EngineError(format!("input-only stream start failed: {error}")))?;
@@ -194,6 +202,7 @@ fn build_read_only_input_stream(
     sender: SyncSender<MeterFrame>,
     sequence: Arc<AtomicU64>,
     frame_position: Arc<AtomicU64>,
+    clock_anchor: crate::live_joint::Usb48kClockAnchor,
 ) -> Result<Stream, EngineError> {
     let channels = config.channels as usize;
     device
@@ -207,9 +216,11 @@ fn build_read_only_input_stream(
                         peaks[channel] = peaks[channel].max(sample.abs());
                     }
                 }
+                let local_frame_position =
+                    frame_position.fetch_add(frame_count as u64, Ordering::Relaxed);
                 let message = MeterFrame {
                     sequence: sequence.fetch_add(1, Ordering::Relaxed) + 1,
-                    frame_position: frame_position.fetch_add(frame_count as u64, Ordering::Relaxed),
+                    frame_position: clock_anchor.map(local_frame_position),
                     direction: AsioDirection::Input,
                     peaks: peaks
                         .into_iter()
@@ -228,6 +239,14 @@ fn build_read_only_input_stream(
             None,
         )
         .map_err(|error| EngineError(format!("input-only stream build failed: {error}")))
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 fn amplitude_to_dbfs(amplitude: f32) -> f32 {
