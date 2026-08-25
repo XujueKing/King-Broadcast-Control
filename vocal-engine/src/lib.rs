@@ -29,6 +29,7 @@ pub mod joint;
 pub mod multilane;
 pub mod pitch;
 pub mod preset;
+pub mod qu16_meter;
 pub mod quality;
 pub mod reference;
 pub mod routing;
