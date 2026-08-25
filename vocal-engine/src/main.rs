@@ -5,6 +5,7 @@ use king_vocal_engine::{
     correction::{parse_tonic, ScaleMode},
     enumerate_devices,
     failover::run_failover_matrix,
+    joint::run_default_joint_replay,
     multilane::run_multilane_simulation,
     preset::VocalPreset,
     routing::run_virtual_routing_discovery,
@@ -46,6 +47,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("discover-routing-virtual") => run_virtual_routing(&arguments[1..]),
         Some("simulate-calibration-wizard") => run_virtual_calibration(&arguments[1..]),
         Some("replay-meter-fixture") => run_meter_fixture_replay(&arguments[1..]),
+        Some("replay-joint-evidence") => run_joint_evidence_replay(&arguments[1..]),
         Some("control-stdio") => {
             king_vocal_engine::control::serve_control_lines(
                 io::stdin().lock(),
@@ -58,6 +60,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn run_joint_evidence_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let report = run_default_joint_replay()?;
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_meter_fixture_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -310,6 +325,9 @@ fn print_help() {
 
   replay-meter-fixture [--output PATH]
       P20 回放只读电平夹具并驱动同一套校准向导；不打开输出流、不写 Qu-16。
+
+  replay-joint-evidence [--output PATH]
+      P21 对齐 USB 输入与 Qu-16 返回表计双证据；超时或时间偏差过大时失败关闭。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。

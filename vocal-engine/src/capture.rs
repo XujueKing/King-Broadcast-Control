@@ -36,7 +36,7 @@ pub struct MeterFrame {
 }
 
 impl MeterFrame {
-    fn peak_pairs(&self) -> Vec<(usize, f32)> {
+    pub(crate) fn peak_pairs(&self) -> Vec<(usize, f32)> {
         self.peaks
             .iter()
             .map(|peak| (peak.driver_index, peak.peak_dbfs))
