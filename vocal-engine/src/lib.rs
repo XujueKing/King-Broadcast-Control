@@ -21,6 +21,7 @@ pub mod blend;
 pub mod control;
 pub mod correction;
 pub mod dynamics;
+pub mod failover;
 pub mod formant;
 pub mod multilane;
 pub mod pitch;

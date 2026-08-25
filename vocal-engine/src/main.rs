@@ -2,6 +2,7 @@ use king_vocal_engine::{
     benchmark_transfer,
     correction::{parse_tonic, ScaleMode},
     enumerate_devices,
+    failover::run_failover_matrix,
     multilane::run_multilane_simulation,
     preset::VocalPreset,
     run_for_duration,
@@ -38,6 +39,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("simulate") => run_simulator(&arguments[1..]),
         Some("site-check") => run_site_check(&arguments[1..]),
         Some("simulate-multilane") => run_multilane_simulator(&arguments[1..]),
+        Some("simulate-failover") => run_failover_simulator(&arguments[1..]),
         Some("control-stdio") => {
             king_vocal_engine::control::serve_control_lines(
                 io::stdin().lock(),
@@ -50,6 +52,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn run_failover_simulator(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let duration_seconds = number_argument(arguments, "--seconds")?.unwrap_or(3.0);
+    let block_frames = number_argument(arguments, "--block-frames")?.unwrap_or(128);
+    let report = run_failover_matrix(duration_seconds, block_frames)?;
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_multilane_simulator(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -236,6 +253,9 @@ fn print_help() {
 
   control-stdio
       P14 NDJSON 控制/遥测桥；启动时固定未武装，不会启动物理音频。
+
+  simulate-failover [--seconds 3] [--block-frames 128] [--output PATH]
+      P15 虚拟三路 ASIO 故障矩阵；验证超时、异常输出、控制断线、输入断线和恢复，不启动物理音频。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。

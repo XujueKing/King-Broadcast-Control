@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "stage": "P15_VIRTUAL_FAILOVER_PASSED",
+  "evidenceClass": "deterministic_software_only",
+  "route": {
+    "adapterName": "KING Virtual ASIO (simulation only)",
+    "evidenceClass": "deterministic_software_only",
+    "sampleRate": 48000,
+    "internalFormat": "float32",
+    "blockFrames": 128,
+    "driverInputIndices": [
+      0,
+      1,
+      2
+    ],
+    "driverReturnIndices": [
+      3,
+      4,
+      5
+    ],
+    "physicalHardware": false,
+    "qu16MappingVerified": false
+  },
+  "fadeMs": 20.0,
+  "scenarios": [
+    {
+      "fault": "engine_timeout",
+      "fallbackReason": "engine_timeout",
+      "fallbackFrames": 28800,
+      "inputUnavailableFrames": 0,
+      "invalidProcessedSamples": 0,
+      "minimumProcessedMix": 0.0,
+      "recoveredToProcessed": true,
+      "outputRmsDuringFault": [
+        0.12721682,
+        0.12720619,
+        0.12714379
+      ],
+      "nonFiniteOutputSamples": 0,
+      "crosstalkMaximum": 0.0,
+      "maximumOutputStep": 0.014870059
+    },
+    {
+      "fault": "invalid_processed_output",
+      "fallbackReason": "invalid_processed_output",
+      "fallbackFrames": 28800,
+      "inputUnavailableFrames": 0,
+      "invalidProcessedSamples": 86400,
+      "minimumProcessedMix": 0.0,
+      "recoveredToProcessed": true,
+      "outputRmsDuringFault": [
+        0.12721682,
+        0.12720619,
+        0.12714379
+      ],
+      "nonFiniteOutputSamples": 0,
+      "crosstalkMaximum": 0.0,
+      "maximumOutputStep": 0.014870059
+    },
+    {
+      "fault": "control_bridge_disconnect",
+      "fallbackReason": "control_bridge_disconnect",
+      "fallbackFrames": 28800,
+      "inputUnavailableFrames": 0,
+      "invalidProcessedSamples": 0,
+      "minimumProcessedMix": 0.0,
+      "recoveredToProcessed": true,
+      "outputRmsDuringFault": [
+        0.12739131,
+        0.12741692,
+        0.12739548
+      ],
+      "nonFiniteOutputSamples": 0,
+      "crosstalkMaximum": 0.0,
+      "maximumOutputStep": 0.014870059
+    },
+    {
+      "fault": "input_disconnect",
+      "fallbackReason": "input_unavailable",
+      "fallbackFrames": 28800,
+      "inputUnavailableFrames": 28800,
+      "invalidProcessedSamples": 0,
+      "minimumProcessedMix": 0.0,
+      "recoveredToProcessed": true,
+      "outputRmsDuringFault": [
+        0.0066355024,
+        0.0064984253,
+        0.005955956
+      ],
+      "nonFiniteOutputSamples": 0,
+      "crosstalkMaximum": 0.0,
+      "maximumOutputStep": 0.030664848
+    }
+  ],
+  "allOutputsFinite": true,
+  "allScenariosRecovered": true,
+  "physicalAudioStarted": false,
+  "directQu16DryFallbackVerified": false,
+  "dp440RouteVerified": false
+}
