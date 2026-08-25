@@ -31,6 +31,7 @@ pub mod formant;
 pub mod joint;
 pub mod live_joint;
 pub mod multilane;
+pub mod output_gate;
 pub mod pitch;
 pub mod preset;
 pub mod qu16_meter;

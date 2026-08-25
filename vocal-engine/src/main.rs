@@ -11,6 +11,7 @@ use king_vocal_engine::{
     joint::run_default_joint_replay,
     live_joint::run_default_live_joint_replay,
     multilane::run_multilane_simulation,
+    output_gate::run_default_output_gate_replay,
     preset::VocalPreset,
     qu16_meter::run_default_qu16_meter_adapter_replay,
     routing::run_virtual_routing_discovery,
@@ -58,6 +59,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("replay-live-joint-clock") => run_live_joint_clock_replay(&arguments[1..]),
         Some("replay-clock-drift") => run_clock_drift_replay(&arguments[1..]),
         Some("replay-drift-runtime") => run_drift_runtime_replay(&arguments[1..]),
+        Some("replay-output-gate") => run_output_gate_replay(&arguments[1..]),
         Some("control-stdio") => {
             king_vocal_engine::control::serve_control_lines(
                 io::stdin().lock(),
@@ -70,6 +72,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn run_output_gate_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let report = run_default_output_gate_replay();
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_drift_runtime_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -418,6 +433,9 @@ fn print_help() {
 
   replay-drift-runtime [--output PATH]
       P26 回放长期漂移控制器的锁定、断线、重连、重新锁定与失败关闭遥测。
+
+  replay-output-gate [--output PATH]
+      P27 回放可撤销输出授权；验证电平、时钟和心跳失效时立即撤销。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。

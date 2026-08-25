@@ -1,0 +1,65 @@
+{
+  "mode": "minimal_revocable_output_gate",
+  "decisions": [
+    {
+      "authorization": {
+        "id": 1,
+        "expiresAtMs": 1500
+      },
+      "revokedId": null,
+      "blockers": [],
+      "physicalOutputStarted": false,
+      "qu16WritesPerformed": false
+    },
+    {
+      "authorization": null,
+      "revokedId": 1,
+      "blockers": [
+        "input_level_too_hot"
+      ],
+      "physicalOutputStarted": false,
+      "qu16WritesPerformed": false
+    },
+    {
+      "authorization": {
+        "id": 2,
+        "expiresAtMs": 1700
+      },
+      "revokedId": null,
+      "blockers": [],
+      "physicalOutputStarted": false,
+      "qu16WritesPerformed": false
+    },
+    {
+      "authorization": null,
+      "revokedId": 2,
+      "blockers": [
+        "clock_not_locked"
+      ],
+      "physicalOutputStarted": false,
+      "qu16WritesPerformed": false
+    },
+    {
+      "authorization": {
+        "id": 3,
+        "expiresAtMs": 1900
+      },
+      "revokedId": null,
+      "blockers": [],
+      "physicalOutputStarted": false,
+      "qu16WritesPerformed": false
+    },
+    {
+      "authorization": null,
+      "revokedId": 3,
+      "blockers": [
+        "lease_expired"
+      ],
+      "physicalOutputStarted": false,
+      "qu16WritesPerformed": false
+    }
+  ],
+  "physicalOutputStarted": false,
+  "qu16WritesPerformed": false,
+  "hardwareReady": false
+}
