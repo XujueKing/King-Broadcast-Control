@@ -1,5 +1,6 @@
 use king_vocal_engine::{
     benchmark_transfer,
+    calibration::run_virtual_calibration_wizard,
     correction::{parse_tonic, ScaleMode},
     enumerate_devices,
     failover::run_failover_matrix,
@@ -42,6 +43,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("simulate-multilane") => run_multilane_simulator(&arguments[1..]),
         Some("simulate-failover") => run_failover_simulator(&arguments[1..]),
         Some("discover-routing-virtual") => run_virtual_routing(&arguments[1..]),
+        Some("simulate-calibration-wizard") => run_virtual_calibration(&arguments[1..]),
         Some("control-stdio") => {
             king_vocal_engine::control::serve_control_lines(
                 io::stdin().lock(),
@@ -54,6 +56,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn run_virtual_calibration(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let report = run_virtual_calibration_wizard()?;
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_virtual_routing(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -274,6 +289,9 @@ fn print_help() {
 
   discover-routing-virtual [--output PATH]
       P17 离线 ASIO 通道发现与逐路信号追踪；保存映射证据，不写 Qu-16、不启动音频输出。
+
+  simulate-calibration-wizard [--output PATH]
+      P19 模拟现场逐路校准向导；验证倒计时、单路锁定、串音拒绝和取消，不启动物理音频。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。
