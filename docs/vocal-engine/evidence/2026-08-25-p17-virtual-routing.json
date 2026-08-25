@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "mode": "virtual_signal_trace",
+  "inventory": {
+    "driverName": "KING Virtual Qu-16 ASIO",
+    "sampleRate": 48000,
+    "physicalHardware": false,
+    "inputChannels": [
+      {
+        "driverIndex": 2,
+        "name": "Virtual Mic Send A",
+        "direction": "input"
+      },
+      {
+        "driverIndex": 5,
+        "name": "Virtual Mic Send B",
+        "direction": "input"
+      },
+      {
+        "driverIndex": 9,
+        "name": "Virtual Mic Send C",
+        "direction": "input"
+      }
+    ],
+    "outputChannels": [
+      {
+        "driverIndex": 1,
+        "name": "Virtual Vocal Return A",
+        "direction": "output"
+      },
+      {
+        "driverIndex": 4,
+        "name": "Virtual Vocal Return B",
+        "direction": "output"
+      },
+      {
+        "driverIndex": 8,
+        "name": "Virtual Vocal Return C",
+        "direction": "output"
+      }
+    ]
+  },
+  "routingMap": {
+    "schemaVersion": 1,
+    "driverName": "KING Virtual Qu-16 ASIO",
+    "sampleRate": 48000,
+    "physicalHardware": false,
+    "qu16MappingVerified": false,
+    "lanes": [
+      {
+        "lane": "mic1",
+        "quInputChannel": 1,
+        "inputDriverIndex": 2,
+        "inputChannelName": "Virtual Mic Send A",
+        "returnDriverIndex": 1,
+        "returnChannelName": "Virtual Vocal Return A",
+        "evidence": "virtual_signal_trace"
+      },
+      {
+        "lane": "mic2",
+        "quInputChannel": 2,
+        "inputDriverIndex": 5,
+        "inputChannelName": "Virtual Mic Send B",
+        "returnDriverIndex": 4,
+        "returnChannelName": "Virtual Vocal Return B",
+        "evidence": "virtual_signal_trace"
+      },
+      {
+        "lane": "mic3",
+        "quInputChannel": 3,
+        "inputDriverIndex": 9,
+        "inputChannelName": "Virtual Mic Send C",
+        "returnDriverIndex": 8,
+        "returnChannelName": "Virtual Vocal Return C",
+        "evidence": "virtual_signal_trace"
+      }
+    ],
+    "createdBy": "offline_virtual_signal_trace",
+    "blockers": [
+      "Qu-16 USB/ASIO hardware is not connected",
+      "Qu-16 input and USB return patches require onsite signal trace",
+      "DP440 and downstream PA routing remain outside this discovery"
+    ]
+  },
+  "probes": [
+    {
+      "lane": "mic1",
+      "selectedInputIndex": 2,
+      "selectedReturnIndex": 1,
+      "selectedPeakDbfs": -12.0,
+      "strongestOtherPeakDbfs": -84.0,
+      "isolationDb": 72.0,
+      "unique": true
+    },
+    {
+      "lane": "mic2",
+      "selectedInputIndex": 5,
+      "selectedReturnIndex": 4,
+      "selectedPeakDbfs": -12.0,
+      "strongestOtherPeakDbfs": -84.0,
+      "isolationDb": 72.0,
+      "unique": true
+    },
+    {
+      "lane": "mic3",
+      "selectedInputIndex": 9,
+      "selectedReturnIndex": 8,
+      "selectedPeakDbfs": -12.0,
+      "strongestOtherPeakDbfs": -84.0,
+      "isolationDb": 72.0,
+      "unique": true
+    }
+  ],
+  "structuralValidationPassed": true,
+  "hardwareReady": false,
+  "ambiguityCount": 0,
+  "writesPerformed": false,
+  "audioOutputStarted": false
+}

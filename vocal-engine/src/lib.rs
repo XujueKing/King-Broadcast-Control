@@ -28,6 +28,7 @@ pub mod pitch;
 pub mod preset;
 pub mod quality;
 pub mod reference;
+pub mod routing;
 pub mod simulation;
 pub mod site;
 

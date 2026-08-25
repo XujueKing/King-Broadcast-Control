@@ -223,7 +223,7 @@ fn smooth(current: f32, target: f32, alpha: f32) -> f32 {
     current + alpha * (target - current)
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VocalLaneId {
     Mic1,
