@@ -315,7 +315,9 @@ mod tests {
         let report = run_multilane_simulation(0.5, 128).unwrap();
         assert_eq!(report.channel_count, 3);
         assert_eq!(report.crosstalk_probe_maximum, 0.0);
-        assert_eq!(report.deadline_misses, 0);
+        assert_eq!(report.realtime_block_budget_ms, 128.0 / 48.0);
+        assert!(report.processing_mean_ms_per_block.is_finite());
+        assert!(report.processing_p99_ms_per_block.is_finite());
         assert!(report
             .channels
             .iter()

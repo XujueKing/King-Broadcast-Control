@@ -24,6 +24,7 @@ pub mod clock_drift;
 pub mod control;
 pub mod correction;
 pub mod desktop_bridge;
+pub mod drift_runtime;
 pub mod dynamics;
 pub mod failover;
 pub mod formant;

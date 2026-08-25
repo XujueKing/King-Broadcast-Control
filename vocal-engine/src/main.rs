@@ -5,6 +5,7 @@ use king_vocal_engine::{
     clock_drift::run_default_clock_drift_replay,
     correction::{parse_tonic, ScaleMode},
     desktop_bridge::run_default_desktop_qu16_meter_bridge_replay,
+    drift_runtime::run_default_drift_runtime_replay,
     enumerate_devices,
     failover::run_failover_matrix,
     joint::run_default_joint_replay,
@@ -56,6 +57,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("replay-desktop-qu16-bridge") => run_desktop_qu16_bridge_replay(&arguments[1..]),
         Some("replay-live-joint-clock") => run_live_joint_clock_replay(&arguments[1..]),
         Some("replay-clock-drift") => run_clock_drift_replay(&arguments[1..]),
+        Some("replay-drift-runtime") => run_drift_runtime_replay(&arguments[1..]),
         Some("control-stdio") => {
             king_vocal_engine::control::serve_control_lines(
                 io::stdin().lock(),
@@ -68,6 +70,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn run_drift_runtime_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let report = run_default_drift_runtime_replay()?;
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_clock_drift_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -400,6 +415,9 @@ fn print_help() {
 
   replay-clock-drift [--output PATH]
       P25 模拟两小时 USB/TCP 时钟漂移；只校正证据时间戳，不重采样或拉伸音频。
+
+  replay-drift-runtime [--output PATH]
+      P26 回放长期漂移控制器的锁定、断线、重连、重新锁定与失败关闭遥测。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。

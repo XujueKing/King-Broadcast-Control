@@ -1,4 +1,8 @@
 use crate::{
+    drift_runtime::{
+        drift_runtime_telemetry_channel, DriftRuntimeTelemetryReceiver,
+        DriftRuntimeTelemetrySnapshot,
+    },
     failover::{failover_telemetry_channel, FailoverTelemetryReceiver, FailoverTelemetrySnapshot},
     preset::{ThreeLanePresetBank, VocalLaneId, VocalPreset},
     site::{
@@ -50,6 +54,7 @@ pub struct VocalControlStatus {
     pub physical_audio_started: bool,
     pub hardware_bound: bool,
     pub failover: FailoverTelemetrySnapshot,
+    pub clock_drift: DriftRuntimeTelemetrySnapshot,
     pub lanes: [VocalLaneTelemetry; 3],
     pub message: &'static str,
 }
@@ -71,16 +76,19 @@ pub struct VocalControlSession {
     presets: [VocalPreset; 3],
     calibration_mode: CalibrationMode,
     failover: FailoverTelemetryReceiver,
+    clock_drift: DriftRuntimeTelemetryReceiver,
 }
 
 impl Default for VocalControlSession {
     fn default() -> Self {
         let (_, failover) = failover_telemetry_channel();
+        let (_, clock_drift) = drift_runtime_telemetry_channel();
         Self {
             controls: ThreeLanePresetBank::new(VocalPreset::Professional),
             presets: [VocalPreset::Professional; 3],
             calibration_mode: CalibrationMode::Disarmed,
             failover,
+            clock_drift,
         }
     }
 }
@@ -89,6 +97,17 @@ impl VocalControlSession {
     pub fn with_failover_telemetry(failover: FailoverTelemetryReceiver) -> Self {
         Self {
             failover,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_runtime_telemetry(
+        failover: FailoverTelemetryReceiver,
+        clock_drift: DriftRuntimeTelemetryReceiver,
+    ) -> Self {
+        Self {
+            failover,
+            clock_drift,
             ..Self::default()
         }
     }
@@ -136,6 +155,7 @@ impl VocalControlSession {
             physical_audio_started: false,
             hardware_bound: false,
             failover: self.failover.snapshot(),
+            clock_drift: self.clock_drift.snapshot(),
             lanes: std::array::from_fn(|index| VocalLaneTelemetry {
                 lane: lanes[index],
                 preset: self.presets[index],
@@ -251,5 +271,44 @@ mod tests {
         assert_eq!(snapshot.reason, Some(FailoverReason::EngineTimeout));
         assert!(snapshot.using_dry_fallback);
         assert!(snapshot.fresh);
+    }
+
+    #[test]
+    fn status_polls_bounded_clock_drift_telemetry() {
+        use crate::{
+            capture::MeterFrame,
+            drift_runtime::{drift_runtime_telemetry_channel, DriftRuntimeController},
+            routing::AsioDirection,
+        };
+        let (failover_publisher, failover_receiver) = failover_telemetry_channel();
+        drop(failover_publisher);
+        let (drift_publisher, drift_receiver) = drift_runtime_telemetry_channel();
+        let mut runtime = DriftRuntimeController::new(drift_publisher);
+        for index in 0..6_u64 {
+            let position = 1_000_000 + index * 480_000;
+            let input = MeterFrame {
+                sequence: index + 1,
+                frame_position: position,
+                direction: AsioDirection::Input,
+                peaks: Vec::new(),
+            };
+            let returned = MeterFrame {
+                sequence: index + 1,
+                frame_position: position + 120 + index * 24,
+                direction: AsioDirection::Output,
+                peaks: Vec::new(),
+            };
+            runtime.ingest_input(input, index, index).unwrap();
+            runtime.ingest_return(1, returned, index, index).unwrap();
+        }
+        let session =
+            VocalControlSession::with_runtime_telemetry(failover_receiver, drift_receiver);
+        let snapshot = session.status().clock_drift;
+        assert_eq!(
+            snapshot.state,
+            crate::drift_runtime::DriftRuntimeState::Locked
+        );
+        assert!(snapshot.bounded_snapshot);
+        assert!(!snapshot.hardware_ready);
     }
 }
