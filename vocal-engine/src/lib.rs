@@ -19,6 +19,7 @@ use std::{
 
 pub mod blend;
 pub mod calibration;
+pub mod capture;
 pub mod control;
 pub mod correction;
 pub mod dynamics;

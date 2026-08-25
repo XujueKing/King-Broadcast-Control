@@ -1,6 +1,7 @@
 use king_vocal_engine::{
     benchmark_transfer,
     calibration::run_virtual_calibration_wizard,
+    capture::run_default_meter_replay,
     correction::{parse_tonic, ScaleMode},
     enumerate_devices,
     failover::run_failover_matrix,
@@ -44,6 +45,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("simulate-failover") => run_failover_simulator(&arguments[1..]),
         Some("discover-routing-virtual") => run_virtual_routing(&arguments[1..]),
         Some("simulate-calibration-wizard") => run_virtual_calibration(&arguments[1..]),
+        Some("replay-meter-fixture") => run_meter_fixture_replay(&arguments[1..]),
         Some("control-stdio") => {
             king_vocal_engine::control::serve_control_lines(
                 io::stdin().lock(),
@@ -56,6 +58,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
     }
+}
+
+fn run_meter_fixture_replay(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let report = run_default_meter_replay()?;
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--output").map(PathBuf::from) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
 }
 
 fn run_virtual_calibration(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -292,6 +307,9 @@ fn print_help() {
 
   simulate-calibration-wizard [--output PATH]
       P19 模拟现场逐路校准向导；验证倒计时、单路锁定、串音拒绝和取消，不启动物理音频。
+
+  replay-meter-fixture [--output PATH]
+      P20 回放只读电平夹具并驱动同一套校准向导；不打开输出流、不写 Qu-16。
 
   bench [--block-frames 128] [--blocks 10000]
       仅测试无锁传输内核，不冒充驱动/USB/物理 RTT。
