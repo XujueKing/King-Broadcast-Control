@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   equalPowerGains,
   formatDuration,
@@ -12,6 +13,20 @@ import {
 import { collectRhythmEvents } from "./rhythm-runtime.js";
 import { reconcileStableAssets } from "./media-scan-stability.js";
 import { lyricAtTime, parseLrc, selectLyricsDeck } from "./lyrics-runtime.js";
+import { applyPreferredLyricsFont, mergeFontFamilies, registerCustomFonts } from "./font-runtime.js";
+import {
+  createOfflineVocalStatus,
+  describeVocalFailover,
+  formatVocalMetric,
+  normalizeVocalResponse,
+  updatePreviewVocalPreset,
+  vocalLaneLabels,
+  vocalPresetOptions,
+} from "./vocal-runtime.js";
+import { createOfflineRoutingStatus, normalizeRoutingResponse, routingStageLabel } from "./vocal-routing.js";
+import { createCalibrationStatus, normalizeCalibrationReport } from "./vocal-calibration.js";
+import { MixerWorkspace } from "./MixerConsole.jsx";
+import { defaultMixerModelId, mixerModelById, mixerModels } from "./mixer-models/index.js";
 import {
   nextConfiguredId,
   rhythmEventMatchesRule,
@@ -23,7 +38,7 @@ import {
   DiceFive, Play, Pause, SkipBack, SkipForward, Lightning, Clock,
   SpeakerHigh, SpeakerSlash, ArrowsClockwise, MonitorPlay, WifiHigh, CheckCircle,
   GearSix, FloppyDisk, MusicNoteSimple, RepeatOnce, ListNumbers, Shuffle,
-  ArrowCounterClockwise,
+  ArrowCounterClockwise, Headphones, Microphone,
 } from "@phosphor-icons/react";
 
 const demoTracks = [
@@ -53,6 +68,48 @@ const demoTracks = [
   { title: "Morning Fade", artist: "Dawn Sequence", duration: "04:14", bpm: 112, tag: "结束氛围" },
 ];
 const emptyDeckTrack = { title:"未装载歌曲", artist:"请从左侧曲库装载", duration:"00:00", bpm:"—", tag:"READY" };
+
+const MPV_VOLUME_WRITE_INTERVAL_MS = 34;
+const createMpvVolumeWriter = () => {
+  let pending = null;
+  let timer = 0;
+  let inFlight = false;
+  let lastWriteAt = 0;
+
+  const schedule = () => {
+    if (timer || inFlight || !pending) return;
+    const elapsed = performance.now() - lastWriteAt;
+    timer = window.setTimeout(flush, Math.max(0, MPV_VOLUME_WRITE_INTERVAL_MS - elapsed));
+  };
+  const flush = async () => {
+    timer = 0;
+    if (inFlight || !pending) return schedule();
+    const batch = pending;
+    pending = null;
+    inFlight = true;
+    lastWriteAt = performance.now();
+    try {
+      await Promise.all(batch.map((payload)=>invoke("mpv_deck_set_volume",payload)));
+    } catch (error) {
+      console.error("mpv 推子音量设置失败",error);
+    } finally {
+      inFlight = false;
+      schedule();
+    }
+  };
+
+  return {
+    enqueue(batch) {
+      pending = batch;
+      schedule();
+    },
+    clear() {
+      pending = null;
+      if (timer) window.clearTimeout(timer);
+      timer = 0;
+    },
+  };
+};
 
 const videos = [
   { name: "霓虹舞台", category: "舞台", duration: "04:20", src: "/assets/neon-stage.png" },
@@ -95,6 +152,23 @@ const loadRhythmRule = (key, fallback) => {
     return rhythmRuleOptions.some(([id])=>id===saved) ? saved : fallback;
   } catch {
     return fallback;
+  }
+};
+const loadMixerNumber = (key, fallback) => {
+  try {
+    const value = Number(window.localStorage.getItem(key));
+    return Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+const loadMicrophoneVolumes = () => {
+  try {
+    const values = JSON.parse(window.localStorage.getItem("king.mixer.microphones"));
+    if (!Array.isArray(values) || values.length < 2) return [80,80];
+    return values.slice(0,2).map(value=>Math.min(100,Math.max(0,Number(value)||0)));
+  } catch {
+    return [80,80];
   }
 };
 
@@ -420,7 +494,82 @@ function WaveformCanvas({ peaks, beats = [], downbeats = [], bars = [], bpm = 0,
   return <canvas ref={canvasRef} className={`track-waveform-canvas track-waveform-canvas-${side}`} aria-hidden="true" />;
 }
 
-function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, onPrevious, onReplay, onNext, active, side, level, progress, onSeek, playbackMode, onPlaybackModeChange, lyricsEnabled, lyricsAvailable, vocalMode, accompanimentAvailable, onLyricsToggle, onVocalToggle }) {
+const deckSignalPercent = (peaks, seconds, durationSeconds, outputPercent) => {
+  if (!peaks?.length || !(durationSeconds > 0) || !(outputPercent > 0)) return 0;
+  const position = clamp(seconds / durationSeconds, 0, 1) * (peaks.length - 1);
+  const index = Math.round(position);
+  const sample = (offset) => Math.max(0, Number(peaks[clamp(index + offset, 0, peaks.length - 1)]) || 0) / 100;
+  // A short weighted window suppresses single-sample flicker while preserving kicks.
+  const sourceLinear = sample(-1) * .2 + sample(0) * .55 + sample(1) * .25;
+  if (sourceLinear <= .0001) return 0;
+  const sourceDbfs = 20 * Math.log10(sourceLinear);
+  const sourcePercent = clamp((sourceDbfs + 48) / 48 * 100, 0, 100);
+  // The fader position is the meter's current full scale, not another dB gain
+  // applied before display conversion. A 50% fader therefore caps motion at 50%.
+  return sourcePercent * clamp(outputPercent / 100, 0, 1);
+};
+
+function DeckSignalMeter({ number, side, peaks, progress, durationSeconds, playing, outputPercent, motionPaused }) {
+  const rootRef = useRef(null);
+  const fillRef = useRef(null);
+  const modelRef = useRef({ peaks, progress, durationSeconds, playing, outputPercent, motionPaused });
+  const progressAnchorRef = useRef({ seconds:progress, at:performance.now() });
+  modelRef.current = { peaks, progress, durationSeconds, playing, outputPercent, motionPaused };
+
+  useEffect(() => {
+    progressAnchorRef.current = { seconds:Number(progress) || 0, at:performance.now() };
+  },[progress,peaks,playing,durationSeconds]);
+
+  useEffect(() => {
+    if (!motionPaused) return;
+    const heldPercent = clamp(outputPercent,0,100);
+    fillRef.current?.style.removeProperty("transform");
+    fillRef.current?.style.setProperty("clip-path",`inset(0 ${100-heldPercent}% 0 0)`);
+    rootRef.current?.setAttribute("aria-valuenow",String(Math.round(heldPercent)));
+  },[motionPaused,outputPercent]);
+
+  useEffect(() => {
+    let frame = 0;
+    let lastFrameAt = 0;
+    let displayed = 0;
+    let lastAriaValue = -1;
+    const animate = (now) => {
+      frame = window.requestAnimationFrame(animate);
+      if (now - lastFrameAt < 33) return;
+      lastFrameAt = now;
+      const model = modelRef.current;
+      if (model.motionPaused) {
+        // While the operator holds the fader, replace the animated signal with
+        // an exact position readout that follows every fader value change.
+        displayed = clamp(model.outputPercent,0,100);
+      } else {
+        const anchor = progressAnchorRef.current;
+        const estimatedSeconds = model.playing
+          ? Math.min(model.durationSeconds, anchor.seconds + Math.max(0, now - anchor.at) / 1000)
+          : anchor.seconds;
+        const target = model.playing
+          ? deckSignalPercent(model.peaks, estimatedSeconds, model.durationSeconds, model.outputPercent)
+          : 0;
+        const response = target > displayed ? .52 : .16;
+        displayed += (target - displayed) * response;
+      }
+      if (displayed < .08) displayed = 0;
+      fillRef.current?.style.removeProperty("transform");
+      fillRef.current?.style.setProperty("clip-path",`inset(0 ${100-displayed}% 0 0)`);
+      const ariaValue = Math.round(displayed);
+      if (ariaValue !== lastAriaValue) {
+        rootRef.current?.setAttribute("aria-valuenow",String(ariaValue));
+        lastAriaValue = ariaValue;
+      }
+    };
+    frame = window.requestAnimationFrame(animate);
+    return () => window.cancelAnimationFrame(frame);
+  },[]);
+
+  return <div ref={rootRef} className={`waveform deck-signal-meter deck-signal-meter-${side} ${playing?"is-live":""}`} data-motion-paused={motionPaused?"true":"false"} role="meter" aria-label={`Deck ${number} 实时输出电平`} aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span ref={fillRef}/></div>;
+}
+
+function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, onPrevious, onReplay, onNext, active, side, level, progress, onSeek, playbackMode, onPlaybackModeChange, lyricsEnabled, lyricsAvailable, vocalMode, accompanimentAvailable, onLyricsToggle, onVocalToggle, meterMotionPaused }) {
   const demoWaveformPeaks = useMemo(() => buildWaveformPeaks(track.title, WAVEFORM_PEAK_COUNT), [track.title]);
   const dragRef = useRef(null);
   const [seekPreview, setSeekPreview] = useState(null);
@@ -540,7 +689,7 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
   return <section className={`deck deck-channel-${side} ${active ? "deck-active" : ""}`}>
     <div className="deck-head"><span className="deck-number">DECK {number}</span><button type="button" className={`deck-play-toggle ${playing?"on":"paused"}`} onClick={onPlay} aria-label={`Deck ${number} ${playing?"暂停":"播放"}`} aria-pressed={playing} title={playing?"暂停":"播放"}>{playing?<Pause weight="fill"/>:<Play weight="fill"/>}</button></div>
     <div className="deck-track"><div className={`cover cover-${side}`}><MusicNotes weight="fill" /></div><div><h3>{track.title}</h3><p>{track.artist} · <button type="button" className="deck-bpm-button" disabled={!track.path||!analysis} onClick={openRhythmEditor} title="校正 BPM 与小节第一拍">{analyzedBpm} BPM</button>{analysis?.correction&&<span className="rhythm-corrected">已校正</span>}</p></div></div>
-    <div className="waveform" role="progressbar" aria-label={`Deck ${number} 音量`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={level}><span style={{ width: `${level}%` }} /></div>
+    <DeckSignalMeter key={`fixed-tick-meter-v2-${number}`} number={number} side={side} peaks={waveformPeaks} progress={displayedProgress} durationSeconds={durationSeconds} playing={playing} outputPercent={level} motionPaused={meterMotionPaused}/>
     <div
       className={`track-waveform track-waveform-${side} ${playing?"is-playing":""} ${seekPreview!==null?"is-seeking":""}`}
       role="slider"
@@ -683,7 +832,15 @@ export function MediaOutputScreen({ media, track, lyrics = null, transform = def
   };
   const baseMedia = media.type === "text" ? media.baseMedia ?? { type: "image", src: null } : media;
   const style = !baseMedia.src ? { background: baseMedia.background ?? "#000" } : undefined;
-  return <div ref={screenRef} className={`led-screen ${baseMedia.type === "image" && !baseMedia.src ? "black-output" : ""}`} style={style}>
+  const lyricRows = lyrics?.text ? [
+    lyrics.previousText && { role:"previous", text:lyrics.previousText, offset:-1 },
+    { role:"current", text:lyrics.text, offset:0 },
+    lyrics.nextText && { role:"next", text:lyrics.nextText, offset:1 },
+    lyrics.followingText && { role:"following", text:lyrics.followingText, offset:2 },
+  ].filter(Boolean) : [];
+  const lyricFitScale = (text) => Math.max(.5,Math.min(1,27/Math.max(27,[...String(text).replace(/\s+/g," ").trim()].length)));
+  return <div ref={screenRef} className={`led-screen ${baseMedia.type === "image" && !baseMedia.src ? "black-output" : ""}`}>
+    <div className="led-physical-canvas" style={style}>
     {baseMedia.src&&(isPlayableVideoSource(baseMedia.src)
       ? <video className={`media-source fit-${transform.fit}`} src={baseMedia.src} autoPlay loop playsInline muted={!allowAudio||baseMedia.muted!==false} draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>
       : <img className={`media-source fit-${transform.fit}`} src={baseMedia.src} alt="" draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>)}
@@ -716,17 +873,18 @@ export function MediaOutputScreen({ media, track, lyrics = null, transform = def
         {editable&&selectedElementId===element.id&&inlineEditingId!==element.id&&<span className="text-resize-handles" aria-hidden="true">{["nw","n","ne","e","se","s","sw","w"].map((position)=><i key={position} className={`text-resize-handle handle-${position}`} onPointerDown={(event)=>beginElementDrag(element,`resize-${position}`,event)}/>)}</span>}
       </div>})}
     </div>}
-    {lyrics?.text&&<div className={`led-lyrics-overlay lyrics-deck-${lyrics.deck}`} aria-live="off"><b>{lyrics.text}</b>{lyrics.nextText&&<small>{lyrics.nextText}</small>}</div>}
+    {lyricRows.length>0&&<div className={`led-lyrics-overlay lyrics-deck-${lyrics.deck}`} aria-live="off">{lyricRows.map((row)=><span key={`${lyrics.trackId??"track"}:${lyrics.index+row.offset}`} className={`led-lyric-line is-${row.role}`}><span style={{fontSize:`${lyricFitScale(row.text)}em`}}>{row.text}</span></span>)}</div>}
+    </div>
   </div>;
 }
 
-function FontFamilyPicker({ fonts, value, disabled, onChange }) {
+function FontFamilyPicker({ fonts, value, disabled, directory="", customCount=0, onChange, onOpenDirectory, onRefresh }) {
   const [open,setOpen] = useState(false);
   const [query,setQuery] = useState("");
   const filtered = useMemo(()=>fonts.filter((font)=>font.toLowerCase().includes(query.trim().toLowerCase())).slice(0,120),[fonts,query]);
   return <div className="font-family-picker">
     <button type="button" className="font-picker-trigger" disabled={disabled} onClick={()=>setOpen((current)=>!current)} title={value}><span style={{fontFamily:value}}>{value}</span><i>⌄</i></button>
-    {open&&<div className="font-picker-popup"><input autoFocus value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="搜索系统字体" onKeyDown={(event)=>{if(event.key==="Escape")setOpen(false)}}/><div className="font-picker-list">{filtered.map((font)=><button type="button" key={font} className={font===value?"active":""} style={{fontFamily:font}} onClick={()=>{onChange(font);setOpen(false);setQuery("")}}>{font}</button>)}{filtered.length===0&&<small>未找到字体</small>}</div></div>}
+    {open&&<div className="font-picker-popup"><div className="font-picker-tools" title={directory}><button type="button" onClick={onOpenDirectory}>字体目录</button><button type="button" onClick={onRefresh}>刷新</button><small>软件字体 {customCount} 个 · 含系统字体</small></div><input autoFocus value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="搜索软件或系统字体" onKeyDown={(event)=>{if(event.key==="Escape")setOpen(false)}}/><div className="font-picker-list">{filtered.map((font)=><button type="button" key={font} className={font===value?"active":""} style={{fontFamily:font}} onClick={()=>{onChange(font);setOpen(false);setQuery("")}}>{font}</button>)}{filtered.length===0&&<small>未找到字体</small>}</div></div>}
   </div>;
 }
 
@@ -738,7 +896,7 @@ function TextProgramThumbnail({ program, slot }) {
   </span>;
 }
 
-function TextFormatToolbar({ elements, fonts, onApply, onAlign, onUpload, saveSlot, onSave }) {
+function TextFormatToolbar({ elements, fonts, fontDirectory, customFontCount, onOpenFontDirectory, onRefreshFonts, onApply, onAlign, onUpload, saveSlot, onSave }) {
   const graphicInputRef = useRef(null);
   const primary = elements.at(-1) ?? {};
   const hasText = elements.some((element)=>element.kind==="text");
@@ -755,7 +913,7 @@ function TextFormatToolbar({ elements, fonts, onApply, onAlign, onUpload, saveSl
       <button type="button" disabled={!hasElements} onClick={()=>onAlign("left")} title="左对齐" aria-label="左对齐"><i className="align-icon align-left"><span/><span/></i></button><button type="button" disabled={!hasElements} onClick={()=>onAlign("center-x")} title="水平居中" aria-label="水平居中"><i className="align-icon align-center-x"><span/><span/></i></button><button type="button" disabled={!hasElements} onClick={()=>onAlign("right")} title="右对齐" aria-label="右对齐"><i className="align-icon align-right"><span/><span/></i></button>
       <button type="button" disabled={!hasElements} onClick={()=>onAlign("top")} title="顶部对齐" aria-label="顶部对齐"><i className="align-icon align-top"><span/><span/></i></button><button type="button" disabled={!hasElements} onClick={()=>onAlign("center-y")} title="垂直居中" aria-label="垂直居中"><i className="align-icon align-center-y"><span/><span/></i></button><button type="button" disabled={!hasElements} onClick={()=>onAlign("bottom")} title="底部对齐" aria-label="底部对齐"><i className="align-icon align-bottom"><span/><span/></i></button>
     </div>
-    <FontFamilyPicker fonts={fonts} value={primary.fontFamily??"Microsoft YaHei"} disabled={!hasText} onChange={(fontFamily)=>onApply({fontFamily},true)}/>
+    <FontFamilyPicker fonts={fonts} value={primary.fontFamily??"Microsoft YaHei"} disabled={!hasText} directory={fontDirectory} customCount={customFontCount} onOpenDirectory={onOpenFontDirectory} onRefresh={onRefreshFonts} onChange={(fontFamily)=>onApply({fontFamily},true)}/>
     <select className="font-weight-picker" aria-label="字体字重" value={String(primary.fontWeight??(primary.bold?800:400))} disabled={!hasText} onChange={(event)=>onApply({fontWeight:Number(event.target.value),bold:Number(event.target.value)>=700},true)}><option value="300">Light</option><option value="400">Regular</option><option value="500">Medium</option><option value="600">SemiBold</option><option value="700">Bold</option><option value="900">Heavy</option></select>
     <label className="toolbar-font-size"><span>字号</span><input type="number" min="10" max="96" value={primary.fontSize??28} disabled={!hasText} onChange={(event)=>onApply({fontSize:clamp(Number(event.target.value),10,96)},true)}/><em>pt</em></label>
     <button type="button" className={primary.bold?"active text-style-button":"text-style-button"} disabled={!hasText} aria-pressed={Boolean(primary.bold)} onClick={()=>onApply({bold:!primary.bold},true)} title="加粗"><b>B</b></button>
@@ -834,12 +992,71 @@ function MediaTransformEditor({ value, onChange }) {
   </div>;
 }
 
-function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitorChange, onSave, dirty }) {
+function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitorChange, onSave, dirty, mixerModelId, mixerDriverStatus, mixerControlHost, mixerMeterStatus, onMixerModelChange, onMixerControlHostChange, onOpenMixerDriver, vocalStatus, vocalBusy, onRefreshVocal, onVocalPresetChange, onVocalDisarm, vocalRouting, routingBusy, onDiscoverRouting, onSaveRouting, calibrationStatus, onRunCalibration }) {
+  const failoverView=describeVocalFailover(vocalStatus.failover);
   return <section className="settings-view" aria-label="屏幕与监控设置">
     <header className="settings-header">
       <div><GearSix weight="fill"/><span><b>屏幕与监控按钮设置</b><small>左侧 4 个输出屏，右侧预览开关与 3 个监控机位</small></span></div>
       <button className="settings-save" onClick={onSave} disabled={!dirty}><FloppyDisk weight="fill"/>{dirty ? "保存配置" : "配置已保存"}</button>
     </header>
+    <section className="settings-mixer-model" aria-label="调音台型号设置">
+      <div className="settings-mixer-identity"><SlidersHorizontal weight="fill"/><span><b>调音台型号包</b><small>USB-B 传输音频 · 以太网 TCP-MIDI 控制 · 选择型号后切换数字孪生 UI 与驱动</small></span></div>
+      <label><span>当前型号</span><select value={mixerModelId} onChange={event=>onMixerModelChange(event.target.value)}>{mixerModels.map(model=><option value={model.id} key={model.id}>{model.displayName}</option>)}</select></label>
+      <label className="settings-mixer-host"><span>以太网控制台 IP / 主机名</span><input value={mixerControlHost} placeholder="例如 192.168.1.60" spellCheck="false" onChange={event=>onMixerControlHostChange(event.target.value)}/></label>
+      <div className="settings-mixer-states"><div className={`settings-driver-state ${mixerDriverStatus.state}`}><b>{mixerDriverStatus.title}</b><small>{mixerDriverStatus.message}</small></div><div className={`settings-meter-state ${mixerMeterStatus.state}`}><b>{mixerMeterStatus.title}</b><small>{mixerMeterStatus.message}</small></div></div>
+      <button type="button" className="settings-driver-action" onClick={onOpenMixerDriver}>安装驱动 / EULA</button>
+    </section>
+    <section className="settings-vocal-engine" aria-label="AI 人声补音设置">
+      <div className="settings-vocal-heading">
+        <div className="settings-vocal-identity"><Microphone weight="fill"/><span><b>AI 人声补音</b><small>独立 Rust Vocal Engine · 三路隔离 · 当前不启动物理音频</small></span></div>
+        <div className={`vocal-runtime-state ${vocalStatus.hardwareBound?"bound":"offline"}`}>
+          <i aria-hidden="true"/><span><b>{vocalStatus.hardwareBound?"硬件已绑定":"离线控制 / 未武装"}</b><small>{vocalStatus.message}</small></span>
+        </div>
+        <div className={`vocal-failover-state ${failoverView.tone}`} role="status" aria-live="polite">
+          <i aria-hidden="true"/><span><b>{failoverView.title}</b><small>{failoverView.message}</small></span>
+        </div>
+        <div className="settings-vocal-actions">
+          <button type="button" onClick={onRefreshVocal} disabled={vocalBusy}><ArrowsClockwise/>{vocalBusy?"读取中":"刷新状态"}</button>
+          <button type="button" onClick={onVocalDisarm} disabled={vocalBusy}><SpeakerSlash/>保持解除武装</button>
+        </div>
+      </div>
+      <div className="vocal-lane-grid">
+        {vocalStatus.lanes.map((lane,index)=><article className="vocal-lane-card" key={lane.lane}>
+          <header><span className="vocal-lane-index">{index+1}</span><span><b>{lane.lane.toUpperCase()}</b><small>{vocalLaneLabels[lane.lane]}</small></span><i className={lane.fresh?"fresh":""} title={lane.fresh?"实时数据":"无实时输入"}/></header>
+          <label><span>修音方案</span><select value={lane.preset} disabled={vocalBusy} onChange={event=>onVocalPresetChange(lane.lane,event.target.value)}>{vocalPresetOptions.map(option=><option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
+          <dl>
+            <div><dt>输入峰值</dt><dd>{formatVocalMetric(lane.inputPeakDbfs,{suffix:" dBFS",digits:1})}</dd></div>
+            <div><dt>质量评分</dt><dd>{formatVocalMetric(lane.qualityScore,{digits:0})}</dd></div>
+            <div><dt>修音混合</dt><dd>{formatVocalMetric(lane.correctedMix,{scale:100,suffix:"%",digits:0})}</dd></div>
+          </dl>
+        </article>)}
+      </div>
+      <section className={`vocal-routing-panel ${vocalRouting.hardwareReady?"verified":vocalRouting.stage}`} aria-label="Vocal Engine USB 通道映射">
+        <header>
+          <div><SlidersHorizontal weight="fill"/><span><b>Qu-16 USB / ASIO 通道映射</b><small>{vocalRouting.driverName?`${vocalRouting.driverName} · ${vocalRouting.sampleRate??"--"} Hz`:`逐路确认输入与处理返回，禁止按通道序号猜测`}</small></span></div>
+          <span className="vocal-routing-stage"><i/>{routingStageLabel(vocalRouting.stage)}</span>
+          <div className="vocal-routing-actions">
+            <button type="button" onClick={onDiscoverRouting} disabled={routingBusy}><ArrowsClockwise/>发现通道</button>
+            <button type="button" onClick={onRunCalibration} disabled={routingBusy}><SlidersHorizontal/>{routingBusy?"执行中":"向导演练"}</button>
+            <button type="button" onClick={onSaveRouting} disabled={routingBusy||!vocalRouting.report||vocalRouting.saved}><FloppyDisk/>{vocalRouting.saved?"已保存":"保存映射"}</button>
+            <button type="button" disabled title="连接 Qu-16 USB-B 并完成现场逐路追踪后开放"><CheckCircle/>现场确认待连接</button>
+          </div>
+        </header>
+        <div className="vocal-calibration-progress" aria-label="三路校准进度">
+          {calibrationStatus.lanes.map((lane,index)=><div className={lane.state} key={lane.lane}><span>{index+1}</span><b>{lane.lane.toUpperCase()}</b><small>{lane.state==="complete"?"输入与返回已绑定":lane.state==="pending"?"等待校准":"正在校准"}</small></div>)}
+          <p><b>{calibrationStatus.finalState==="complete"?"向导演练完成":"现场逐路校准"}</b><small>{calibrationStatus.message}</small><em>{calibrationStatus.jointEvidence?`同步 ${calibrationStatus.maximumSkewFrames??"--"}/${calibrationStatus.allowedSkewFrames??"--"} 帧`:`拒绝串音 ${calibrationStatus.rejectedObservations} 次`}</em></p>
+        </div>
+        <div className="vocal-routing-lanes">
+          {(vocalRouting.lanes.length?vocalRouting.lanes:vocalStatus.lanes.map((lane,index)=>({lane:lane.lane,quInputChannel:index+1,inputDriverIndex:null,inputChannelName:"未发现",returnDriverIndex:null,returnChannelName:"未发现",evidence:"virtual_signal_trace"}))).map(route=><article key={route.lane}>
+            <strong>{route.lane.toUpperCase()}<small>QU CH{route.quInputChannel}</small></strong>
+            <span><small>USB 输入</small><b>{route.inputDriverIndex===null?"--":`#${route.inputDriverIndex}`} · {route.inputChannelName}</b></span>
+            <span><small>处理返回</small><b>{route.returnDriverIndex===null?"--":`#${route.returnDriverIndex}`} · {route.returnChannelName}</b></span>
+            <em className={route.evidence==="onsite_signal_trace"?"onsite":"virtual"}>{route.evidence==="onsite_signal_trace"?"现场证据":"虚拟证据"}</em>
+          </article>)}
+        </div>
+        <footer><span>{vocalRouting.message}</span><small>歧义 {vocalRouting.ambiguityCount??0} · 未启动声音 · 未写入 Qu-16</small></footer>
+      </section>
+    </section>
     <div className="settings-columns">
       <section className="settings-group">
         <div className="settings-group-title"><MonitorPlay weight="fill"/><b>输出屏幕</b><span>左侧 4 个固定位置</span></div>
@@ -883,6 +1100,10 @@ export function App() {
   const [playingDecks, setPlayingDecks] = useState(() => desktopRuntime ? { 1: false, 2: false } : { 1: true, 2: false });
   const [deckProgress, setDeckProgress] = useState(() => desktopRuntime ? { 1: 0, 2: 0 } : { 1: 136, 2: 0 });
   const [crossfade, setCrossfade] = useState(28);
+  const [masterVolume, setMasterVolume] = useState(()=>loadMixerNumber("king.mixer.master",100));
+  const [headphoneVolume, setHeadphoneVolume] = useState(()=>loadMixerNumber("king.mixer.headphones",70));
+  const [microphoneVolumes, setMicrophoneVolumes] = useState(loadMicrophoneVolumes);
+  const [faderInteractionActive, setFaderInteractionActive] = useState(false);
   const [deckPlaybackModes, setDeckPlaybackModes] = useState({ 1: "sequence", 2: "sequence" });
   const [deckLyricsEnabled, setDeckLyricsEnabled] = useState({ 1: true, 2: true });
   const [deckVocalModes, setDeckVocalModes] = useState({ 1: "original", 2: "original" });
@@ -899,6 +1120,11 @@ export function App() {
   const audioAnalysisWorkerRef = useRef(false);
   const audioAiQueuedRef = useRef(new Set());
   const audioAiQueueChainRef = useRef(Promise.resolve());
+  const [runtimeCapability, setRuntimeCapability] = useState({ mode:desktopRuntime?"detecting":"player", hasNvidia:false, aiProcessingAvailable:false, message:desktopRuntime?"正在识别硬件":"浏览器播放版" });
+  const [audioAiJobs, setAudioAiJobs] = useState([]);
+  const [audioAiWorker, setAudioAiWorker] = useState({ running:false, message:"" });
+  const [songPackageDirectories, setSongPackageDirectories] = useState({ inboxDirectory:"", outboxDirectory:"" });
+  const [songPackageMessage, setSongPackageMessage] = useState("");
   const [mpvRuntime, setMpvRuntime] = useState({ available:false, checked:!desktopRuntime, version:null, message:desktopRuntime?"正在检测 mpv":"浏览器原型模式" });
   const deckOneAudioRef = useRef(null);
   const deckTwoAudioRef = useRef(null);
@@ -908,7 +1134,26 @@ export function App() {
   const mpvEndingRef = useRef({ 1:false, 2:false });
   const mpvEofHandledRef = useRef({ 1:false, 2:false });
   const rhythmCursorRef = useRef({ 1:{ trackKey:null, seconds:0 }, 2:{ trackKey:null, seconds:0 } });
+  const mpvVolumeWriterRef = useRef(null);
+  if (!mpvVolumeWriterRef.current) mpvVolumeWriterRef.current = createMpvVolumeWriter();
   const mpvEnabled = desktopRuntime && mpvRuntime.available;
+  const writeDeckOutputVolumes = useCallback((nextCrossfade,nextMasterVolume) => {
+    const { deck1:deckOneGain, deck2:deckTwoGain } = equalPowerGains(nextCrossfade);
+    const masterGain = clamp(Number(nextMasterVolume) / 100,0,1);
+    if (mpvEnabled) {
+      const batch = [];
+      if (mpvLoadedPathsRef.current[1]) batch.push({deck:1,volume:deckOneGain*masterGain*100});
+      if (mpvLoadedPathsRef.current[2]) batch.push({deck:2,volume:deckTwoGain*masterGain*100});
+      if (batch.length) mpvVolumeWriterRef.current.enqueue(batch);
+      return;
+    }
+    if (deckOneAudioRef.current) deckOneAudioRef.current.volume = deckOneGain*masterGain;
+    if (deckTwoAudioRef.current) deckTwoAudioRef.current.volume = deckTwoGain*masterGain;
+  },[mpvEnabled]);
+  const beginFaderInteraction = useCallback(() => {
+    setFaderInteractionActive(true);
+  },[]);
+  const endFaderInteraction = useCallback(() => setFaderInteractionActive(false),[]);
   const tracks = useMemo(() => audioAssets.length ? audioAssets.map((item)=>({
     id:item.id,
     title:item.title || item.name,
@@ -926,6 +1171,14 @@ export function App() {
     vocalsPath:item.vocalsPath ?? null,
     accompanimentPath:item.accompanimentPath ?? null,
   })) : demoTracks.map((item)=>({...item,demo:true,tag:`演示 · ${item.tag}`})), [audioAssets]);
+  const normalizeMediaPath = (value) => {
+    const path = String(value ?? "");
+    return (path.startsWith("\\\\?\\") ? path.slice(4) : path).toLowerCase();
+  };
+  const audioAiJobByPath = useMemo(
+    () => new Map(audioAiJobs.map((job)=>[normalizeMediaPath(job.mediaPath),job])),
+    [audioAiJobs],
+  );
   const deckLyricsLines = useMemo(() => ({
     1:parseLrc(tracks[deck1]?.lyrics),
     2:parseLrc(tracks[deck2]?.lyrics),
@@ -936,22 +1189,60 @@ export function App() {
     availableDecks:{ 1:deckLyricsLines[1].length>0, 2:deckLyricsLines[2].length>0 },
     crossfade,
   });
+  const activeLyricIndex = lyricsDeck
+    ? (lyricAtTime(deckLyricsLines[lyricsDeck],deckProgress[lyricsDeck])?.index ?? -1)
+    : -1;
   const activeLyrics = useMemo(() => {
-    if (!lyricsDeck) return null;
-    const line=lyricAtTime(deckLyricsLines[lyricsDeck],deckProgress[lyricsDeck]);
-    if (!line) return null;
+    if (!lyricsDeck||activeLyricIndex<0) return null;
+    const lines=deckLyricsLines[lyricsDeck];
     return {
       deck:lyricsDeck,
       trackId:tracks[lyricsDeck===1?deck1:deck2]?.id ?? null,
-      index:line.index,
-      text:line.current.text,
-      nextText:line.next?.text ?? "",
+      index:activeLyricIndex,
+      previousText:lines[activeLyricIndex-1]?.text ?? "",
+      text:lines[activeLyricIndex].text,
+      nextText:lines[activeLyricIndex+1]?.text ?? "",
+      followingText:lines[activeLyricIndex+2]?.text ?? "",
     };
-  },[lyricsDeck,deckLyricsLines,deckProgress,tracks,deck1,deck2]);
+  },[lyricsDeck,activeLyricIndex,deckLyricsLines,tracks,deck1,deck2]);
   const audioAnalysisFingerprint = useMemo(
     () => audioAssets.map((item)=>audioAnalysisKey(item)).filter(Boolean).join("\n"),
     [audioAssets],
   );
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return undefined;
+    let disposed = false;
+    Promise.all([invoke("runtime_capabilities"),invoke("song_package_directories")])
+      .then(([capability,directories])=>{
+        if (disposed) return;
+        setRuntimeCapability(capability);
+        setSongPackageDirectories(directories);
+      })
+      .catch((error)=>console.error("读取运行能力失败",error));
+    return ()=>{disposed=true};
+  },[]);
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__||!runtimeCapability.aiProcessingAvailable) return;
+    const loadedDeckPaths=[tracks[deck1]?.path,tracks[deck2]?.path].filter(Boolean);
+    const playingPaths=[playingDecks[1]?tracks[deck1]?.path:null,playingDecks[2]?tracks[deck2]?.path:null].filter(Boolean);
+    invoke("set_audio_ai_scheduler",{playingPaths,deckPaths:[...new Set(loadedDeckPaths)]})
+      .then(setAudioAiWorker)
+      .catch((error)=>console.error("更新 AI 三级调度失败",error));
+  },[runtimeCapability.aiProcessingAvailable,playingDecks[1],playingDecks[2],tracks,deck1,deck2]);
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return undefined;
+    let disposed = false;
+    const refresh = () => Promise.all([invoke("list_audio_ai_jobs"),invoke("audio_ai_worker_status")])
+      .then(([jobs,worker])=>{
+        if (disposed) return;
+        setAudioAiJobs(Array.isArray(jobs)?jobs:[]);
+        setAudioAiWorker(worker);
+      })
+      .catch((error)=>console.error("读取 AI 制作队列失败",error));
+    refresh();
+    const timer=window.setInterval(refresh,3000);
+    return ()=>{disposed=true;window.clearInterval(timer)};
+  },[]);
   useEffect(() => {
     audioAssetsRef.current = audioAssets;
     deckSelectionRef.current = {
@@ -962,6 +1253,17 @@ export function App() {
   const [mediaLibraryDirectories, setMediaLibraryDirectories] = useState({ rootDirectory:"", videoDirectory:"", audioDirectory:"" });
   const [imageAssets, setImageAssets] = useState([]);
   const [systemFonts, setSystemFonts] = useState(fallbackFontFamilies);
+  const [fontLibraryDirectory,setFontLibraryDirectory] = useState("");
+  const [customFontCount,setCustomFontCount] = useState(0);
+  const refreshFontLibrary = () => invoke("font_library")
+    .then(async (library)=>{
+      await registerCustomFonts(library?.customFonts);
+      applyPreferredLyricsFont(library);
+      setSystemFonts(mergeFontFamilies(library,fallbackFontFamilies));
+      setFontLibraryDirectory(library?.directory??"");
+      setCustomFontCount(library?.customFonts?.length??0);
+      return library;
+    });
   const [imageLibraryDirectory, setImageLibraryDirectory] = useState("");
   const [selectedImage, setSelectedImage] = useState(blackScreenImage.id);
   const [outputMedia, setOutputMedia] = useState({ ...blackScreenImage, type:"image" });
@@ -1002,9 +1304,247 @@ export function App() {
   const [previewMode, setPreviewMode] = useState(false);
   const [ledOutputStatus, setLedOutputStatus] = useState({ connected: false, previewMode: false, message: "正在检测 LED 第二屏" });
   const [settingsDirty, setSettingsDirty] = useState(false);
+  const [mixerModelId, setMixerModelId] = useState(()=>window.localStorage.getItem("king.mixer.model")||defaultMixerModelId);
+  const [mixerDriverStatus, setMixerDriverStatus] = useState({state:"checking",title:"正在检测驱动",message:"Windows 桌面端会核对当前型号的驱动状态"});
+  const [mixerControlHost,setMixerControlHost]=useState(()=>window.localStorage.getItem("king.mixer.controlHost")||"");
+  const [mixerMeterSnapshot,setMixerMeterSnapshot]=useState(null);
+  const [mixerMeterStatus,setMixerMeterStatus]=useState({state:"disconnected",title:"真机表计未连接",message:"在设置中填写 Qu-16 的以太网 IP"});
+  const [mixerParameterSnapshot,setMixerParameterSnapshot]=useState(null);
+  const [mixerControlStatus,setMixerControlStatus]=useState({mode:"local-ui-only",state:"offline",title:"本地控制",message:"离线数字孪生模式"});
+  const [vocalStatus,setVocalStatus]=useState(()=>createOfflineVocalStatus(desktopRuntime?"等待读取独立 Vocal Engine":"浏览器预览；未连接独立 Vocal Engine"));
+  const [vocalBusy,setVocalBusy]=useState(false);
+  const [vocalRouting,setVocalRouting]=useState(()=>createOfflineRoutingStatus(desktopRuntime?"等待读取已保存映射":"浏览器预览；可执行离线演练"));
+  const [routingBusy,setRoutingBusy]=useState(false);
+  const [calibrationStatus,setCalibrationStatus]=useState(()=>createCalibrationStatus());
+  const qu16MeterEffectGenerationRef=useRef(0);
+  const qu16ControlSessionRef=useRef({generation:0,host:"",sessionId:null,revision:-1,live:false});
+  const qu16ParameterFrameApplyRef=useRef(null);
+  const qu16BrowserParameterFrameRef=useRef({host:null,sessionId:null,revision:-1});
   const [activeNav, setActiveNav] = useState("首页");
   const [now, setNow] = useState(() => new Date());
   const effectiveLight = light === null ? autoLightPreset : light;
+  const activeMixerModel = mixerModelById(mixerModelId);
+  const refreshVocalStatus=useCallback(async()=>{
+    if(!desktopRuntime){
+      setVocalStatus(current=>normalizeVocalResponse(createOfflineVocalStatus(),current));
+      return;
+    }
+    setVocalBusy(true);
+    try{
+      const response=await invoke("vocal_runtime_status");
+      setVocalStatus(current=>normalizeVocalResponse(response,current));
+    }catch(error){
+      setVocalStatus(current=>({...current,physicalAudioStarted:false,hardwareBound:false,message:`Vocal Engine 控制桥不可用：${String(error)}`}));
+    }finally{
+      setVocalBusy(false);
+    }
+  },[desktopRuntime]);
+  const refreshVocalRouting=useCallback(async()=>{
+    if(!desktopRuntime)return;
+    try{
+      const response=await invoke("vocal_routing_status");
+      setVocalRouting(current=>normalizeRoutingResponse(response,current));
+    }catch(error){
+      setVocalRouting(current=>({...current,hardwareReady:false,message:`通道映射读取失败：${String(error)}`}));
+    }
+  },[desktopRuntime]);
+  useEffect(()=>{
+    if(activeNav==="设置"){
+      refreshVocalStatus();
+      refreshVocalRouting();
+    }
+  },[activeNav,refreshVocalStatus,refreshVocalRouting]);
+  useEffect(()=>{
+    if (!desktopRuntime) {
+      setMixerDriverStatus({state:"preview",title:"浏览器预览",message:`${activeMixerModel.driver.name} ${activeMixerModel.driver.version}`});
+      return;
+    }
+    invoke("mixer_driver_status",{modelId:mixerModelId})
+      .then(setMixerDriverStatus)
+      .catch(error=>setMixerDriverStatus({state:"error",title:"驱动检测失败",message:String(error)}));
+  },[desktopRuntime,mixerModelId,activeMixerModel.driver.name,activeMixerModel.driver.version]);
+  useEffect(()=>{
+    const acceptFrame=(frame)=>{
+      if(!frame||typeof frame!=="object")return;
+      setMixerMeterSnapshot(frame);
+      setMixerMeterStatus(frame.connected
+        ? {state:"live",title:"真机表计 LIVE",message:`${frame.source||"Qu-16 TCP Meter"} · ${mixerControlHost||"测试帧"}`}
+        : {state:"disconnected",title:"真机表计已断开",message:frame.message||"等待 Qu-16 重新连接"});
+    };
+    const handleBrowserFrame=(event)=>acceptFrame(event.detail);
+    window.addEventListener("king:qu16-meter-frame",handleBrowserFrame);
+    return ()=>window.removeEventListener("king:qu16-meter-frame",handleBrowserFrame);
+  },[mixerControlHost]);
+  useEffect(()=>{
+    if(desktopRuntime)return undefined;
+    const handleBrowserParameterFrame=(event)=>{
+      const frame=event.detail;
+      if(!frame||typeof frame!=="object"||!frame.parameters||typeof frame.parameters!=="object")return;
+      const revision=Number(frame.revision);
+      const sessionId=Number(frame.sessionId);
+      const host=String(frame.host||"browser-qa");
+      if(!Number.isSafeInteger(revision)||revision<0||!Number.isFinite(sessionId))return;
+      const previous=qu16BrowserParameterFrameRef.current;
+      if(previous.host===host&&previous.sessionId===sessionId&&revision<previous.revision)return;
+      qu16BrowserParameterFrameRef.current={host,sessionId,revision};
+      setMixerParameterSnapshot({...frame,host,sessionId,revision,receivedAtMs:Date.now()});
+      setMixerControlStatus({mode:"local-ui-only",state:"preview",title:"参数快照预览",message:"浏览器合成事件 · 不会写入真机"});
+    };
+    window.addEventListener("king:qu16-parameter-frame",handleBrowserParameterFrame);
+    return ()=>window.removeEventListener("king:qu16-parameter-frame",handleBrowserParameterFrame);
+  },[desktopRuntime]);
+  useEffect(()=>{
+    const host=mixerControlHost.trim();
+    const effectGeneration=++qu16MeterEffectGenerationRef.current;
+    if(!desktopRuntime||mixerModelId!=="allen-heath-qu16"||!host){
+      setMixerMeterSnapshot(null);
+      setMixerMeterStatus({state:"disconnected",title:"真机表计未连接",message:host?"桌面端启动后连接 Qu-16":"在设置中填写 Qu-16 的以太网 IP"});
+      setMixerParameterSnapshot(null);
+      setMixerControlStatus({mode:"local-ui-only",state:"offline",title:"本地控制",message:host?"桌面端未连接 Qu-16":"未配置 Qu-16 控制地址"});
+      qu16ControlSessionRef.current={generation:effectGeneration,host,sessionId:null,revision:-1,live:false};
+      qu16ParameterFrameApplyRef.current=null;
+      return undefined;
+    }
+    let disposed=false;
+    let unlistenFrame;
+    let unlistenStatus;
+    let unlistenParameters;
+    let startedSessionId=null;
+    let pendingFrame=null;
+    let pendingStatus=null;
+    let pendingParameterFrame=null;
+    qu16ControlSessionRef.current={generation:effectGeneration,host,sessionId:null,revision:-1,live:false};
+    setMixerControlStatus({mode:"hardware-syncing",state:"syncing",title:"正在同步控制状态",message:`Qu-16 TCP-MIDI · ${host}`});
+    const isCurrent=()=>!disposed&&qu16MeterEffectGenerationRef.current===effectGeneration;
+    const detachListeners=()=>{
+      const detachFrame=unlistenFrame;
+      const detachStatus=unlistenStatus;
+      const detachParameters=unlistenParameters;
+      unlistenFrame=undefined;
+      unlistenStatus=undefined;
+      unlistenParameters=undefined;
+      detachFrame?.();
+      detachStatus?.();
+      detachParameters?.();
+    };
+    const applyFrame=(frame)=>{
+      if(!isCurrent()||!frame||frame.host!==host||Number(frame.sessionId)!==startedSessionId)return;
+      setMixerMeterSnapshot(frame);
+      if(frame.connected)setMixerMeterStatus({sessionId:startedSessionId,host,state:"live",title:"真机表计 LIVE",message:`Qu-16 TCP Meter · ${host}`});
+    };
+    const applyStatus=(status)=>{
+      if(!isCurrent()||!status||status.host!==host||Number(status.sessionId)!==startedSessionId)return;
+      setMixerMeterStatus(status);
+      const session=qu16ControlSessionRef.current;
+      if(session.generation!==effectGeneration||session.sessionId!==startedSessionId)return;
+      if(status.state==="disconnected"||status.state==="error"){
+        session.live=false;
+        setMixerControlStatus({mode:"local-ui-only",state:status.state,title:"本地控制",message:status.message||"Qu-16 控制连接已断开"});
+      }else if(!session.live){
+        setMixerControlStatus({mode:"hardware-syncing",state:"syncing",title:"正在同步控制状态",message:`Qu-16 TCP-MIDI · ${host}`});
+      }
+    };
+    const applyParameterFrame=(frame)=>{
+      if(!isCurrent()||!frame||frame.host!==host||Number(frame.sessionId)!==startedSessionId)return false;
+      const revision=Number(frame.revision);
+      if(!Number.isSafeInteger(revision)||revision<0)return false;
+      const session=qu16ControlSessionRef.current;
+      if(session.generation!==effectGeneration||session.host!==host||session.sessionId!==startedSessionId||revision<session.revision)return false;
+      session.revision=revision;
+      session.live=Boolean(frame.connected&&frame.synced);
+      const acceptedFrame={...frame,revision,receivedAtMs:Date.now()};
+      const pendingCount=Number.isFinite(Number(frame.pending))?Math.max(0,Number(frame.pending)):0;
+      setMixerParameterSnapshot(acceptedFrame);
+      setMixerControlStatus(session.live
+        ? {mode:"hardware-live",state:"live",title:"真机控制 LIVE",message:`Qu-16 参数已同步 · ${host}${pendingCount?` · ${pendingCount} 项待确认`:""}`}
+        : frame.connected
+          ? {mode:"hardware-syncing",state:"syncing",title:"正在同步控制状态",message:`Qu-16 TCP-MIDI · ${host}`}
+          : {mode:"local-ui-only",state:"disconnected",title:"本地控制",message:"Qu-16 控制连接已断开"});
+      return true;
+    };
+    qu16ParameterFrameApplyRef.current=applyParameterFrame;
+    const timer=window.setTimeout(async()=>{
+      try{
+        [unlistenFrame,unlistenStatus,unlistenParameters]=await Promise.all([
+          listen("qu16-meter-frame",event=>{
+            if(startedSessionId===null)pendingFrame=event.payload;
+            else applyFrame(event.payload);
+          }),
+          listen("qu16-meter-status",event=>{
+            if(startedSessionId===null)pendingStatus=event.payload;
+            else applyStatus(event.payload);
+          }),
+          listen("qu16-parameter-frame",event=>{
+            if(startedSessionId===null){
+              const pendingRevision=Number(pendingParameterFrame?.revision);
+              const nextRevision=Number(event.payload?.revision);
+              if(!pendingParameterFrame||!Number.isSafeInteger(pendingRevision)||nextRevision>=pendingRevision)pendingParameterFrame=event.payload;
+            }else applyParameterFrame(event.payload);
+          }),
+        ]);
+        if(!isCurrent()){
+          detachListeners();
+          return;
+        }
+        const status=await invoke("qu16_start_metering",{host});
+        startedSessionId=Number(status?.sessionId);
+        qu16ControlSessionRef.current={generation:effectGeneration,host,sessionId:startedSessionId,revision:-1,live:false};
+        if(!isCurrent()){
+          detachListeners();
+          if(Number.isFinite(startedSessionId))invoke("qu16_stop_metering_session",{sessionId:startedSessionId}).catch(()=>{});
+          return;
+        }
+        applyStatus(status);
+        if(pendingStatus)applyStatus(pendingStatus);
+        if(pendingFrame)applyFrame(pendingFrame);
+        if(pendingParameterFrame)applyParameterFrame(pendingParameterFrame);
+        pendingStatus=null;
+        pendingFrame=null;
+        pendingParameterFrame=null;
+      }catch(error){
+        if(isCurrent()){
+          setMixerMeterSnapshot(null);
+          setMixerMeterStatus({state:"error",title:"Qu-16 连接失败",message:String(error)});
+          qu16ControlSessionRef.current.live=false;
+          setMixerControlStatus({mode:"local-ui-only",state:"error",title:"本地控制",message:String(error)});
+        }
+      }
+    },650);
+    return ()=>{
+      disposed=true;
+      window.clearTimeout(timer);
+      detachListeners();
+      if(qu16ParameterFrameApplyRef.current===applyParameterFrame)qu16ParameterFrameApplyRef.current=null;
+      if(qu16ControlSessionRef.current.generation===effectGeneration)qu16ControlSessionRef.current.live=false;
+      if(Number.isFinite(startedSessionId))invoke("qu16_stop_metering_session",{sessionId:startedSessionId}).catch(()=>{});
+    };
+  },[desktopRuntime,mixerControlHost,mixerModelId]);
+  const writeQu16Parameters=useCallback(async(writes)=>{
+    const session=qu16ControlSessionRef.current;
+    if(!desktopRuntime||mixerModelId!=="allen-heath-qu16"||!session.live||!Number.isFinite(session.sessionId)||!Array.isArray(writes)||writes.length===0){
+      return {accepted:false,mode:"local-ui-only"};
+    }
+    const requestGeneration=session.generation;
+    const requestSessionId=session.sessionId;
+    try{
+      const snapshot=await invoke("qu16_write_parameters",{sessionId:requestSessionId,writes});
+      const current=qu16ControlSessionRef.current;
+      if(current.generation!==requestGeneration||current.sessionId!==requestSessionId)return {accepted:false,mode:"stale-session"};
+      qu16ParameterFrameApplyRef.current?.({...snapshot,writeResponseValues:Object.fromEntries(writes.map(write=>[write.key,write.value]))});
+      return {accepted:true,snapshot};
+    }catch(error){
+      const message=String(error);
+      const transportLost=/stale Qu-16 session|connection is not live|has not reached End Sync|worker is not running/i.test(message);
+      const current=qu16ControlSessionRef.current;
+      if(current.generation===requestGeneration&&current.sessionId===requestSessionId){
+        if(transportLost)current.live=false;
+        setMixerControlStatus(transportLost
+          ? {mode:/End Sync/i.test(message)?"hardware-syncing":"local-ui-only",state:"error",title:/End Sync/i.test(message)?"控制状态未同步":"本地控制",message:`Qu-16 写入失败：${message}`}
+          : {mode:"hardware-live",state:"warning",title:"控制写入未完成",message:`Qu-16 写入失败：${message}`});
+      }
+      return {accepted:false,mode:transportLost?"local-ui-only":"hardware-live",error:message};
+    }
+  },[desktopRuntime,mixerModelId]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
@@ -1107,15 +1647,13 @@ export function App() {
     }
   }, [deckProgress, deck1, deck2, playingDecks, tracks, audioAnalyses]);
   useEffect(() => {
-    const { deck1: deckOneGain, deck2: deckTwoGain } = equalPowerGains(crossfade);
-    if (mpvEnabled) {
-      if (mpvLoadedPathsRef.current[1]) invoke("mpv_deck_set_volume",{deck:1,volume:deckOneGain*100}).catch((error)=>console.error("Deck 1 mpv 音量设置失败",error));
-      if (mpvLoadedPathsRef.current[2]) invoke("mpv_deck_set_volume",{deck:2,volume:deckTwoGain*100}).catch((error)=>console.error("Deck 2 mpv 音量设置失败",error));
-      return;
-    }
-    if (deckOneAudioRef.current) deckOneAudioRef.current.volume = deckOneGain;
-    if (deckTwoAudioRef.current) deckTwoAudioRef.current.volume = deckTwoGain;
-  },[crossfade,tracks,mpvEnabled]);
+    writeDeckOutputVolumes(crossfade,masterVolume);
+  },[crossfade,masterVolume,tracks,writeDeckOutputVolumes]);
+  useEffect(() => {
+    window.localStorage.setItem("king.mixer.master",String(masterVolume));
+    window.localStorage.setItem("king.mixer.headphones",String(headphoneVolume));
+    window.localStorage.setItem("king.mixer.microphones",JSON.stringify(microphoneVolumes));
+  },[masterVolume,headphoneVolume,microphoneVolumes]);
   useEffect(() => {
     window.localStorage.setItem("king.textDrafts", JSON.stringify(textDrafts));
   }, [textDrafts]);
@@ -1165,7 +1703,7 @@ export function App() {
           src: convertFileSrc(item.path),
           durationSeconds: Number(item.durationMs ?? 0) / 1000,
         }));
-        for (const item of nextAudio) {
+        for (const item of runtimeCapability.aiProcessingAvailable ? nextAudio : []) {
           const sourceVersion = `${item.path}|${item.sizeBytes ?? 0}|${item.modifiedUnixMs ?? 0}`;
           if (audioAiQueuedRef.current.has(sourceVersion)) continue;
           audioAiQueuedRef.current.add(sourceVersion);
@@ -1201,12 +1739,14 @@ export function App() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [runtimeCapability.aiProcessingAvailable]);
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return;
-    invoke("list_system_fonts")
-      .then((fonts)=>setSystemFonts(Array.isArray(fonts)&&fonts.length?fonts:fallbackFontFamilies))
+    const refresh=()=>refreshFontLibrary()
       .catch((error)=>console.error("读取 Windows 系统字体失败",error));
+    refresh();
+    const timer=window.setInterval(refresh,5000);
+    return ()=>window.clearInterval(timer);
   },[]);
   useEffect(() => {
     let lastTickAt = performance.now();
@@ -1297,6 +1837,44 @@ export function App() {
   };
   const loadTrack = (index) => prepareTrack(library, index);
   const loadSelected = () => loadTrack(selectedTrack);
+  const packageTrackIndex = selectedTrack ?? deck1;
+  const packageTrack = tracks[packageTrackIndex];
+  const packageTrackJob = packageTrack?.path
+    ? audioAiJobByPath.get(normalizeMediaPath(packageTrack.path))
+    : null;
+  const exportSelectedPackage = async () => {
+    if (!packageTrack?.path || packageTrackJob?.status !== "ready") return;
+    setSongPackageMessage("正在生成歌曲包…");
+    try {
+      const result = await invoke("export_kingsong", {
+        path:packageTrack.path,
+        title:packageTrack.title,
+        artist:packageTrack.artist,
+      });
+      setSongPackageMessage(`已导出：${result.path}`);
+    } catch (error) {
+      setSongPackageMessage(`导出失败：${error}`);
+    }
+  };
+  const importPackageInbox = async () => {
+    setSongPackageMessage("正在校验并导入歌曲包…");
+    try {
+      const report = await invoke("import_kingsong_inbox");
+      const imported = report.imported?.length ?? 0;
+      const failed = report.errors?.length ?? 0;
+      setSongPackageMessage(imported||failed?`导入完成：成功 ${imported}，失败 ${failed}`:`收件箱中没有 .kingsong`);
+    } catch (error) {
+      setSongPackageMessage(`导入失败：${error}`);
+    }
+  };
+  const openPackageDirectory = async (kind) => {
+    try {
+      const directory = await invoke("open_song_package_directory",{kind});
+      setSongPackageMessage(`${kind==="inbox"?"导入收件箱":"导出目录"}：${directory}`);
+    } catch (error) {
+      setSongPackageMessage(`打开目录失败：${error}`);
+    }
+  };
   const updateScreenTarget = (index, key, value) => {
     setScreenTargets(current => current.map((target, targetIndex) => targetIndex === index ? { ...target, [key]: value } : target));
     setSettingsDirty(true);
@@ -1309,6 +1887,107 @@ export function App() {
     window.localStorage.setItem("king.screenTargets", JSON.stringify(screenTargets));
     window.localStorage.setItem("king.monitorTargets", JSON.stringify(monitorTargets));
     setSettingsDirty(false);
+  };
+  const configureMixerModel = async (modelId) => {
+    setMixerModelId(modelId);
+    window.localStorage.setItem("king.mixer.model",modelId);
+    setMixerDriverStatus({state:"checking",title:"正在应用型号包",message:"正在切换数字孪生 UI 并检测驱动"});
+    if (!desktopRuntime) return;
+    try {
+      setMixerDriverStatus(await invoke("configure_mixer_model",{modelId}));
+    } catch (error) {
+      setMixerDriverStatus({state:"error",title:"型号包配置失败",message:String(error)});
+    }
+  };
+  const updateMixerControlHost=(value)=>{
+    setMixerControlHost(value);
+    window.localStorage.setItem("king.mixer.controlHost",value.trim());
+  };
+  const openMixerDriver = async () => {
+    if (!desktopRuntime) return window.open(activeMixerModel.driver.officialResourceUrl,"_blank","noopener,noreferrer");
+    setMixerDriverStatus({state:"installing",title:"准备驱动安装",message:"仅执行 Allen & Heath 有效数字签名的官方安装程序"});
+    try {
+      const status=await invoke("install_mixer_driver_from_downloads",{modelId:mixerModelId});
+      setMixerDriverStatus(status);
+      if (status.state==="waiting-download") await invoke("open_mixer_driver_support",{modelId:mixerModelId});
+    }
+    catch (error) { setMixerDriverStatus({state:"error",title:"驱动安装未完成",message:String(error)}); }
+  };
+  const changeVocalPreset=async(lane,preset)=>{
+    if(!desktopRuntime){
+      setVocalStatus(current=>updatePreviewVocalPreset(current,lane,preset));
+      return;
+    }
+    setVocalBusy(true);
+    try{
+      const response=await invoke("vocal_set_preset",{lane,preset});
+      setVocalStatus(current=>normalizeVocalResponse(response,current));
+    }catch(error){
+      setVocalStatus(current=>({...current,message:`修音方案未应用：${String(error)}`}));
+    }finally{
+      setVocalBusy(false);
+    }
+  };
+  const disarmVocalEngine=async()=>{
+    if(!desktopRuntime){
+      setVocalStatus(current=>({...current,calibrationMode:"disarmed",physicalAudioStarted:false,hardwareBound:false,message:"浏览器预览；保持解除武装"}));
+      return;
+    }
+    setVocalBusy(true);
+    try{
+      const response=await invoke("vocal_disarm");
+      setVocalStatus(current=>normalizeVocalResponse(response,current));
+    }catch(error){
+      setVocalStatus(current=>({...current,physicalAudioStarted:false,message:`解除武装命令失败：${String(error)}`}));
+    }finally{
+      setVocalBusy(false);
+    }
+  };
+  const discoverVocalRouting=async()=>{
+    setRoutingBusy(true);
+    try{
+      if(!desktopRuntime){
+        setVocalRouting(normalizeRoutingResponse({schemaVersion:1,hardwareReady:false,ambiguityCount:0,inventory:{driverName:"KING Virtual Qu-16 ASIO",sampleRate:48000},routingMap:{physicalHardware:false,qu16MappingVerified:false,lanes:[{lane:"mic1",quInputChannel:1,inputDriverIndex:2,inputChannelName:"Virtual Mic Send A",returnDriverIndex:1,returnChannelName:"Virtual Vocal Return A",evidence:"virtual_signal_trace"},{lane:"mic2",quInputChannel:2,inputDriverIndex:5,inputChannelName:"Virtual Mic Send B",returnDriverIndex:4,returnChannelName:"Virtual Vocal Return B",evidence:"virtual_signal_trace"},{lane:"mic3",quInputChannel:3,inputDriverIndex:9,inputChannelName:"Virtual Mic Send C",returnDriverIndex:8,returnChannelName:"Virtual Vocal Return C",evidence:"virtual_signal_trace"}]}}));
+        return;
+      }
+      const report=await invoke("vocal_discover_routing_virtual");
+      setVocalRouting(normalizeRoutingResponse(report));
+    }catch(error){
+      setVocalRouting(current=>({...current,hardwareReady:false,message:`离线通道发现失败：${String(error)}`}));
+    }finally{
+      setRoutingBusy(false);
+    }
+  };
+  const runVocalCalibration=async()=>{
+    setRoutingBusy(true);
+    try{
+      if(!desktopRuntime){
+        const report={mode:"virtual_calibration_wizard",finalState:"complete",completedLanes:3,rejectedObservations:1,hardwareReady:false,routingMap:{physicalHardware:false,qu16MappingVerified:false,driverName:"KING Virtual Qu-16 ASIO",sampleRate:48000,lanes:[{lane:"mic1",quInputChannel:1,inputDriverIndex:2,inputChannelName:"Virtual Mic Send A",returnDriverIndex:1,returnChannelName:"Virtual Vocal Return A",evidence:"virtual_signal_trace"},{lane:"mic2",quInputChannel:2,inputDriverIndex:5,inputChannelName:"Virtual Mic Send B",returnDriverIndex:4,returnChannelName:"Virtual Vocal Return B",evidence:"virtual_signal_trace"},{lane:"mic3",quInputChannel:3,inputDriverIndex:9,inputChannelName:"Virtual Mic Send C",returnDriverIndex:8,returnChannelName:"Virtual Vocal Return C",evidence:"virtual_signal_trace"}]},events:[{sequence:1,state:"complete",lane:"mic3",accepted:true,rejection:null,message:"三路离线校准完成"}]};
+        setCalibrationStatus(normalizeCalibrationReport(report));
+        setVocalRouting(normalizeRoutingResponse(report));
+        return;
+      }
+      const replay=await invoke("vocal_replay_joint_evidence");
+      const report=replay?.calibration??replay;
+      setCalibrationStatus(normalizeCalibrationReport(replay));
+      setVocalRouting(normalizeRoutingResponse(report));
+    }catch(error){
+      setCalibrationStatus(current=>({...current,message:`向导演练失败：${String(error)}`}));
+    }finally{
+      setRoutingBusy(false);
+    }
+  };
+  const saveVocalRouting=async()=>{
+    if(!vocalRouting.report||!desktopRuntime)return;
+    setRoutingBusy(true);
+    try{
+      const response=await invoke("vocal_save_routing",{report:vocalRouting.report});
+      setVocalRouting(current=>normalizeRoutingResponse(response,current));
+    }catch(error){
+      setVocalRouting(current=>({...current,saved:false,hardwareReady:false,message:`通道映射保存失败：${String(error)}`}));
+    }finally{
+      setRoutingBusy(false);
+    }
   };
   const insertTrack = (deck, index) => prepareTrack(deck, index);
   const getDeckAudio = (deckNumber) => deckNumber === 1 ? deckOneAudioRef.current : deckTwoAudioRef.current;
@@ -1331,7 +2010,7 @@ export function App() {
     mpvLoadedPathsRef.current[deckNumber] = playbackPath;
     mpvEofHandledRef.current[deckNumber] = false;
     const { deck1: deckOneGain, deck2: deckTwoGain } = equalPowerGains(crossfade);
-    const volume = (deckNumber===1?deckOneGain:deckTwoGain)*100;
+    const volume = (deckNumber===1?deckOneGain:deckTwoGain)*masterVolume;
     await invoke("mpv_deck_set_volume",{deck:deckNumber,volume});
     applyMpvDeckState(state);
     return state;
@@ -1904,17 +2583,37 @@ export function App() {
     return () => window.removeEventListener("keydown",handleTextShortcut);
   }, [stagedMedia,selectedTextElement,selectedTextElements]);
 
+  const deckMeterCeilings = { deck1:100-crossfade, deck2:crossfade };
+  const handleCrossfadeChange = (event) => {
+    const nextCrossfade = Number(event.target.value);
+    writeDeckOutputVolumes(nextCrossfade,masterVolume);
+    setCrossfade(nextCrossfade);
+  };
+  const handleMasterVolumeChange = (event) => {
+    const nextMasterVolume = Number(event.target.value);
+    writeDeckOutputVolumes(crossfade,nextMasterVolume);
+    setMasterVolume(nextMasterVolume);
+  };
+  const faderPointerHandlers = {
+    onPointerDown:beginFaderInteraction,
+    onPointerUp:endFaderInteraction,
+    onPointerCancel:endFaderInteraction,
+    onMouseDown:beginFaderInteraction,
+    onMouseUp:endFaderInteraction,
+    onBlur:endFaderInteraction,
+  };
+
   return <div className="app-shell">
     <div className="media-audio-engine" aria-hidden="true">
       <audio ref={deckOneAudioRef} src={mpvEnabled?undefined:(deckOnePath?convertFileSrc(deckOnePath):undefined)} preload="metadata" autoPlay={Boolean(!mpvEnabled&&deckOnePath&&playingDecks[1])} onLoadedMetadata={(event)=>updateAudioMetadata(1,deck1,event)} onTimeUpdate={(event)=>setDeckProgress((current)=>({...current,1:event.currentTarget.currentTime}))} onEnded={()=>finishRealAudio(1,deck1)} onError={()=>setPlayingDecks((current)=>({...current,1:false}))}/>
       <audio ref={deckTwoAudioRef} src={mpvEnabled?undefined:(deckTwoPath?convertFileSrc(deckTwoPath):undefined)} preload="metadata" autoPlay={Boolean(!mpvEnabled&&deckTwoPath&&playingDecks[2])} onLoadedMetadata={(event)=>updateAudioMetadata(2,deck2,event)} onTimeUpdate={(event)=>setDeckProgress((current)=>({...current,2:event.currentTarget.currentTime}))} onEnded={()=>finishRealAudio(2,deck2)} onError={()=>setPlayingDecks((current)=>({...current,2:false}))}/>
     </div>
     <header className="topbar">
-      <div className="brand"><img src="/assets/king-club-logo-white.svg" alt="King Club"/><div><strong>Broadcast Control</strong></div></div>
-      <div className="system-status"><span><WifiHigh /> 本机控制</span><span className={ledOutputStatus.connected?"led-connected":"led-disconnected"} title={ledOutputStatus.message}><MonitorPlay /> {ledOutputStatus.previewMode?"单屏 · C1 预览":ledOutputStatus.connected?"第二屏 + C1 预览":"LED 主屏未连接"}</span><span className="clock">{formatDateTime(now)}</span></div>
+      <div className="brand"><img src="/assets/king-club-logo-white.svg" alt="King Club"/><div><strong>AI Broadcast Control 2027</strong></div></div>
+      <div className="system-status"><span className={`runtime-mode runtime-mode-${runtimeCapability.mode}`} title={`${runtimeCapability.message}${runtimeCapability.aiProcessingAvailable?` · AI worker ${audioAiWorker.running?"运行中":"等待中"}`:""}`}>{runtimeCapability.mode==="full"?<><span className="nvidia-runtime-logo" aria-label="NVIDIA"><img src="/assets/nvidia-logo-horiz-wht-16x9.png" alt="NVIDIA"/></span><span className="runtime-edition">全功能版</span></>:<><Lightning weight="fill"/> {runtimeCapability.mode==="detecting"?"识别硬件":"播放版"}</>}</span><span><WifiHigh /> 本机控制</span><span className={ledOutputStatus.connected?"led-connected":"led-disconnected"} title={ledOutputStatus.message}><MonitorPlay /> {ledOutputStatus.previewMode?"单屏 · C1 预览":ledOutputStatus.connected?"第二屏 + C1 预览":"LED 主屏未连接"}</span><span className="clock">{formatDateTime(now)}</span></div>
     </header>
 
-    <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""}`}>
+    <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""} ${activeNav==="调音台"?"mixer-layout":""}`}>
       {activeNav === "设置" ? <SettingsView
         screenTargets={screenTargets}
         monitorTargets={monitorTargets}
@@ -1922,10 +2621,34 @@ export function App() {
         onMonitorChange={updateMonitorTarget}
         onSave={saveTargetSettings}
         dirty={settingsDirty}
+        mixerModelId={mixerModelId}
+        mixerDriverStatus={mixerDriverStatus}
+        mixerControlHost={mixerControlHost}
+        mixerMeterStatus={mixerMeterStatus}
+        onMixerModelChange={configureMixerModel}
+        onMixerControlHostChange={updateMixerControlHost}
+        onOpenMixerDriver={openMixerDriver}
+        vocalStatus={vocalStatus}
+        vocalBusy={vocalBusy}
+        onRefreshVocal={refreshVocalStatus}
+        onVocalPresetChange={changeVocalPreset}
+        onVocalDisarm={disarmVocalEngine}
+        vocalRouting={vocalRouting}
+        routingBusy={routingBusy}
+        onDiscoverRouting={discoverVocalRouting}
+        onSaveRouting={saveVocalRouting}
+        calibrationStatus={calibrationStatus}
+        onRunCalibration={runVocalCalibration}
       /> : <>
       <aside className="panel library-panel">
         <div className="panel-title"><MusicNotes weight="fill"/><div><b>播放曲库</b><small title={mpvRuntime.message}>{audioAssets.length?`${playlist}常规歌单 · ${tracks.length} 首 · ${mpvEnabled?"mpv 播放引擎":"兼容引擎"}`:`${playlist}常规歌单 · 当前为演示数据`}</small></div></div>
         <div className="library-switch"><button className={library===1?"active":""} onClick={()=>setLibrary(1)}>1号曲库</button><button className={library===2?"active":""} onClick={()=>setLibrary(2)}>2号曲库</button></div>
+        <div className="song-package-tools" title={songPackageMessage||`收件箱：${songPackageDirectories.inboxDirectory||"正在建立"}`}>
+          <span className={runtimeCapability.mode==="full"?"full":"player"}>{runtimeCapability.mode==="full"?"制作 + 播放":"仅播放"}</span>
+          <button type="button" onClick={exportSelectedPackage} disabled={!packageTrack?.path||packageTrackJob?.status!=="ready"}>导出包</button>
+          <button type="button" onClick={()=>openPackageDirectory("inbox")}>收件箱</button>
+          <button type="button" onClick={importPackageInbox}>导入包</button>
+        </div>
         <div className="playlist-tabs" aria-label="歌单选择">
           <div className="playlist-row weekday-row">{weekdayPlaylists.map(p=><button key={p} className={playlist===p?"active":""} onClick={()=>setPlaylist(p)}>{p}</button>)}</div>
           <div className="playlist-row special-row">{specialPlaylists.map(p=><button key={p} className={playlist===p?"active":""} onClick={()=>setPlaylist(p)}>{p}</button>)}</div>
@@ -1933,6 +2656,8 @@ export function App() {
         <div className="table-head"><span>歌曲</span><span>歌手</span><span>BPM</span><span>时长</span></div>
         <div className="track-list">{tracks.map((t,i)=>{
           const trackAnalysis = audioAnalyses[audioAnalysisKey(t)];
+          const aiJob = t.path ? audioAiJobByPath.get(normalizeMediaPath(t.path)) : null;
+          const aiLabel = aiJob?.status==="ready"?"已制作":aiJob?.status==="skipped"?"DJ长音频/仅播放":aiJob?.status==="running"?`制作中/${aiJob.stage}`:aiJob?.status==="paused"?"播放中/制作暂停":aiJob?.status==="queued"?"待制作":aiJob?.status==="failed"?"制作失败":runtimeCapability.mode==="player"?"可播放":"待登记";
           const trackBpm = Number(trackAnalysis?.bpm) > 0 ? Number(trackAnalysis.bpm).toFixed(1).replace(/\.0$/, "") : t.bpm;
           const inDeck1 = i===deck1;
           const inDeck2 = i===deck2;
@@ -1943,7 +2668,7 @@ export function App() {
           const locked = inDeck1||inDeck2;
           const rowSelected = !locked&&selectedTrack===i;
           return <div key={t.id??`${t.title}-${i}`} role="button" aria-disabled={locked} tabIndex={locked?-1:0} className={`track-row ${rowSelected?"selected":""} ${locked?"deck-locked":""} ${inDeck1?"deck-one":""} ${inDeck2?"deck-two":""} ${onAir?"on-air":""} ${bothOnAir?"on-air-both":""}`} onClick={()=>{if(!locked)setSelectedTrack(i)}} onDoubleClick={()=>{if(!locked)loadTrack(i)}} onKeyDown={event=>{if(event.key==="Enter"&&!locked)setSelectedTrack(i)}}>
-            <span className={`track-index ${inDeck1||inDeck2?"deck-indicators":""}`}>{inDeck1||inDeck2?[inDeck1&&<SpeakerHigh key="deck-1" className="deck-one-indicator" weight={onAirDeck1?"fill":"regular"}/>,inDeck2&&<SpeakerHigh key="deck-2" className="deck-two-indicator" weight={onAirDeck2?"fill":"regular"}/>]:String(i+1).padStart(2,"0")}</span><span className="track-info"><b>{t.title}</b><small>{t.tag}</small></span><span className="track-artist" title={t.artist}>{t.artist}</span><span>{trackBpm}</span><span>{t.duration}</span>
+            <span className={`track-index ${inDeck1||inDeck2?"deck-indicators":""}`}>{inDeck1||inDeck2?[inDeck1&&<SpeakerHigh key="deck-1" className="deck-one-indicator" weight={onAirDeck1?"fill":"regular"}/>,inDeck2&&<SpeakerHigh key="deck-2" className="deck-two-indicator" weight={onAirDeck2?"fill":"regular"}/>]:String(i+1).padStart(2,"0")}</span><span className="track-info"><b>{t.title}</b><small>{t.tag} · {aiLabel}</small></span><span className="track-artist" title={t.artist}>{t.artist}</span><span>{trackBpm}</span><span>{t.duration}</span>
             {onAir&&<span className="track-playing-decks" aria-label={`正在由${bothOnAir?" Deck 1 和 Deck 2":` Deck ${onAirDeck1?1:2}`}播放`}>{onAirDeck1&&<span className="track-playing-badge deck-one-label">1</span>}{onAirDeck2&&<span className="track-playing-badge deck-two-label">2</span>}</span>}
             <button className="track-insert" aria-label="装载到 1 号 Deck，不自动播放" title="装载到 1 号 Deck（不自动播放）" onClick={event=>{event.stopPropagation();insertTrack(1,i)}} onDoubleClick={event=>event.stopPropagation()}>1</button>
             <button className="track-insert" aria-label="装载到 2 号 Deck，不自动播放" title="装载到 2 号 Deck（不自动播放）" onClick={event=>{event.stopPropagation();insertTrack(2,i)}} onDoubleClick={event=>event.stopPropagation()}>2</button>
@@ -1966,7 +2691,7 @@ export function App() {
                 : <MediaOutputScreen media={displayMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={displayTransform}/>
               : <div className="monitor-feed" style={{backgroundImage:`linear-gradient(180deg,rgba(0,0,0,.05),rgba(0,0,0,.28)),url(${monitorTargets[monitorTarget].src})`}}><div className="monitor-live"><span className="live-dot"/> LIVE</div><b>{monitorTargets[monitorTarget].name}</b><small>摄像机视频流接口预留</small></div>}
           </div>
-          {previewMode&&monitorTarget===null&&stagedMedia?.type==="text"&&<TextFormatToolbar elements={chosenTextElements} fonts={systemFonts} onApply={applyTextSelection} onAlign={alignTextSelection} onUpload={uploadTextGraphic} saveSlot={activeTextDraftSlot} onSave={saveActiveTextDraft}/>}
+          {previewMode&&monitorTarget===null&&stagedMedia?.type==="text"&&<TextFormatToolbar elements={chosenTextElements} fonts={systemFonts} fontDirectory={fontLibraryDirectory} customFontCount={customFontCount} onOpenFontDirectory={()=>invoke("open_font_directory").then(setFontLibraryDirectory).catch((error)=>console.error("打开字体目录失败",error))} onRefreshFonts={()=>refreshFontLibrary().catch((error)=>console.error("刷新字体目录失败",error))} onApply={applyTextSelection} onAlign={alignTextSelection} onUpload={uploadTextGraphic} saveSlot={activeTextDraftSlot} onSave={saveActiveTextDraft}/>}
           {textDraftClearSlot!==null&&<div className="text-draft-dialog" role="alertdialog" aria-modal="true" aria-label={`清空暂存 ${textDraftClearSlot+1} 确认`}><b>清空暂存 {textDraftClearSlot+1}</b><span>此操作会移除该暂存内容，是否继续？</span><div><button type="button" onClick={()=>setTextDraftClearSlot(null)}>取消</button><button type="button" className="draft-clear" onClick={clearSelectedTextDraft}>清空暂存</button></div></div>}
           {monitorTarget===null&&previewMode&&stagedMedia&&<div className={`media-preview-confirm ${previewPending?"is-pending":"is-synced"}`}><span>{previewPending?"PVW · 有修改":"PVW · 与 PGM 一致"}</span><button type="button" className="reset" onClick={resetMediaPreview}>重置</button><button type="button" className="take" onClick={confirmStagedMedia}>上屏</button></div>}
           <div className="preview-footer">
@@ -1994,7 +2719,7 @@ export function App() {
               playing={playingDecks[1]}
               active={crossfade<50}
               side="one"
-              level={playingDecks[1]?100-crossfade:0}
+              level={deckMeterCeilings.deck1}
               progress={deckProgress[1]}
               onSeek={seconds=>seekDeck(1,seconds)}
               onPrevious={()=>loadAdjacentDeckTrack(1,-1)}
@@ -2009,6 +2734,7 @@ export function App() {
               onLyricsToggle={()=>setDeckLyricsEnabled(current=>({...current,1:!current[1]}))}
               onVocalToggle={()=>switchDeckVocalMode(1,deck1)}
               onPlay={()=>toggleDeckPlayback(1,deck1)}
+              meterMotionPaused={faderInteractionActive}
             />
             <Deck
               number={2}
@@ -2018,7 +2744,7 @@ export function App() {
               playing={playingDecks[2]}
               active={crossfade>=50}
               side="two"
-              level={playingDecks[2]?crossfade:0}
+              level={deckMeterCeilings.deck2}
               progress={deckProgress[2]}
               onSeek={seconds=>seekDeck(2,seconds)}
               onPrevious={()=>loadAdjacentDeckTrack(2,-1)}
@@ -2033,9 +2759,15 @@ export function App() {
               onLyricsToggle={()=>setDeckLyricsEnabled(current=>({...current,2:!current[2]}))}
               onVocalToggle={()=>switchDeckVocalMode(2,deck2)}
               onPlay={()=>toggleDeckPlayback(2,deck2)}
+              meterMotionPaused={faderInteractionActive}
             />
           </div>
-          <div className="crossfader"><div className="crossfader-side crossfader-side-one"><span className="track-playing-badge deck-one-label" aria-hidden="true">1</span><span className="crossfader-percent">{100-crossfade}</span></div><div className="crossfader-control" style={{"--crossfade-position":`${crossfade}%`}}><div className="crossfader-scale" aria-hidden="true">{Array.from({length:17},(_,index)=><i key={index} className={index===8?"center":index%4===0?"major":""}/>)}</div><input aria-label="双曲交叉推子" type="range" min="0" max="100" value={crossfade} onChange={e=>setCrossfade(Number(e.target.value))}/></div><div className="crossfader-side crossfader-side-two"><span className="crossfader-percent">{crossfade}</span><span className="track-playing-badge deck-two-label" aria-hidden="true">2</span></div></div>
+          <div className="crossfader"><div className="crossfader-side crossfader-side-one"><span className="track-playing-badge deck-one-label" aria-hidden="true">1</span><span className="crossfader-percent">{100-crossfade}</span></div><div className="crossfader-control" style={{"--crossfade-position":`${crossfade}%`}}><div className="crossfader-scale" aria-hidden="true">{Array.from({length:17},(_,index)=><i key={index} className={index===8?"center":index%4===0?"major":""}/>)}</div><input aria-label="双曲交叉推子" type="range" min="0" max="100" value={crossfade} onChange={handleCrossfadeChange} {...faderPointerHandlers}/></div><div className="crossfader-side crossfader-side-two"><span className="crossfader-percent">{crossfade}</span><span className="track-playing-badge deck-two-label" aria-hidden="true">2</span></div></div>
+          <div className="mixer-channel-strip" aria-label="总输出、耳机与麦克风音量控制">
+            <label className="mixer-channel master-channel" title="总声音"><span><SpeakerHigh weight="fill"/><em>{masterVolume}</em></span><div className="mixer-fader-control"><div className="mixer-fader-scale" aria-hidden="true">{Array.from({length:17},(_,index)=><i key={index} className={index===8?"center":index%4===0?"major":""}/>)}</div><input style={{"--mixer-level":`${masterVolume}%`}} aria-label="总声音大小" type="range" min="0" max="100" value={masterVolume} onChange={handleMasterVolumeChange} {...faderPointerHandlers}/></div></label>
+            <label className="mixer-channel headphone-channel" title="耳机监听音量；独立输出设备将在调音台设备设置中绑定"><span><Headphones weight="fill"/><em>{headphoneVolume}</em></span><div className="mixer-fader-control"><div className="mixer-fader-scale" aria-hidden="true">{Array.from({length:17},(_,index)=><i key={index} className={index===8?"center":index%4===0?"major":""}/>)}</div><input style={{"--mixer-level":`${headphoneVolume}%`}} aria-label="耳机音量" type="range" min="0" max="100" value={headphoneVolume} onChange={event=>setHeadphoneVolume(Number(event.target.value))} {...faderPointerHandlers}/></div></label>
+            {[0,1].map(index=>{const volume=microphoneVolumes[index]??80;return <label className={`mixer-channel microphone-channel microphone-channel-${index+1}`} key={`microphone-${index}`} title={`麦克风 ${index+1}；默认保持未监听，防止未配置设备时产生啸叫`}><span><Microphone weight="fill"/><em>{volume}</em></span><div className="mixer-fader-control"><div className="mixer-fader-scale" aria-hidden="true">{Array.from({length:17},(_,tickIndex)=><i key={tickIndex} className={tickIndex===8?"center":tickIndex%4===0?"major":""}/>)}</div><input style={{"--mixer-level":`${volume}%`}} aria-label={`麦克风 ${index+1} 音量`} type="range" min="0" max="100" value={volume} onChange={event=>setMicrophoneVolumes(current=>[0,1].map(itemIndex=>itemIndex===index?Number(event.target.value):(current[itemIndex]??80)))} {...faderPointerHandlers}/></div></label>})}
+          </div>
         </div>
       </section>
 
@@ -2062,6 +2794,7 @@ export function App() {
           {fixtureColorEditor&&(()=>{const color=fixtureColors[fixtureColorEditor.id];const hsv=rgbToHsv(color);const hue=fixtureColorEditor.hue;return <div className="fixture-color-editor" style={{left:fixtureColorEditor.left}} role="dialog" aria-label="RGB 调色板"><div className="fixture-color-editor-head"><b>{fixtureControls.find((fixture)=>fixture.id===fixtureColorEditor.id)?.label} 调色板</b><button type="button" onClick={()=>setFixtureColorEditor(null)}>关闭</button></div><div className="fixture-picker-body" style={{display:"grid",gridTemplateColumns:"minmax(0, 1fr) 18px 64px",gap:"8px",alignItems:"stretch",justifyItems:"stretch"}}><div className="fixture-sv-field" style={{width:"100%",height:"155px",background:`linear-gradient(to bottom, transparent, #000), linear-gradient(to right, #fff, hsl(${hue}, 100%, 50%))`}} onPointerDown={updatePickerSV} onPointerMove={(event)=>event.buttons&&updatePickerSV(event)}><i className="fixture-sv-cursor" style={{left:`calc(${hsv.s*100}% - 6px)`,top:`calc(${(1-hsv.v)*100}% - 6px)`}}/></div><div className="fixture-hue-field" style={{width:"18px",height:"155px",background:"linear-gradient(to bottom, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)"}} onPointerDown={updatePickerHue} onPointerMove={(event)=>event.buttons&&updatePickerHue(event)}><i className="fixture-hue-cursor" style={{top:`calc(${hue/3.6}% - 4px)`}}/></div><div className="fixture-picker-preview" style={{width:"64px",height:"155px",backgroundColor:`rgb(${color.r}, ${color.g}, ${color.b})`,color:isLightColor(color)?"#07100e":"#ffffff",textShadow:isLightColor(color)?"none":"0 1px 1px #000"}}><span>R {color.r}</span><span>G {color.g}</span><span>B {color.b}</span></div></div></div>})()}
         </section>
       </aside>
+      <MixerWorkspace model={activeMixerModel} meterSnapshot={mixerMeterSnapshot} meterStatus={mixerMeterStatus} parameterSnapshot={mixerParameterSnapshot} controlStatus={mixerControlStatus} onWriteParameters={writeQu16Parameters}/>
       </>}
     </main>
 

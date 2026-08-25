@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { MediaOutputScreen } from "./App.jsx";
+import { applyPreferredLyricsFont, registerCustomFonts } from "./font-runtime.js";
 import "./styles.css";
 
 const safeProgram = {
@@ -24,6 +25,15 @@ function OutputApp() {
       if(!disposed&&event.payload?.media)setProgram(event.payload);
     }).then((stop)=>{if(disposed)stop();else unlisten=stop});
     return ()=>{disposed=true;unlisten()};
+  },[]);
+
+  React.useEffect(()=>{
+    const refresh=()=>invoke("font_library")
+      .then(async (library)=>{await registerCustomFonts(library?.customFonts);applyPreferredLyricsFont(library)})
+      .catch((error)=>console.error("LED 输出字体加载失败",error));
+    refresh();
+    const timer=window.setInterval(refresh,5000);
+    return ()=>window.clearInterval(timer);
   },[]);
 
   return <main className="output-window-root" aria-label="KING CLUB LED 节目输出">

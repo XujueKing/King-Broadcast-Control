@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "id": "allen-heath-qu16",
+  "manufacturer": "Allen & Heath",
+  "model": "Qu-16",
+  "displayName": "Allen & Heath Qu-16",
+  "ui": {
+    "renderer": "qu-classic",
+    "inputChannels": 16,
+    "stereoChannels": 3,
+    "mixes": ["LR", "FX 1", "FX 2", "Mix 1", "Mix 2", "Mix 3", "Mix 4", "Mix 5-6", "Mix 7-8", "Mix 9-10"],
+    "defaultLayer": "custom",
+    "customLayerProfile": {
+      "id": "king-club-onsite-2026-08-25",
+      "source": "physical-fader-calibration",
+      "slots": ["ch-1", "ch-2", "ch-3", "ch-4", "ch-5", "ch-6", "ch-7", "fx-1-ret", "fx-2-ret", "ch-10", "ch-11", "ch-12", "ch-13", "ch-14", "ch-15", "ch-16"]
+    },
+    "accent": "#28aee8"
+  },
+  "display": {
+    "physical": {
+      "type": "color-tft-touchscreen",
+      "diagonalInches": 5,
+      "nativeResolution": {
+        "width": 800,
+        "height": 480
+      }
+    },
+    "integration": {
+      "mode": "parameter-state-digital-twin",
+      "framebufferMirroring": false,
+      "screenVideoStream": false,
+      "scope": "protocol-exposed-parameters",
+      "remoteControlInterfaces": ["Qu-Pad", "A&H MIDI Control", "direct-tcp-midi"],
+      "stateTransport": "ethernet-tcp-midi",
+      "tcpPort": 51325
+    }
+  },
+  "control": {
+    "protocol": "midi-nrpn",
+    "transport": ["ethernet-tcp-midi"],
+    "protocolVersion": "1.9",
+    "tcpPort": 51325,
+    "maxConnections": 1,
+    "activeSenseIntervalMs": 300,
+    "disconnectTimeoutMs": 12000,
+    "hostStorageKey": "king.mixer.controlHost",
+    "metering": {
+      "requestCommand": "0x12",
+      "replyCommand": "0x13",
+      "encoding": "signed-7q8-offset-0x8000",
+      "sessionPolicy": "single-client-monotonic-session-id",
+      "staleUiTimeoutMs": 1500,
+      "rta": {
+        "sourceBands": 31,
+        "sourceRange": "20Hz-20kHz",
+        "geqBands": 28,
+        "geqRange": "31.5Hz-16kHz",
+        "sourceIndexOffset": 2,
+        "dominantBandMode": "single-red-peak"
+      },
+      "rackFxMeterRole": "rack-fx-input-patch-dependent",
+      "thresholdsDbfs": {
+        "signal": -48,
+        "nominal": -18,
+        "peak": -3
+      }
+    }
+  },
+  "audio": {
+    "transport": "usb-b-2.0",
+    "driverProtocol": ["ASIO 2.2", "WDM", "WASAPI"],
+    "sampleRateHz": 48000,
+    "usbOutputs": 24,
+    "usbReturns": 22
+  },
+  "driver": {
+    "platform": "windows-x86_64",
+    "name": "Qu Windows ASIO/WDM Driver",
+    "version": "5.72.0",
+    "downloadMode": "vendor-eula",
+    "officialResourceUrl": "https://www.allen-heath.com/hardware/qu/qu-classic/qu-16/resources/",
+    "officialArchiveUrl": "https://www.allen-heath.com/content/uploads/2025/06/AllenHeath-Qu-Windows-Driver-v5.72.0.zip",
+    "installState": "consent-required",
+    "supportedSystems": "Windows 10 / 11 · Intel/AMD x86-64",
+    "sha256": "B157604767C2B59DCB88B2188A66D0A8897AF093CF37B32438C871A262A8C834"
+  },
+  "documentation": {
+    "referenceGuide": "vendor/allen-heath/qu16/Qu-Mixer-Reference-Guide-AP9372_10.pdf",
+    "midiProtocol": "vendor/allen-heath/qu16/Qu_MIDI_Protocol_V1.9.pdf",
+    "driverHelp": "vendor/allen-heath/qu16/Qu_WindowsDriverHelpV5.72.0_Iss1.pdf"
+  }
+}

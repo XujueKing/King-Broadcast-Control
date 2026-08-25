@@ -21,10 +21,11 @@
         "center": true,
         "visible": true,
         "focus": true,
-        "maximized": true,
+        "maximized": false,
+        "decorations": false,
         "theme": "Dark",
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": true
       },
       {
         "label": "output",
@@ -58,6 +59,7 @@
     "targets": "all",
     "resources": {
       "../.local-tools/mpv/mpv.exe": "mpv.exe",
+      "../.local-tools/mpv/libmpv-2.dll": "libmpv-2.dll",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
     },
     "icon": [

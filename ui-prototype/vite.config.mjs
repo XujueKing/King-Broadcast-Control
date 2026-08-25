@@ -23,6 +23,9 @@ export default defineConfig({
     warmup: {
       clientFiles: ["./src/main.jsx"],
     },
+    watch: {
+      ignored: ["**/src-tauri/target/**", "**/vendor/**", "**/tmp/**", "**/artifacts/**"],
+    },
   },
   plugins: [react()],
 });

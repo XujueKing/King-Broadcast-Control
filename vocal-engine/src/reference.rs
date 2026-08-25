@@ -13,6 +13,12 @@ pub struct ReferenceVocalMap {
     pub sample_rate: u32,
     pub hop_frames: usize,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_duration_samples: Option<u64>,
+    #[serde(default)]
+    pub timeline_offset_samples: i64,
     pub segments: Vec<ReferenceSegment>,
 }
 
@@ -101,6 +107,9 @@ impl ReferenceVocalMap {
             sample_rate: SAMPLE_RATE,
             hop_frames,
             source: source.into(),
+            source_fingerprint: None,
+            source_duration_samples: None,
+            timeline_offset_samples: 0,
             segments,
         })
     }
@@ -143,6 +152,15 @@ impl ReferenceVocalMap {
                 .any(|pair| pair[0].start_sample > pair[1].start_sample)
         {
             return Err(EngineError("Reference Vocal Map 时间轴无效".into()));
+        }
+        if let Some(duration) = map.source_duration_samples {
+            if map
+                .segments
+                .iter()
+                .any(|segment| segment.end_sample > duration)
+            {
+                return Err(EngineError("Reference Vocal Map 超出歌曲时间轴".into()));
+            }
         }
         Ok(map)
     }

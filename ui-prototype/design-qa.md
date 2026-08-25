@@ -1,6 +1,6 @@
 # KING CLUB 控制台设计验收
 
-**证据**
+## 基础控制台验收
 
 - Source visual truth: the approved KING CLUB console reference captured during design review.
 - Implementation screenshot: `D:\WEB3_AI\KINGCLUB-Broadcast-Control\ui-prototype\implementation-1528x828.png`
@@ -9,36 +9,236 @@
 - Source pixels: 1440 × 1024 px; implementation pixels: 1528 × 828 px; density normalization: both displayed at equal column width in the browser comparison surface.
 - State: dark emerald Home console; Deck 1 playing; Deck 2 ready; 2号曲库 selected; green geometry video and purple lighting preset selected.
 - Full-view comparison: source and implementation were rendered side-by-side. Both preserve the header / L / C1 / C2 / split-R / B composition, dark emerald hierarchy, T-shaped preview, dual decks, thumbnail selection, lighting presets, and six-item navigation.
-- Focused-region comparison was not required because all critical panels and control labels remain legible in the full-width side-by-side capture.
-
-**Findings**
-
 - No actionable P0/P1/P2 findings remain.
 - Fonts and typography: Inter + Noto Sans SC maintains the compact console hierarchy and readable bilingual labels.
 - Spacing and layout rhythm: adaptive three-column grid preserves all persistent controls without horizontal viewport overflow at 1528 × 828.
 - Colors and visual tokens: low-glare black/emerald palette, active green, muted text, and red blackout state match the source intent.
 - Image quality and asset fidelity: supplied SVG logo and LED mask are used; three generated stage/video assets are sharp, consistently art-directed, and correctly cropped.
-- Copy/content: fixed region names and the full `Avolites Tiger Touch Pro` name are present.
-- Icons: a single Phosphor icon family is used throughout.
 - Behavior: library switching, playlist selection, track selection/loading, Deck transport, crossfader, video selection, lighting selection, and bottom navigation active state were exercised.
 - Browser console: zero errors.
 
-**Comparison History**
+## Qu-16 Mixer UI Design QA
 
-- Pass 1 P2: the playlist strip exposed a native horizontal scrollbar, which visually interrupted the compact left-panel hierarchy.
-- Fix: retained horizontal scrolling while hiding the native scrollbar with cross-browser CSS.
-- Pass 2 evidence: revised browser capture shows a clean playlist strip; no controls are clipped and the page has no horizontal viewport overflow.
+- Reference: `C:\Users\leadb\Desktop\u=259078731,1938936980&fm=253&app=138&f=JPEG.jpg`
+- Prototype capture: `artifacts/qu16-mixer-actual.png`
+- Side-by-side comparison: `artifacts/qu16-reference-comparison.png`
+- Verified state: bottom navigation `调音台`, Allen & Heath Qu-16 model package active.
 
-**Follow-up Polish**
+## Visual checks
 
-- [P3] A future data-rich version can add more thumbnails and tracks at taller desktop viewports without changing the component structure.
+- Hardware hierarchy matches the reference: top brand rail, SuperStrip processing, central touchscreen, processing buttons, stereo meter, USB/monitor block, 16-channel fader bank, LR master, and Mix Select.
+- Cyan enclosure lines, charcoal hardware surface, white Mute keys, green Select keys, pink active Mute state, blue channel labels and blue mix keys follow the supplied console.
+- All 16 input strips remain visible without horizontal overflow at the production fullscreen viewport.
+- The software surface intentionally fills the available control workspace instead of reproducing the reference photo's white studio background.
 
-**Implementation Checklist**
+## Interaction checks
 
-- [x] Adaptive desktop canvas
-- [x] T-shaped 8:9 LED preview
-- [x] Dual Deck controls and crossfader
-- [x] Interactive library, video, lighting, and navigation states
-- [x] Production build and Sites packaging tests
+- Channel Select changes the active strip.
+- Channel Mute toggles independently.
+- Channel and LR faders accept live values.
+- Mix Select changes the active bus.
+- Desktop smoke test confirms 16 channel strips, 17 total faders, 8 mix keys, the model name, and driver-package status.
+- Official reference-guide pages 21-23, 28-30, 67-68, 75 and 78 were reviewed together with the two-page V5.72.0 driver help. The model now states USB-B for 24x22 audio, Ethernet TCP port 51325 for control, one control client, and Active Sense timing.
+- Rotary controls accept pointer/keyboard range input and mouse-wheel adjustment; Shift + wheel applies a five-step coarse adjustment.
+
+## AP9372 front-panel fidelity iteration
+
+- Source visual truth: `C:\Users\leadb\Desktop\u=259078731,1938936980&fm=253&app=138&f=JPEG.jpg` (1050 x 800 px) plus the annotated operational overview on AP9372 page 21 and the processing-panel reference on page 28.
+- Implementation: `artifacts/qu16-mixer-actual.png` (1554 x 1356 physical px; 1036.36 x 904.60 CSS px at device scale 1.5).
+- Full comparison: `artifacts/qu16-reference-comparison.png` (both surfaces normalized to 900 px height).
+- Focused upper-panel comparison: `artifacts/qu16-upper-panel-comparison.png` (source and implementation upper control regions normalized to 430 px height).
+- State: Qu-16 model active, CH1 selected, LR mix selected, Processing screen active.
+
+### Comparison history
+
+- Earlier P2: the processing blocks were arranged as unrelated horizontal cards and omitted TouchChannel, Fn/Copy/Paste/Reset, SoftKeys, channel Mix/Pan controls and Master Sel/PAFL. This changed the real console's operational hierarchy.
+- Fix: regrouped Preamp over HPF, Gate over GEQ and Comp over Pan around the four-band PEQ; inserted TouchChannel to the left of the screen; placed screen function keys below it; restored Processing/Routing/Home/FX/Scenes/Setup, SoftKeys, per-channel Mix/Pan and Master Sel/PAFL in their manual positions.
+- Post-fix evidence: the focused comparison now shows the same left-to-right processing order, cyan region boundaries, central screen, vertical screen-select strip, meter/monitor area and fader-control row as the reference.
+
+### Required fidelity surfaces
+
+- Typography: condensed small hardware labels remain readable at the production scale; long processing labels use short face captions and full accessible names/tooltips.
+- Spacing/layout: all 16 channels, LR master and eight Mix keys remain visible with no horizontal overflow; upper hardware blocks follow the AP9372 grouping and separation rhythm.
+- Colors/tokens: charcoal panel, cyan enclosure lines, white Mute, green Sel, grey PAFL, pink muted state and blue Mix keys match the reference semantics.
+- Image/asset quality: the supplied real-console photograph and official manual diagrams are comparison sources only; the interactive surface uses real controls and the existing icon library, with no rasterized control-panel substitute.
+- Copy/content: button captions and tooltips match AP9372 terminology; cabling labels remain USB-B Audio and Ethernet Control TCP 51325.
+- Remaining P3: software labels are intentionally slightly larger and higher contrast than the photographed silk-screen text for dark-room touchscreen legibility.
+
+## True-rotary and SuperStrip proportion correction
+
+- User-reported P1: the earlier circular skin still wrapped native horizontal `input[type=range]` elements, so pointer interaction and control semantics did not match a rotary encoder. The PEQ also had only eight controls instead of the photographed 4 x 3 matrix, and button/text proportions drifted from the real panel.
+- Source detail: `artifacts/qu16-superstrip-reference-crop.png`, cropped from the supplied Qu-16 photograph without redrawing controls.
+- Implementation detail: `artifacts/qu16-superstrip-actual.png` at 439.04 x 244.46 CSS px (aspect 1.796 versus the manual panel's measured 1.820), device scale 1.5.
+- Normalized focused evidence: `artifacts/qu16-superstrip-comparison.png`, both control regions normalized to 450 px height.
+- Fix: replaced every skinned range with a focusable rotary control that maps pointer coordinates through `atan2` around the knob center over 360 degrees. Wheel, Shift-wheel and keyboard input remain available.
+- Fix: rebuilt PEQ as LF/LM/HM/HF columns with Width/Freq/Gain rows (12 rotaries); restored the shared oval `In` key between LM/HM; resized USB/In keys; added the angled PEQ title, three-row labels, vertical band dividers, Gate/Comp threshold and In geometry, Pk/GR indicators, GEQ Fader Flip and the Pan LED arc/L-R order.
+- Runtime evidence: focused capture contains 17 SuperStrip rotary controls and zero range inputs. Real CDP mouse movement from the knob's right edge to its bottom changed the value from 25 to 50; a wheel-up event changed 50 to 51.
+- Post-fix assessment: control type, matrix count, label placement, section proportions, button geometry and divider rhythm now follow the supplied detail image. Remaining P3 is the slightly cleaner software antialiasing compared with the low-resolution product photograph.
+- Follow-up user correction: standardized every SuperStrip rotary to the Gate control's 36 x 36 CSS px diameter; channel-strip, touchscreen and monitor controls retain their compact sizes. Pointer-angle and wheel QA still passes at the new diameter.
+- Follow-up PEQ detail correction: the cyan `Parametric EQ` tab now hands off to the enclosure line at the tab's lower edge; the three band dividers only span the rotary matrix instead of entering the label/button footer; oval keys have a clean, unmarked face and the shared PEQ `In` key keeps a visible inset above the bottom frame. The focused comparison artifact was regenerated after these changes.
+- User-reported P1 follow-up: the clipped PEQ tab still exposed the section's dark header fill to its right, Gate/GEQ lamps were non-interactive, generic button hover styling darkened oval keys, and the SuperStrip controls remained undersized for the operator's preferred production view.
+- Fix: made the PEQ title cap float over a transparent console-bed area and began the black framed PEQ body at the cap's lower edge. Increased the SuperStrip rotary diameter from 36 to 40 CSS px (35 px in the compact-height mode) and raised processing labels by 1 CSS px without enlarging channel-strip, touchscreen, or monitor rotaries.
+- Interaction-state fix: all oval function keys expose explicit control state, while only Gate `In` and GEQ `Fader Flip` render a centered 4 px lamp. Their off state is `rgb(20, 23, 25)` and their on state is red `rgb(228, 70, 77)`. Every oval shell remains the same grey-white surface in off/on/hover/pressed states; ordinary HPF/PEQ/Comp keys do not acquire a glow or selected fill.
+- Manual verification: AP9372 pages 28 and 32-34 establish the SuperStrip grouping, Gate/Comp processing and GEQ Fader Flip behavior; page 37 defines Pan as LR main pan, disabled for FX/Mono Mix1-4, Stereo Mix5-10 send pan, and linked-pair Width. The right processing bank therefore uses equal Gate/Comp columns on top and an approximately 35/65 GEQ/Pan split below.
+- Comp/Pan correction: Comp GR moved below its threshold knob and is a separate near-black/green indicator; clicking `Comp In` toggles that lamp in the current UI demo, ready to be replaced by live gain-reduction state. Pan is width-locked as a true 40 x 40 circle and now drives seven arc ticks (left 3, center, right 3) from the rotary value.
+- Evidence: default/off-state focused capture and normalized comparison are `artifacts/qu16-superstrip-actual.png` and `artifacts/qu16-superstrip-comparison.png`; the clicked Gate/GEQ/Comp state is `artifacts/qu16-superstrip-lamps-on.png`. CDP QA confirms exact red Gate/GEQ lamps, an unchanged oval shell through hover and state changes, Comp GR off/on color changes, 7 Pan ticks selecting indices 0/3/6 at Home/center/End, Pan width greater than 1.5 x GEQ, a 40 x 40 Pan rotary, 17 total SuperStrip rotaries and zero range inputs.
+- Post-fix assessment: the focused source/implementation comparison shows no clipped controls or actionable P0/P1/P2 drift for the requested lamp colors, ordinary button behavior, Comp GR placement, Pan geometry/semantics, or GEQ/Pan proportions. Remaining P3 is the intentionally sharper software rendering versus the low-resolution product photograph.
+
+## Qu-16 Touch Screen fidelity and remote-control boundary
+
+- Source visual truth: the supplied Qu-16 Touch Screen photographs, the original console crop in `artifacts/qu16-touchscreen-reference.png`, and AP9372 issue 10 pages 28 and 46.
+- Implementation evidence: `artifacts/qu16-touchscreen-processing.png`; the normalized source/implementation comparison is `artifacts/qu16-touchscreen-comparison.png`; `artifacts/qu16-touchscreen-routing.png` verifies a second Screen Select page.
+- Earlier P1: TouchChannel was modelled as an independent hardware column, the display shell did not preserve the photographed proportions, Fn/Copy/Paste/Reset and Screen Rotary were placed inside the LCD, and the six Screen Select keys were stretched into equal rows.
+- Fix: TouchChannel now occupies the left 13.35% of the active LCD; the display shell is 62.64% of the SuperStrip bank width and 89.80% of its height; the LCD content ratio is 1.6733 (the 5:3 target is 1.6667); the physical control band is 21.87% of the screen shell; the 37 x 37 CSS px Screen Rotary and four physical edit controls sit below the LCD; the six Screen Select key gaps are 35/47/33/33/33 CSS px, preserving the photographed group break.
+- Interaction evidence: all six Screen Select keys render distinct clickable pages with exactly one active lamp; PREAMP/GATE/PEQ/COMP each expose their own five-parameter local model; block-specific Copy/Paste/Reset, Routing Apply/Cancel and contextual Fn selections are exercised. Touch parameter boxes select the Screen Rotary target; a real CDP wheel event changed the focused value from 67 to 68 and changed the rendered frequency from `2.05kHz` to `2.19kHz`; Reset restores both the LCD and rotary to 67 / `2.05kHz`.
+- Product boundary: the physical Qu-16 has a 5-inch 800 x 480 colour touchscreen. The official USB and Ethernet/MIDI interfaces expose audio and parameter messages, not the physical display framebuffer. This implementation is therefore a clickable parameter-state digital twin, not a pixel-stream mirror of the console LCD.
+- Sync boundary: documented parameters are intended for later bidirectional MIDI/NRPN state sync over Ethernet TCP port 51325. Screen-page navigation and local Copy/Paste/Reset workflow must not be represented as remote physical-screen commands unless the protocol exposes them.
+- Post-fix assessment: no actionable P0/P1/P2 issue remains in the requested Touch Screen hierarchy, proportions, physical-control placement, Screen Select layout, or local interaction. Remaining P3 is the sharper software antialiasing and representative graph contents compared with the low-resolution product photograph.
+
+### Physical-key alignment, legibility and state correction
+
+- User-reported P1: the Fn/Copy/Paste/Reset row sat too close to the lower frame, both cyan Screen Rotary rails were below the knob centre, physical labels were too small, global hover styling turned the hardware keys nearly black, and the active Screen Select lamp was not red.
+- Layout fix: the physical control row now leaves 11.67 CSS px below the lowest key; the two-rail pair centre and 37 px rotary centre both measure y=354.323 CSS px. The compact-height rule preserves the same relationship without replacing the existing scale transform.
+- Typography fix: FN/COPY/PASTE/RESET render at 7 px / weight 700 uppercase; PROCESSING/ROUTING/HOME/FX/SCENES/SETUP render at 6.5 px / weight 700 uppercase; the top TOUCH SCREEN label is 6 px uppercase. LCD parameter values, metadata and status text were also increased, and CH1/VOX1 were separated into readable rows.
+- State fix: explicit physical-key selectors keep Fn `rgb(203,208,209)`, Copy `rgb(216,218,218)`, Paste/Reset `rgb(223,75,83)`, Screen Select green `rgb(43,149,116)` and grey `rgb(203,208,209)` unchanged through real mouse hover. Disabled Paste keeps its red hardware keycap.
+- Lamp fix: each of the six Screen Select pages was clicked in CDP; exactly one active lamp remained and every active lamp resolved to red `rgb(228,70,77)`. This intentionally follows the operator's requested red state rather than the yellow-green appearance in the low-resolution source photo.
+- Visual evidence: final default state is `artifacts/qu16-touchscreen-processing.png`; fixed Copy and Home hover states are `artifacts/qu16-touchscreen-processing-hover-copy.png` and `artifacts/qu16-touchscreen-processing-hover-home.png`; the refreshed normalized reference comparison is `artifacts/qu16-touchscreen-comparison.png`.
+- Post-fix assessment: no actionable P0/P1/P2 issue remains for lower-row placement, rotary-rail centring, label legibility, hover surfaces, disabled Paste appearance, CH/VOX overlap or red Screen Select lamps.
+
+### Screen Rotary size and centre-line correction
+
+- User-reported P2: the 37 × 37 CSS px Screen Rotary was smaller than the 40 × 40 Parametric EQ encoders, and the lower row was aligned by its bottom edge. Runtime geometry placed the rotary centre at y=354.323 while the four adjacent key centres were y=362.823–363.323, a maximum 9 px vertical mismatch.
+- Rejected iteration: the first correction moved Fn/Copy/Paste/Reset upward to the rotary. The operator correctly identified that this reversed the physical reference: it made the whole key row top-heavy instead of preserving the real key positions and moving only the rotary.
+- Final fix: Fn/Copy/Paste/Reset no longer receive any vertical transform and retain 10.667–11.167 CSS px of lower-frame clearance. Only the Screen Rotary moves downward; it keeps the same 40 × 40 visible diameter and 11 px pointer length as Parametric EQ, while its cyan rail pair follows the rotary centre.
+- Post-fix runtime evidence: Screen Rotary and Parametric EQ both measure exactly 40 × 40 CSS px. The complete FN/COPY/PASTE/RESET label-and-key groups resolve to y=359.323–359.823 CSS px and the Screen Rotary resolves to y=359.323, for a 0.5 px optical-centre spread. Both cyan rails resolve around that rotary centre. The physical key faces intentionally sit 4.5–5 px lower than the group centres because their labels remain above; the rotary keeps 5.167 CSS px lower-frame clearance without clipping.
+- Regression rule: Touch Screen QA separately asserts the four fixed key-bottom gaps at 10–12 CSS px before comparing the four complete label-and-key group centres with the rotary centre. This prevents a future implementation from passing alignment by lifting the keys or by aligning only the key faces.
+- Visual evidence: `artifacts/qu16-touchscreen-processing.png` and refreshed `artifacts/qu16-touchscreen-comparison.png`; the focused side-by-side comparison now shows the lower physical-key rhythm and rotary placement following the source photograph.
+- Post-fix assessment: no actionable P0/P1/P2 issue remains for the requested rotary size, fixed key positions, rotary-only vertical alignment or rail alignment.
+
+## Qu-16 main meter and engineer monitor correction
+
+- Source visual truth: the supplied Qu-16 photograph, `artifacts/qu16-monitor-reference.png`, and the L/R meter / engineer-monitor callouts on AP9372 issue 10 page 21. Focused side-by-side evidence is `artifacts/qu16-monitor-comparison.png`; the implementation crop is `artifacts/qu16-monitor-actual.png`.
+- Earlier P1: the panel contained one shared 18-bar meter with reversed `R/L` captions and a generic `Qu-Drive / Monitor` card. It omitted the second meter, shared scale, PAFL status, Talk key, ST3 input, phones jack and separate Alt Out level.
+- Layout fix: the left column now uses independent L/R 12-segment stacks around the exact shared `Pk/+12/+6/0/-3/-6/-9/-12/-16/-20/-30/-40` scale. The meter block occupies 73% of the column and the separate Talk block about 23%. The right column is divided into 41% ST3/Qu-Drive, 36% Phones and 22% Alt Out, matching the photographed vertical structure.
+- Hardware fix: ST3 is a non-button 3.5 mm port; Qu-Drive is a vertical USB-A socket with the USB icon above; the blue Phones region contains its own jack and level; Alt Out is isolated below. The obsolete generic Monitor rotary was removed. Phones and Alt Out are true 360-degree controls and both exactly match the 40 × 40 PEQ rotary; compact-height mode keeps all three at 35 × 35 without overflow.
+- Interaction fix: a channel PAFL selection changes the main-meter source from LR to PAFL and lights the red PAFL indicator; pressing the same PAFL again restores LR. Talk is momentary by default and exposes the green `T` in the LCD status bar only while held. Both level rotaries respond independently to wheel, Shift-wheel and keyboard input.
+- Precision pass: the unchanged 110 × 244.458 CSS px bank now uses 51 px / 55 px columns with a 4 px gap, matching the photographed slightly wider I/O/monitor strip. The Qu-16 badge spans the two-column cluster; the Phones steel-blue surface is desaturated; its icon moved to the jack's upper-right; the Qu-Drive socket gained a darker metal cavity and amber status lamp. Meter LEDs are short rectangular lamps rather than pills, while the central scale and PAFL silk-screen were enlarged just enough to remain readable at the production viewport.
+- Alignment fix: explicit descendant typography prevents the workspace-wide 11 px `span` rule from leaking into the hardware silk-screen. Talk label/key, Phones jack, Phones and Alt Out share their intended optical centre lines; L/R headings align to their matching lamp columns; every scale row aligns to the corresponding LED row; and the PAFL lamp/text union is centred as one mark. The generic horizontal rotary guide is suppressed for both monitor knobs.
+- Runtime evidence: `artifacts/qu16-monitor-detail-actual.png` captures the Qu-16 badge and full bank without the adjacent Processing keys. Automated QA verifies two ordered meter columns, 12 non-zero segments per side, exact scale text and font sizes, sub-pixel heading/LED and scale-row alignment, panel proportions, port order/non-button semantics, PAFL/Talk state transitions, two independent monitor rotaries, 40 px normal / 35 px compact parity with PEQ, no monitor-knob guide and no panel overflow.
+- Post-fix assessment: refreshed `artifacts/qu16-monitor-comparison.png` shows no actionable P0/P1/P2 drift in the hardware order, column balance, cyan enclosure rhythm, Talk separation, port geometry or Phones/Alt Out hierarchy. Software silk-screen remains deliberately sharper than the low-resolution product photograph for operator legibility.
+
+## Qu-16 lower fader surface and Mix Select fidelity
+
+- Source visual truth: the supplied full-console photograph, AP9372 issue 10 pages 21-24, 34, 43-45, 61 and 66-67, plus the focused source/implementation comparison `artifacts/qu16-surface-comparison.png`.
+- Layout fix: rebuilt the lower surface as four explicit hardware regions: the narrow Layer rail, sixteen equal channel strips, the independent LR Master strip and the nine-key Mix Select column. The bright cyan layer/name bands, dark scribble-strip windows, enclosure dividers and right-bank spacing now follow the physical Qu-16 instead of a generic browser mixer grid.
+- Fader detail: each channel and Master uses a long black slot, dense major/minor ticks, the documented `+10/+5/0/-5/-10/-20/-30/-40/-∞` scale order, a compact metal cap with a white datum line and a separate channel-number foot. The surface remains contained at the production viewport and the 1366 × 820 / 1366 × 800 compact checks.
+- Channel controls: every strip preserves the physical `Mute → Sel → PAFL → Pk/0/Sig → layer labels → fader` order. Mute is a global source state, PAFL selections are additive, signal lamps follow the selected source and the channel meters remain pre-fader/pre-mute in the local model.
+- Layer mapping: Lower addresses CH1-CH16; Upper addresses ST1-ST3, FX1-FX4 Return, FX1-FX2 Send and Mix1-Mix10 masters exactly as the manual labels them. Custom is a remapping of existing entities rather than sixteen invented audio sources. Upper-layer master slots and the dedicated Master strip share one state object.
+- Mix Select wiring: LR remains the independent Master selection while the right column contains exactly FX1, FX2, Mix1-Mix4, Mix5-6, Mix7-8 and Mix9-10. Selecting a mix swaps the sixteen faders to that bus's sends and the Master to that bus master; selecting the active mix returns to LR. Routing Assign/Pre-Fade and GEQ availability follow the selected-bus rules, including no GEQ on FX1/FX2.
+- SoftKeys: the four rectangular keys are modelled as factory-default Mute Groups 1-4 and expose explicit group state. Master PAFL remains available while GEQ Fader Flip owns the sixteen channel faders.
+- Automated evidence: `scripts/test-surface-function-qa.mjs` verifies lower/upper/custom mapping, all ten bus targets, shared master state, Mute/PAFL semantics, routing, GEQ, SoftKeys and geometry at 1707 × 1067, 1366 × 820 and 1366 × 800.
+- Historical boundary at this visual-fidelity pass: the controls were still a local digital twin because NRPN control write/readback had not yet been implemented. The later lower-surface TCP control/readback pass below supersedes that boundary for fader/send, Mute and PAFL only.
+- Post-fix assessment: the normalized comparison shows no actionable P0/P1/P2 drift in the requested strip order, surface proportions, fader size, scale density, layer bands, Master separation or Mix Select layout. Remaining P3 is the intentionally sharper text and higher contrast needed for touchscreen operation.
+
+## Qu-16 SuperStrip typography, compact-layout and local-function pass
+
+- Source visual truth: the supplied SuperStrip photograph, AP9372 issue 10 pages 28-37, and the normalized focused comparison `artifacts/qu16-superstrip-manual-comparison.png`.
+- Typography/layout fix: every blue block title is optically centred; Preamp `Pk`, Gate/Comp `Thresh` and `GR`, PEQ `In`, band names and Pan `L/R` now have independent silk-screen metrics instead of inheriting the workspace-wide letter spacing. The PEQ columns share exact knob/label/band centre axes, and the 17 rotary controls remain equal circles.
+- Compact-height fix: the previous 166 px upper-row allocation was smaller than the SuperStrip's actual contents and let them spill into the fader surface. At 820 px and 800 px view heights the upper row now reserves 254 px; all direct children remain inside the frame, Pan is not clipped, and all SuperStrip rotaries remain 35 x 35 CSS px.
+- Geometry evidence: `scripts/test-superstrip-layout-qa.mjs` checks normal, 820 px and 800 px heights for containment, label/control intersections, PEQ centre axes, Panel Lamp typography, Preamp peak-lamp clearance, Gate/Comp threshold and GR clearance, Pan containment and exact rotary parity. The compact visual evidence is `artifacts/qu16-superstrip-compact-800.png`.
+- Local-function wiring: Processing state is now stored separately for every selected channel. Preamp USB Select/Gain, HPF Freq/In, all 12 PEQ Width/Freq/Gain encoders plus PEQ In, Gate Threshold/In, Comp Threshold/In and Pan share one state model with the reconstructed LCD, so a change on either surface updates the other and survives channel changes.
+- Manual semantics: HPF, PEQ, Gate and Comp use the documented parameter ranges; LR and stereo Mix5-10 enable Pan, while mono Mix1-4 disable it. GEQ Fader Flip now cycles normal → lower 16 bands (`31.5Hz–1kHz`) → upper 16 bands (`500Hz–16kHz`) with the documented four-band overlap. In either GEQ layer the 16 physical faders address their displayed 1/3-octave bands over ±12dB, each strip `Sel` lights at flat and resets its band to 0dB, and exiting restores the untouched channel/mix fader layer.
+- GEQ evidence: `artifacts/qu16-mixer-geq-low.png` shows the lower frequency layer; `scripts/test-superstrip-function-qa.mjs` verifies the three-state cycle, both range endpoints, all 16 mapped faders, gain changes, `Sel` flat/reset behaviour and return to normal mode.
+- Integration boundary: Processing controls and the reconstructed LCD deliberately remain `data-sync-mode="local-ui-only"`. The later lower-surface TCP control/readback pass does not broaden that scope to Preamp, HPF, PEQ, Gate, Comp, GEQ, Pan, Routing, Scenes or FX.
+
+## Qu-16 full-width surface and lower-control readability pass
+
+- User-reported P1: the lower channel, Master, SoftKey and Mix Select captions were too small for live operation, while their keycaps were visibly smaller than the physical keys already established in the upper console. The whole console also left avoidable unused width.
+- Source/implementation evidence: the real lower-console crop and the current interactive surface are normalized together in `artifacts/qu16-surface-readability-comparison.png`. The previous narrow implementation is retained as `artifacts/qu16-surface-actual-readability-before.png`; the corrected focused capture is `artifacts/qu16-surface-actual-readability-after-v4.png`; the complete console is `artifacts/qu16-mixer-actual.png`.
+- Width fix: the console is now centred at `calc(100% - 12px)` with a 1100 CSS px ceiling, preserving equal 6 px minimum side margins while expanding the production capture from the previous 890 px ceiling to 1024.36 CSS px in the current workspace.
+- Hardware-size fix: lower Mute and SoftKey faces now measure 31×22 CSS px, Sel and Mix Select faces 29×20 CSS px, and PAFL faces 22×22 CSS px. The upper Gate oval remains 29×20 CSS px, so the lower surface now uses the same established hardware size family rather than a reduced miniature set.
+- Typography fix: at normal height the lower surface resolves to 7.5 px control labels, 6.5 px signal labels, 7 px strip/scale/SoftKey/Mix Select labels and 8 px channel indices. The compact profile preserves the full keycap dimensions and retains 7/6/6.5/6.5/7 px minimums for the same text classes.
+- Proportion safeguard: widening initially exposed a 2.01:1 stretched LCD content area. Raising the normal upper-panel share to 33% restores the measured LCD content to 302×182 CSS px (1.659:1), inside the Qu-16 5:3 tolerance, while preserving the 0.626 Touch Screen/SuperStrip width relationship.
+- Responsive evidence: geometry and overflow assertions pass at 1707×1067 and 1366×1041/1040/980/900/841/840/821/820/800. The compact lower template now remains active through 1040px because the normal right rail needs its full content height; 1041px and 1040px are both explicit boundary gates. Captures `artifacts/qu16-surface-actual-readability-1041.png`, `artifacts/qu16-surface-actual-readability-1040.png`, `artifacts/qu16-surface-actual-readability-841.png`, `artifacts/qu16-surface-actual-readability-821-v3.png`, `artifacts/qu16-surface-actual-readability-820-v3.png` and `artifacts/qu16-surface-actual-readability-800-v3.png` show all sixteen channels, Master and the complete right rail without clipping.
+- Interaction boundary: only layout and legibility changed. Mute, Sel, PAFL, layers, buses, GEQ Fader Flip, routing, SoftKeys and fader state continue to use the existing local digital-twin model.
+- Post-fix assessment: no actionable P0/P1/P2 issue remains for the requested console width, symmetric side clearance, upper/lower key-size parity, control-label readability or compact-height containment. At compact heights, right-rail labels sit inside their full-size key faces to preserve both legibility and physical key geometry.
+
+## Qu-16 full-screen operation-distance and live-meter pass
+
+- Full-screen evidence: the complete interface was captured at a 1707×1067 CSS viewport with device scale 1.5, producing the operator's 2561×1601 physical-pixel surface in `artifacts/qu16-mixer-fullscreen-actual.png`. The physical Qu-16 source photograph and the implementation were inspected in the same comparison input.
+- Spacing fix: the non-functional lower metal-board reserve is now `clamp(28px, 3.2vh, 36px)` at normal height, 10px through the compact profile and 4px at 800px and below, preserving the physical enclosure edge without leaving a large empty field.
+- Control-size fix: PAFL faces are 24×24 CSS px normally and 23×23 CSS px in compact mode. Every lower oval/round-key centre indicator is 4×4 CSS px, matching the established upper-panel lamp family.
+- Readability fix: the blue source-strip main/sub labels are 8.5/7 CSS px normally and 8/6.75 CSS px in compact mode, with a darker cyan surface, stronger white contrast and controlled text shadow. The full sixteen-channel bank, Master and right rail remain visible without horizontal clipping.
+- Meter semantics: `Sig`, `0` and `Pk` now use cumulative official thresholds of `-48`, `-18` and `-3 dBFS`; therefore two or all three lamps may legitimately be on at once. The former static percentage generator and the selector bug that painted every lamp as lit were removed. Disconnected or stale frames turn all lamps off instead of falling back to an animated demo.
+- Live path: the desktop runtime now negotiates Qu-16 TCP MIDI on port 51325, performs Get System State, tracks the returned MIDI channel, sends Active Sense and Meter On/Off, deframes fragmented SysEx, decodes 7-bitized 7Q8 meter values, maps input/master/monitor/RTA blocks, clears on stale/disconnect and reconnects. UI events are capped at 20 FPS so meters cannot starve fader interaction.
+- Session hardening: stop/join/start is serialized behind one lifecycle lock and every worker receives a monotonic `sessionId`. Generation checks reject stale worker writes; React listener setup checks disposal both before and after async registration, filters by host/session and uses session-conditional cleanup so changing the Qu IP cannot leave an orphan connection or stop a newer one.
+- Protocol correction: the 31-band `20Hz–20kHz` RTA is offset by two bins before addressing the 28-band `31.5Hz–16kHz` GEQ. GEQ mode reports the actual band dBFS through ARIA/data, lights only one dominant red Pk and never falls back to channel lamps. RackFX Post-PEQ values now feed all four FX Return strips; FX1/2 RackFX input meters carry a visible `FX IN` boundary because they equal an FX Send bus only under the factory same-name Mix→Return patch.
+- Driver-probe fix: Windows ASIO registry checks launch `reg.exe` with `CREATE_NO_WINDOW`, serialize concurrent requests and cache the result for 30 seconds. A desktop smoke burst of eight concurrent driver-status requests completes without opening Windows Terminal.
+- Automated evidence: the functional surface matrix verifies cumulative states at `-60/-48/-18/-3 dBFS`, stale/disconnected darkness, final geometry and all responsive boundaries. Rust protocol tests cover handshake, framing, decoding, mapping and reconnect-state helpers. Build, desktop smoke, Qu-16 controls, Sites regression and `git diff --check` are required to stay clean.
+- Hardware boundary at this live-meter pass: no physical Qu-16 was connected. The later lower-surface pass adds bounded NRPN/Note write and readback handling, but it likewise remains unverified on a physical console.
+
+## Qu-16 lower oval-key active-state correction
+
+- Source visual truth: the user's focused oval-key report, the supplied console photograph at `C:/Users/leadb/Desktop/u=259078731,1938936980&fm=253&app=138&f=JPEG.jpg`, and the PAFL/Mix Select regions in AP9372 issue 10 pages 21-23. The source photograph is 1050x800 pixels.
+- Earlier P1: selecting a right-bank Mix applied an active colour to the oval keycap and a legacy rule could also paint the transparent rectangular hit area. Channel and Master PAFL similarly changed the complete grey-white round key to a red glowing face instead of changing its centre indicator.
+- Fix: the right-bank outer button is now permanently transparent with no border, background or shadow; its light-blue oval face retains exactly the same background, border and shadow in off/on/hover/pressed states. Only the 4x4 centre lamp changes to a luminous blue-white. PAFL keeps its grey-white circular face and only its 4x4 centre lamp changes to red. Keyboard focus is drawn around the inner oval/round face rather than the rectangular hit box.
+- Implementation evidence: `artifacts/qu16-surface-actual-lamp-state-final.png` captures a selected right-bank Mix and an active channel PAFL at the production 1707x1067 CSS viewport. The clipped surface is 1009.03x571.16 CSS px and the saved image is 1514x857 pixels at device scale 1.5. The source photograph and this implementation were opened together in one comparison input; the complete surface remains the corresponding full-view context.
+- Required fidelity surfaces: typography, copy, strip spacing and fader layout are unchanged; the state-token correction removes the unintended rectangular blue field while preserving the established light-blue keycap, grey-white PAFL cap and 4px hardware lamp size. No image asset, logo or icon was replaced in this correction.
+- Automated evidence: `scripts/test-surface-function-qa.mjs` now uses real CDP pointer move/down/up events and compares computed off/hover/pressed/on styles. It fails if Mix Select or PAFL changes its outer hit area or keycap background, border, shadow or filter, while separately requiring the centre lamp colour and glow to change. It then repeats the existing 1041/1040/980/900/841/840/821/820/800px geometry matrix. The production build passes.
+- Post-fix assessment: the focused active-state comparison shows no remaining P0/P1/P2 issue; the unwanted rectangular background and whole-button illumination are gone.
+
+## Qu-16 lower-surface TCP control and readback pass
+
+- Protocol source of truth: the locally archived official `Qu MIDI Protocol V1.9` and `Qu Mixer Reference Guide AP9372 issue 10`. The implemented allowlist is intentionally limited to source/master fader level, selected-mix send level, Mute and additive PAFL; arbitrary NRPN numbers, remote shutdown and undocumented writes cannot be represented by the UI command model.
+- Runtime integration: writes use the existing TCP 51325 session and worker. The worker performs Get System State, waits for the matching-channel End Sync (`0x14`), then enables meters and accepts control writes. Fader motion is coalesced to approximately 26 Hz; Mute and PAFL are immediate. Active Sense is scheduled ahead of the bounded control drain.
+- State authority: the UI may show an optimistic in-flight value, but a matching or conflicting console readback clears pending state and the hardware value wins. Rejected writes roll back to the last observed snapshot. Session id, connection epoch, generation and monotonic revision checks reject stale frames; reconnect clears parameters and pending writes and never replays commands from the previous connection.
+- Surface semantics: LR uses fader writes; a non-LR Mix selection addresses send level; Master addresses the selected master fader. Mix Select itself remains a local UI routing context and emits no hardware write. Processing/LCD, Sel, layers, Routing, GEQ Fader Flip, SoftKeys and all other unsupported controls remain explicitly local-only.
+- Automated evidence: 54 Rust library tests cover encoding, fragmented/running-status decoding, End Sync atomicity, NRPN observation, pending match/conflict, invalid/duplicate batch rejection, reconnect isolation and Active Sense fairness. Nine pure frontend protocol tests plus the CDP control harness cover canonical mapping, coalescing, immediate keys, optimistic/readback merge and rejected-write rollback. Production build, desktop runtime smoke, surface-function QA, existing Qu-16 visual/function matrices and `git diff --check` pass.
+- Hardware boundary: this is protocol-, unit-, mock-runtime- and desktop-verified only. No physical Qu-16 was available, so actual console movement, lamp response, network timing and firmware compatibility must be confirmed during the next real-device acceptance pass.
+
+## Qu-16 physical rail, lamp-colour and brand-header fidelity pass
+
+- Source visual truth: the operator's four focused crops, the official Allen & Heath 2800 x 1867 Qu-16 product photograph, and AP9372 issue 10. A direct unscaled crop from the official photograph is stored as `src/assets/hardware/allen-heath-qu16/qu16-brandbar.png`; its source coordinates are documented under `docs/hardware/allen-heath-qu16/README.md`.
+- Header correction: the previous software-drawn ALLEN & HEATH / Qu-16 marks and disconnected divider treatment were replaced by the continuous photographed hardware brand rail. The runtime-only USB-B / Ethernet / TCP wording no longer competes with the physical silk-screen.
+- Layer correction: the left rail is now one printed hardware bank with only the two real Layer keys, their separate status lamps, the Custom silk-screen/status mark, the ST/FX/MIX and CH1-16 legends, and the GEQ 31/500 boundary. The cyan layer strips continue across the channel bank instead of reading as unrelated browser buttons.
+- Master/right-bank correction: LR, SoftKeys and Mix Select now share the same printed enclosure rhythm and dividers as the photographed console. LR separates its label, physical lens and centre lamp; the Mix keys are grouped as FX1-2, Mix1-4 and stereo Mix5-10 with distinct icy-cyan, cyan and blue face colours.
+- State/material correction: key faces retain their physical material through off, hover, pressed and active states. Only the centre or side indicator changes: SoftKey active is red, PAFL is amber, LR/Layer/Mix use their documented family colour, and Pk/0/Sig remain red/amber/green. The generic black-hover and whole-button-glow regressions are excluded by the surface interaction matrix.
+- Compact correction: the revised wrapper structure keeps full-size physical keys and readable labels at the 1040 px breakpoint and below. The focused normal and compact captures are `artifacts/qu16-surface-actual.png` and `artifacts/qu16-surface-actual-compact-840.png`.
+- Comparison evidence: `artifacts/qu16-hardware-fidelity-clean-final.png` places the official console and the current implementation in one clean same-state review; `artifacts/qu16-mixer-actual.png` is the final full-console capture. No actionable P0/P1 mismatch remains in the requested rail grouping, printed lines, key/lamp colour semantics or brand-header treatment. Remaining P2/P3 differences are photo-material depth and the deliberately sharper software text required for operator legibility.
+- Automated evidence: the complete `test:qu16-controls` suite, the production build, desktop runtime smoke and the responsive surface geometry matrix pass. The local preview remains reachable at port 1420.
+- Hardware boundary: no physical Qu-16 was connected during this visual pass. UI interactions, local protocol handling and desktop integration are verified; real Ethernet readback, console lamp response and firmware-specific timing still require the physical-device acceptance run.
+
+## Qu-16 lower-key red centre-lamp correction
+
+- Target definition: the physical keycap shapes/material families come from `artifacts/qu16-surface-reference.png` and AP9372 issue 10 pages 22-23, while the operator's explicit software rule overrides the photographed factory illumination behaviour: Mute, Sel, PAFL, LR and all Mix Select active states must preserve their resting keycap material and light only the centre indicator in red.
+- Earlier P1: Mute changed the complete white-grey keycap to pink; Sel changed and glowed the complete green keycap; PAFL used an amber centre light; LR and Mix Select used white/blue centre lights. The prior QA only required the lamp to change and therefore could not reject the wrong active colour.
+- Fix: channel and Master Mute/Sel/PAFL no longer have active keycap background, border or shadow overrides. Their common 4 px centre indicator uses `#d94f58` with the matching red halo. LR and all FX/mono/stereo Mix Select keys use the same centre-lamp token while retaining each family's blue/cyan keycap. The lamp transition was removed so the physical LED state is immediate instead of briefly passing through a muddy intermediate colour.
+- Source/implementation dimensions: the reference image is 690 x 470 px. The rendered implementation clip is 1514 x 839 px for a 1009.03 x 559.16 CSS px surface at device scale 1.5 in the 1707 x 1067 desktop viewport. `artifacts/qu16-red-centre-lamps-comparison.png` normalizes both full surfaces to 700 px content height; `artifacts/qu16-red-centre-lamps-focused-comparison.png` is the focused upper-control comparison.
+- Tested state: CH1 Mute, Sel and PAFL are active together; Mix 5-6 is the selected bus. `artifacts/qu16-surface-actual-red-centre-lamps.png` visibly confirms four unchanged keycap materials with red centre indicators, no whole-button fill change and no rectangular hover/active background.
+- Interaction evidence: the surface QA now compares outer shell and keycap background, background image, border, shadow, filter, opacity and transform through off, hover, pointer-down, active, active-hover and active-pointer-down states. It explicitly requires red centre lamps for channel and Master Mute/Sel/PAFL and verifies all ten LR/FX/Mix targets, including every FX, mono and stereo keycap family.
+- Regression evidence: the complete `test:qu16-controls` suite and production build pass. The responsive geometry matrix remains clean at 1707 x 1067 and 1366 px widths through 1041/1040/980/900/841/840/821/820/800 px heights.
+- Final comparison: fonts/copy, strip spacing, printed dividers, key dimensions, family colours and supplied raster assets are unchanged. The only intended visual delta is the operator-defined red centre-lamp state. No actionable P0/P1/P2 issue remains; the official console's native illumination semantics are intentionally not reproduced for these specific software states.
+
+## Qu-16 clean proportional brandbar and panel-offset pass
+
+- Source visual truth: the official Allen & Heath 2800 x 1867 `Qu-16-Page.jpg` product photograph. The final source crop is `src/assets/hardware/allen-heath-qu16/qu16-brandbar-clean.png`, taken without scaling at `x=686, y=212, width=1407, height=70`.
+- Earlier P1: the previous 1458 x 72 crop began and ended through the two chassis screws, so each end showed half a screw; its cyan artwork also had visibly unequal 12 px / 47 px horizontal insets. The fixed 38 px / 30 px `cover` rows then cropped the photograph again and kept the upper controls too close to the rail.
+- Fix: the replacement crop excludes both screws and the lower control field, preserves the complete left plaque, dual cyan lines and right plaque, and resolves to equal 4 px cyan-art insets. The grid now derives the first row from the asset's 1407:70 ratio and displays it with `object-fit: contain`; the upper controls follow the full rail height. Lower non-functional metal reserve was reduced from 28-36 / 10 / 4 px to 18-26 / 4 / 2 px so the visible hardware controls move down without clipping the fader bank.
+- Full-view implementation evidence: `artifacts/qu16-mixer-actual.png` is the running 1024.36 x 904.60 CSS px console at the 1707 x 1067 desktop viewport and device scale 1.5, saved as 1536 x 1356 pixels. It shows the complete console after the proportional rail and vertical-offset correction.
+- Focused normalized evidence: `artifacts/qu16-brandbar-reference-actual-comparison.png` places the official crop and the running rail in one 1514 x 214 px comparison. Both rail rows are normalized to 1514 x 75 px; the running result preserves both complete plaque ends, contains no screw fragments, and aligns the dual cyan lines without horizontal stretch.
+- Tested state: mixer view, Upper layer, LR selected, no pointer hover. Runtime geometry verifies the 1407 x 70 natural asset, `contain` fit, original aspect ratio within 1.5 CSS px, symmetric console insets, zero bright neutral screw pixels in the outer four pixel columns, balanced 4 px cyan insets, and non-overlap between the rail and SuperStrip.
+- Required fidelity surfaces: typography/copy are the original photographed `ALLEN&HEATH` and `Qu-16` marks with no software text overlay; spacing follows the source crop and symmetric panel frame; source colours and double-line treatment are unchanged; image quality is the direct official raster crop rendered at device scale 1.5 without secondary cropping or distortion; no app-specific connection wording is added to the hardware rail.
+- Responsive evidence: the surface interaction/geometry matrix passes at 1707 x 1067 and 1366 px widths through 1041/1040/980/900/841/840/821/820/800 px heights. The complete Qu-16 control suite, production build and desktop runtime smoke pass after the rail change.
+- Post-fix assessment: the earlier screw fragments, unequal end crop, secondary cover crop and cramped vertical placement are resolved. No actionable P0/P1/P2 visual issue remains in the requested brandbar region.
+
+final result: passed
+
+## LED physical-size and complete-B-region correction
+
+- Source visual truth: the user's onsite sketch `C:/Users/leadb/Downloads/default (1).jpg`, onsite wall photograph `C:/Users/leadb/Downloads/default.jpg`, and the explicit confirmed physical size `5120 mm(W) × 5760 mm(H)`.
+- Geometry: the P2.5 modules are landscape 320 × 160 mm / 128 × 64 px units. A is 8 columns × 18 rows (`2560 × 2880 mm`, `1024 × 1152 px`); B is 16 columns × 18 rows (`5120 × 2880 mm`, `2048 × 1152 px`). Together they form the 8:9 outer canvas `2048 × 2304 px`.
+- Corrected regression: the 4:9 logical-canvas interpretation was removed, but the first correction still sent only a centred 960 × 1080 aperture. Because the DVP processor maps the complete 1920 × 1080 HDMI raster to the wall, that lit only 2560 mm of the 5120 mm B width and left 1280 mm black at each side. The final transport keeps the 2048 × 2304 authoring canvas and pre-stretches only the finished output 2× horizontally across the complete HDMI raster.
+- Runtime evidence: `artifacts/led-physical-geometry-output.png` captures the active 1920 × 1080 LED HDMI frame. The output screen and transformed transport canvas both cover x=0..1920; the inner 8:9 canvas is 960 × 1080 before a `matrix(2,0,0,1,0,0)` transform. Both B edges reach the HDMI edges. The 2048 × 2304 resolution test is currently sent to the physical second screen for onsite confirmation.
+- Automated evidence: the production web build passes; second-display routing asserts the output aperture is 8:9; C1/output normalized text parity passes after a clean WebView reload.
 
 final result: passed

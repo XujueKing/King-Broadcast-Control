@@ -16,6 +16,14 @@
    - [视频与灯光快捷区](ui/home-right-media-lighting.md) — `UI-R05/R` 上下均分的视频与 Tiger Touch 快捷控制
 4. [开发路线图](04-roadmap.md) — 阶段、验收门槛和开发顺序
 5. [决策记录](decisions/README.md) — 已确认的重要技术/产品决策
+6. 硬件与现场实施
+   - [KING CLUB 现场硬件拓扑基线](hardware/site-topology.md) — AUDIO/LIGHT/VIDEO 真实链路、设备清单与现场勘验项
+   - [Qu-16 型号文档](hardware/allen-heath-qu16/README.md) — 官方手册、驱动说明、协议与 UI 实现索引
+7. 实时人声引擎
+   - [P0：48 kHz Audio Loopback](vocal-engine/P0-48K-LOOPBACK.md) — 实时回路、设备证据、虚拟 Qu-16 与安全门
+   - [P3：Realtime F0 Tracker](vocal-engine/P3-F0-TRACKER.md) — 流式音高、voicing、confidence 与模拟证据
+   - [P4-A：Chromatic Correction Control](vocal-engine/P4-CHROMATIC-CONTROL.md) — 半音目标、cents、滞回、平滑与能力边界
+   - [P5/P6：Key/Scale 与 Reference Vocal Map](vocal-engine/P5-P6-TARGET-MAP.md) — 调式约束、参考旋律制作、查询优先级与整半音错误识别
 
 ## 当前状态
 

@@ -59,12 +59,12 @@ Reference Vocal Map > Key/Scale > Chromatic
 
 这证明 Reference 能识别普通 Chromatic 模式无法识别的“准确唱到相邻错误半音”。它尚未证明声音已经被自然修正，因为 `processed.wav` 仍保持 0 dB bypass。
 
-## 歌曲包集成要求
+## 歌曲包集成
 
-正式制作队列应在 Demucs 临时人声轨仍存在时生成 Reference Vocal Map，并将紧凑 `reference.json` 写入歌曲资产及 `.kingsong`。生成后仍可删除体积较大的人声中间轨；播放版客户机只需读取参考图，不需要 NVIDIA、Python、Demucs 或 MOSS。
+桌面制作队列 v6 会在分离人声轨仍存在时，以 48 kHz/128 帧 hop 离线生成 Reference Vocal Map，并将紧凑 `reference.json` 写入歌曲资产。`.kingsong` 导出把它作为 `analysis/reference.json` 携带；播放版导入时校验歌曲指纹、采样率、时间轴和 BLAKE3 数据块后解包。播放版客户机读取已经生成的参考图，不需要 NVIDIA、Python、分离模型或 MOSS。
 
 Reference Map 必须携带歌曲内容指纹、时间轴版本和音频 trim/offset。导入、重新编码或更换音源导致指纹/时长不一致时禁止静默套用旧参考图。
 
 ## 下一门
 
-下一步不是生成式补声，而是让 Reference 控制轨驱动实际低延迟移调，同时加入瞬态保护和 Formant preservation。必须输出响度匹配的 raw/processed A/B，并验证颤音、滑音、假声和辅音没有被拉成机械声。
+下一步不是生成式补声，而是让已经随歌曲落地的 Reference 控制轨驱动实际低延迟移调，同时加入瞬态保护和 Formant preservation。必须输出响度匹配的 raw/processed A/B，并验证颤音、滑音、假声和辅音没有被拉成机械声。

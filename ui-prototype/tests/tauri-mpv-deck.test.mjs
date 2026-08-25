@@ -116,6 +116,7 @@ test("two real mpv Decks play independently and only the operator moves the cros
     await new Promise((resolve) => setTimeout(resolve, 250));
     const mixed1 = await deckState(1);
     const mixed2 = await deckState(2);
+    const masterVolume = Number(document.querySelector('.master-channel input')?.value ?? 100);
     const pause2 = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === 'Deck 2 暂停');
     pause2?.click();
 
@@ -132,6 +133,7 @@ test("two real mpv Decks play independently and only the operator moves the cros
       deck2StillPlaying,
       mixed1,
       mixed2,
+      masterVolume,
       beforeCrossfade,
       afterCrossfade: crossfader?.value,
     };
@@ -152,7 +154,7 @@ test("two real mpv Decks play independently and only the operator moves the cros
   assert.equal(result.deck2ContinuesAt.paused, false);
   assert.ok(Math.abs(result.deck1StillPaused.timePos - result.deck1PausedAt.timePos) < 0.08, "Deck 1 advanced while paused");
   assert.ok(result.deck2StillPlaying.timePos > result.deck2ContinuesAt.timePos, "Deck 2 stopped when Deck 1 paused");
-  assert.ok(Math.abs(result.mixed1.volume - Math.cos(0.8 * Math.PI / 2) * 100) < 1, `Deck 1 mix volume is wrong: ${result.mixed1.volume}`);
-  assert.ok(Math.abs(result.mixed2.volume - Math.sin(0.8 * Math.PI / 2) * 100) < 1, `Deck 2 mix volume is wrong: ${result.mixed2.volume}`);
+  assert.ok(Math.abs(result.mixed1.volume - Math.cos(0.8 * Math.PI / 2) * result.masterVolume) < 1, `Deck 1 mix volume is wrong: ${result.mixed1.volume}`);
+  assert.ok(Math.abs(result.mixed2.volume - Math.sin(0.8 * Math.PI / 2) * result.masterVolume) < 1, `Deck 2 mix volume is wrong: ${result.mixed2.volume}`);
   assert.equal(result.afterCrossfade, "80");
 });

@@ -15,11 +15,411 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, Webvie
 
 mod ai_analysis;
 mod ai_worker;
+mod kingsong;
+mod libmpv_runtime;
+mod mixer_models;
 mod mpv_runtime;
+mod qu16_control;
+mod qu16_runtime;
+mod runtime_capability;
+mod vocal_meter_bridge;
+mod vocal_routing;
+mod vocal_runtime;
 mod waveform;
 
 struct ProgramState(Mutex<Value>);
 struct MediaMetadataCache(Mutex<HashMap<PathBuf, CachedMediaMetadata>>);
+
+#[tauri::command]
+fn vocal_runtime_status(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+) -> Result<Value, String> {
+    runtime.status()
+}
+
+#[tauri::command]
+fn vocal_set_preset(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+    lane: String,
+    preset: String,
+) -> Result<Value, String> {
+    runtime.set_preset(&lane, &preset)
+}
+
+#[tauri::command]
+fn vocal_evaluate_arm(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+    request: Value,
+) -> Result<Value, String> {
+    runtime.evaluate_arm(request)
+}
+
+#[tauri::command]
+fn vocal_disarm(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+) -> Result<Value, String> {
+    runtime.disarm()
+}
+
+#[tauri::command]
+fn vocal_routing_status(app: tauri::AppHandle) -> Result<Value, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    vocal_routing::status(&app_data)
+}
+
+#[tauri::command]
+fn vocal_discover_routing_virtual() -> Result<Value, String> {
+    vocal_routing::discover_virtual()
+}
+
+#[tauri::command]
+fn vocal_simulate_calibration_wizard() -> Result<Value, String> {
+    vocal_routing::simulate_calibration_wizard()
+}
+
+#[tauri::command]
+fn vocal_replay_meter_fixture() -> Result<Value, String> {
+    vocal_routing::replay_meter_fixture()
+}
+
+#[tauri::command]
+fn vocal_replay_joint_evidence() -> Result<Value, String> {
+    vocal_routing::replay_joint_evidence()
+}
+
+#[tauri::command]
+fn vocal_replay_desktop_qu16_bridge() -> Result<Value, String> {
+    vocal_routing::replay_desktop_qu16_bridge()
+}
+
+#[tauri::command]
+fn vocal_qu16_meter_bridge_status(
+    bridge: tauri::State<'_, vocal_meter_bridge::VocalMeterBridge>,
+) -> king_vocal_engine::desktop_bridge::DesktopQu16MeterBridgeStatus {
+    bridge.status()
+}
+
+#[tauri::command]
+fn vocal_save_routing(app: tauri::AppHandle, report: Value) -> Result<Value, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    vocal_routing::save_offline(&app_data, report)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Qu16MeterUiStatus {
+    session_id: u64,
+    host: String,
+    state: String,
+    title: String,
+    message: String,
+}
+
+fn qu16_meter_ui_status(snapshot: &qu16_runtime::Qu16MeterSnapshot) -> Qu16MeterUiStatus {
+    use qu16_runtime::Qu16ConnectionState;
+    let (state, title) = match snapshot.state {
+        Qu16ConnectionState::Stopped => ("disconnected", "真机表计未连接"),
+        Qu16ConnectionState::Connecting => ("connecting", "正在连接 Qu-16"),
+        Qu16ConnectionState::Syncing => ("connecting", "正在同步 Qu-16"),
+        Qu16ConnectionState::Metering => ("live", "真机表计 LIVE"),
+        Qu16ConnectionState::Reconnecting => ("connecting", "Qu-16 正在重连"),
+        Qu16ConnectionState::Error => ("error", "Qu-16 连接错误"),
+    };
+    let message = snapshot.error.clone().unwrap_or_else(|| {
+        if snapshot.connected {
+            format!(
+                "{} · {} · firmware {}",
+                snapshot.host,
+                qu16_runtime::QU16_TCP_PORT,
+                snapshot.firmware.as_deref().unwrap_or("unknown")
+            )
+        } else if snapshot.host.is_empty() {
+            "在设置中填写 Qu-16 的以太网 IP".to_string()
+        } else {
+            format!("{} · TCP {}", snapshot.host, qu16_runtime::QU16_TCP_PORT)
+        }
+    });
+    Qu16MeterUiStatus {
+        session_id: snapshot.session_id,
+        host: snapshot.host.clone(),
+        state: state.to_string(),
+        title: title.to_string(),
+        message,
+    }
+}
+
+#[tauri::command]
+async fn qu16_start_metering(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, qu16_runtime::Qu16Runtime>,
+    vocal_meter_bridge: tauri::State<'_, vocal_meter_bridge::VocalMeterBridge>,
+    host: String,
+) -> Result<Qu16MeterUiStatus, String> {
+    let runtime = runtime.inner().clone();
+    let vocal_meter_bridge = vocal_meter_bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let requested_host = host.trim().to_string();
+        let meter_event_app = app.clone();
+        let parameter_event_app = app.clone();
+        let last_live_emit = std::sync::Arc::new(Mutex::new(None::<std::time::Instant>));
+        let emit_clock = std::sync::Arc::clone(&last_live_emit);
+        let session_id = runtime
+            .start_metering_with_callbacks(
+                requested_host.clone(),
+                move |snapshot| {
+                    let vocal_update = vocal_meter_bridge.ingest(&snapshot);
+                    let should_emit = if snapshot.connected {
+                        let now = std::time::Instant::now();
+                        let mut last = emit_clock
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let due = last
+                            .map(|previous| {
+                                now.duration_since(previous) >= std::time::Duration::from_millis(50)
+                            })
+                            .unwrap_or(true);
+                        if due {
+                            *last = Some(now);
+                        }
+                        due
+                    } else {
+                        true
+                    };
+                    if !should_emit {
+                        return;
+                    }
+                    let status = qu16_meter_ui_status(&snapshot);
+                    let _ = meter_event_app.emit("qu16-meter-frame", &snapshot);
+                    let _ = meter_event_app.emit("qu16-meter-status", status);
+                    match vocal_update {
+                        Ok(update) => {
+                            let _ = meter_event_app.emit("vocal-qu16-meter-evidence", update);
+                        }
+                        Err(error) => log::warn!("Vocal meter bridge rejected snapshot: {error}"),
+                    }
+                },
+                move |snapshot| {
+                    // Parameter state is low-volume, revisioned protocol
+                    // state. It must not share the 20 FPS meter throttle.
+                    let _ = parameter_event_app.emit("qu16-parameter-frame", &snapshot);
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let snapshot = runtime.meter_status();
+        if snapshot.session_id == session_id {
+            Ok(qu16_meter_ui_status(&snapshot))
+        } else {
+            Ok(Qu16MeterUiStatus {
+                session_id,
+                host: requested_host.clone(),
+                state: "connecting".into(),
+                title: "正在连接 Qu-16".into(),
+                message: format!("{} · TCP {}", requested_host, qu16_runtime::QU16_TCP_PORT),
+            })
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn qu16_stop_metering(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, qu16_runtime::Qu16Runtime>,
+    vocal_meter_bridge: tauri::State<'_, vocal_meter_bridge::VocalMeterBridge>,
+) -> Result<Qu16MeterUiStatus, String> {
+    let runtime = runtime.inner().clone();
+    let vocal_meter_bridge = vocal_meter_bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = runtime.stop_metering();
+        if let Ok(update) = vocal_meter_bridge.ingest(&snapshot) {
+            let _ = app.emit("vocal-qu16-meter-evidence", update);
+        }
+        let _ = app.emit("qu16-parameter-frame", runtime.parameter_status());
+        Ok(qu16_meter_ui_status(&snapshot))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn qu16_stop_metering_session(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, qu16_runtime::Qu16Runtime>,
+    vocal_meter_bridge: tauri::State<'_, vocal_meter_bridge::VocalMeterBridge>,
+    session_id: u64,
+) -> Result<Qu16MeterUiStatus, String> {
+    let runtime = runtime.inner().clone();
+    let vocal_meter_bridge = vocal_meter_bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = runtime.stop_metering_if(session_id);
+        if let Ok(update) = vocal_meter_bridge.ingest(&snapshot) {
+            let _ = app.emit("vocal-qu16-meter-evidence", update);
+        }
+        let _ = app.emit("qu16-parameter-frame", runtime.parameter_status());
+        Ok(qu16_meter_ui_status(&snapshot))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn qu16_meter_status(
+    runtime: tauri::State<'_, qu16_runtime::Qu16Runtime>,
+) -> qu16_runtime::Qu16MeterSnapshot {
+    runtime.meter_status()
+}
+
+#[tauri::command]
+fn qu16_parameter_status(
+    runtime: tauri::State<'_, qu16_runtime::Qu16Runtime>,
+) -> qu16_runtime::Qu16ParameterSnapshot {
+    runtime.parameter_status()
+}
+
+#[tauri::command]
+async fn qu16_write_parameters(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, qu16_runtime::Qu16Runtime>,
+    session_id: u64,
+    writes: Vec<qu16_control::Qu16ParameterWrite>,
+) -> Result<qu16_runtime::Qu16ParameterSnapshot, String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = runtime
+            .write_parameters(session_id, writes)
+            .map_err(|error| error.to_string())?;
+        let _ = app.emit("qu16-parameter-frame", &snapshot);
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn mixer_driver_status(model_id: String) -> Result<mixer_models::MixerDriverStatus, String> {
+    mixer_models::driver_status(&model_id)
+}
+
+#[tauri::command]
+fn configure_mixer_model(
+    app: tauri::AppHandle,
+    model_id: String,
+) -> Result<mixer_models::MixerDriverStatus, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    mixer_models::configure(&app_data, &model_id)
+}
+
+#[tauri::command]
+fn open_mixer_driver_support(model_id: String) -> Result<(), String> {
+    mixer_models::open_driver_support(&model_id)
+}
+
+#[tauri::command]
+async fn install_mixer_driver_from_downloads(
+    app: tauri::AppHandle,
+    model_id: String,
+) -> Result<mixer_models::MixerDriverStatus, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        mixer_models::install_from_downloads(&app_data, &downloads, &model_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn runtime_capabilities(
+    state: tauri::State<runtime_capability::RuntimeCapabilities>,
+) -> runtime_capability::RuntimeCapabilities {
+    state.inner().clone()
+}
+
+#[tauri::command]
+fn song_package_directories(
+    app: tauri::AppHandle,
+) -> Result<kingsong::SongPackageDirectories, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    kingsong::directories(&app_data)
+}
+
+#[tauri::command]
+async fn export_kingsong(
+    app: tauri::AppHandle,
+    path: String,
+    title: Option<String>,
+    artist: Option<String>,
+) -> Result<kingsong::SongPackageResult, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        kingsong::export_song(
+            &app_data,
+            Path::new(&path),
+            title.as_deref(),
+            artist.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn import_kingsong_inbox(
+    app: tauri::AppHandle,
+) -> Result<kingsong::SongPackageImportReport, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let media_root = media_root_directory(&app)?;
+    tauri::async_runtime::spawn_blocking(move || kingsong::import_inbox(&app_data, &media_root))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn open_song_package_directory(app: tauri::AppHandle, kind: String) -> Result<String, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let package_directories = kingsong::directories(&app_data)?;
+    let directory = match kind.as_str() {
+        "inbox" => package_directories.inbox_directory,
+        "outbox" => package_directories.outbox_directory,
+        _ => package_directories.root_directory,
+    };
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(&directory)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(directory)
+}
 
 #[tauri::command]
 fn mpv_runtime_status(
@@ -116,8 +516,12 @@ async fn analyze_audio_waveform(
 #[tauri::command]
 async fn queue_audio_ai_analysis(
     app: tauri::AppHandle,
+    capabilities: tauri::State<'_, runtime_capability::RuntimeCapabilities>,
     path: String,
 ) -> Result<ai_analysis::AiAnalysisJob, String> {
+    if !capabilities.ai_processing_available {
+        return Err("当前为播放版；请导入已制作的 .kingsong".to_string());
+    }
     let database_path = app
         .path()
         .app_data_dir()
@@ -143,9 +547,44 @@ fn list_audio_ai_jobs(app: tauri::AppHandle) -> Result<Vec<ai_analysis::AiAnalys
 
 #[tauri::command]
 fn audio_ai_worker_status(
+    app: tauri::AppHandle,
+    capabilities: tauri::State<runtime_capability::RuntimeCapabilities>,
     state: tauri::State<ai_worker::AiWorkerManager>,
 ) -> Result<ai_worker::AiWorkerStatus, String> {
-    ai_worker::status(&state)
+    if capabilities.ai_processing_available {
+        ai_worker::start(&app, &state)
+    } else {
+        ai_worker::status(&state)
+    }
+}
+
+#[tauri::command]
+fn set_audio_ai_scheduler(
+    app: tauri::AppHandle,
+    capabilities: tauri::State<runtime_capability::RuntimeCapabilities>,
+    state: tauri::State<ai_worker::AiWorkerManager>,
+    playing_paths: Vec<String>,
+    deck_paths: Vec<String>,
+) -> Result<ai_worker::AiWorkerStatus, String> {
+    if !capabilities.ai_processing_available {
+        return ai_worker::status(&state);
+    }
+    ai_worker::set_scheduler_context(&state, playing_paths.len(), deck_paths.len())?;
+    let database_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("king-club.sqlite3");
+    let playing_paths = playing_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let deck_paths = deck_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    ai_analysis::update_scheduler_priorities(&database_path, &playing_paths, &deck_paths)?;
+    ai_worker::start(&app, &state)
 }
 
 #[tauri::command]
@@ -343,12 +782,20 @@ fn enforce_output_window_bounds(
 ) -> Result<(), String> {
     use windows_sys::Win32::{
         Foundation::GetLastError,
+        UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
         UI::WindowsAndMessaging::{
             SetWindowPos, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
         },
     };
 
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    // `Monitor::position/size` are physical pixels.  Without an explicit
+    // per-monitor DPI context Windows virtualizes SetWindowPos using the
+    // operator screen's scale (150% on the development laptop), which turned
+    // a 1920x1080 LED processor canvas into a 2880x1620 window.  Scope the
+    // native call to PMv2 and restore the caller's context immediately after.
+    let previous_dpi_context =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let result = unsafe {
         SetWindowPos(
             hwnd.0,
@@ -360,12 +807,47 @@ fn enforce_output_window_bounds(
             SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )
     };
+    if !previous_dpi_context.is_null() {
+        unsafe {
+            SetThreadDpiAwarenessContext(previous_dpi_context);
+        }
+    }
     if result == 0 {
         return Err(format!(
             "无法将 LED 输出窗口置于第二屏最上层：Win32 错误 {}",
             unsafe { GetLastError() }
         ));
     }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn request_extended_desktop() -> Result<(), String> {
+    use std::{os::windows::process::CommandExt, process::Command};
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let display_switch = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join("DisplaySwitch.exe");
+    let status = Command::new(&display_switch)
+        .arg("/extend")
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|error| format!("无法请求 Windows 扩展桌面：{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Windows 扩展桌面请求失败：DisplaySwitch 退出码 {:?}",
+            status.code()
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn request_extended_desktop() -> Result<(), String> {
     Ok(())
 }
 
@@ -648,6 +1130,97 @@ fn list_system_fonts() -> Result<Vec<String>, String> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CustomFontAsset {
+    family: String,
+    filename: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FontLibrary {
+    directory: String,
+    system_families: Vec<String>,
+    custom_fonts: Vec<CustomFontAsset>,
+}
+
+fn is_supported_font(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "ttf" | "otf" | "ttc" | "otc" | "woff" | "woff2"
+            )
+        })
+}
+
+fn custom_font_family(path: &Path) -> String {
+    font_kit::font::Font::from_path(path, 0)
+        .map(|font| font.family_name())
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "KING CLUB Custom Font".to_string())
+}
+
+#[tauri::command]
+fn font_library(app: tauri::AppHandle) -> Result<FontLibrary, String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("fonts");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let mut custom_fonts = fs::read_dir(&directory)
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_supported_font(path))
+        .map(|path| CustomFontAsset {
+            family: custom_font_family(&path),
+            filename: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("font")
+                .to_string(),
+            path: path.to_string_lossy().into_owned(),
+        })
+        .collect::<Vec<_>>();
+    custom_fonts.sort_by(|left, right| {
+        left.family
+            .to_lowercase()
+            .cmp(&right.family.to_lowercase())
+            .then_with(|| {
+                left.filename
+                    .to_lowercase()
+                    .cmp(&right.filename.to_lowercase())
+            })
+    });
+    Ok(FontLibrary {
+        directory: directory.to_string_lossy().into_owned(),
+        system_families: list_system_fonts()?,
+        custom_fonts,
+    })
+}
+
+#[tauri::command]
+fn open_font_directory(app: tauri::AppHandle) -> Result<String, String> {
+    let library = font_library(app)?;
+    #[cfg(windows)]
+    std::process::Command::new("explorer.exe")
+        .arg(&library.directory)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(library.directory)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ImageAsset {
     name: String,
     category: String,
@@ -860,6 +1433,13 @@ fn collect_media_files(
             }
             value
         });
+        let package_metadata = path
+            .parent()
+            .map(|parent| parent.join("kingsong.json"))
+            .filter(|sidecar| sidecar.is_file())
+            .and_then(|sidecar| fs::read(sidecar).ok())
+            .filter(|bytes| bytes.len() <= 1024 * 1024)
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
         let canonical_path = path
             .canonicalize()
             .unwrap_or_else(|_| path.clone())
@@ -884,15 +1464,31 @@ fn collect_media_files(
             name: file_name,
             category,
             path: path.to_string_lossy().into_owned(),
-            title: media_metadata.title,
-            artist: media_metadata.artist,
+            title: media_metadata.title.or_else(|| {
+                package_metadata
+                    .as_ref()
+                    .and_then(|value| value.get("title"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+            artist: media_metadata.artist.or_else(|| {
+                package_metadata
+                    .as_ref()
+                    .and_then(|value| value.get("artist"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
             album: media_metadata.album,
             duration_ms: media_metadata.duration_ms,
             lyrics,
             lyrics_path: lyrics_path.map(|value| value.to_string_lossy().into_owned()),
             lyrics_modified_unix_ms,
-            vocals_path: derived_artifacts
-                .map(|artifacts| artifacts.vocals_path.to_string_lossy().into_owned()),
+            vocals_path: derived_artifacts.and_then(|artifacts| {
+                artifacts
+                    .vocals_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+            }),
             accompaniment_path: derived_artifacts
                 .map(|artifacts| artifacts.accompaniment_path.to_string_lossy().into_owned()),
             size_bytes,
@@ -988,22 +1584,30 @@ fn scan_media_root(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let capability_state = runtime_capability::detect();
     tauri::Builder::default()
         .manage(ProgramState(Mutex::new(Value::Null)))
         .manage(MediaMetadataCache(Mutex::new(HashMap::new())))
         .manage(waveform::WaveformCache::default())
         .manage(mpv_runtime::MpvManager::default())
         .manage(ai_worker::AiWorkerManager::default())
+        .manage(qu16_runtime::Qu16Runtime::default())
+        .manage(vocal_meter_bridge::VocalMeterBridge::default())
+        .manage(vocal_runtime::VocalRuntimeBridge::default())
+        .manage(capability_state)
         .invoke_handler(tauri::generate_handler![
             scan_image_library,
             scan_media_library,
             list_system_fonts,
+            font_library,
+            open_font_directory,
             list_displays,
             open_output_window,
             close_output_window,
             output_window_status,
             set_program_state,
             get_program_state,
+            libmpv_runtime::libmpv_runtime_status,
             mpv_runtime_status,
             mpv_deck_load,
             mpv_deck_switch_source,
@@ -1016,14 +1620,65 @@ pub fn run() {
             save_rhythm_correction,
             queue_audio_ai_analysis,
             list_audio_ai_jobs,
-            audio_ai_worker_status
+            audio_ai_worker_status,
+            set_audio_ai_scheduler,
+            runtime_capabilities,
+            mixer_driver_status,
+            configure_mixer_model,
+            open_mixer_driver_support,
+            install_mixer_driver_from_downloads,
+            qu16_start_metering,
+            qu16_stop_metering,
+            qu16_stop_metering_session,
+            qu16_meter_status,
+            qu16_parameter_status,
+            qu16_write_parameters,
+            vocal_runtime_status,
+            vocal_set_preset,
+            vocal_evaluate_arm,
+            vocal_disarm,
+            vocal_routing_status,
+            vocal_discover_routing_virtual,
+            vocal_simulate_calibration_wizard,
+            vocal_replay_meter_fixture,
+            vocal_replay_joint_evidence,
+            vocal_replay_desktop_qu16_bridge,
+            vocal_qu16_meter_bridge_status,
+            vocal_save_routing,
+            song_package_directories,
+            export_kingsong,
+            import_kingsong_inbox,
+            open_song_package_directory
         ])
         .setup(|app| {
-            if let Err(error) = ai_worker::start(
-                &app.handle().clone(),
-                app.state::<ai_worker::AiWorkerManager>().inner(),
-            ) {
-                eprintln!("AI worker startup failed: {error}");
+            if let Err(error) = request_extended_desktop() {
+                eprintln!("Extended desktop startup unavailable: {error}");
+            }
+            #[cfg(windows)]
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let app_data = app.path().app_data_dir()?;
+            let media_root = media_root_directory(&app.handle().clone())?;
+            if let Err(error) = kingsong::directories(&app_data) {
+                eprintln!("KINGSONG directory setup failed: {error}");
+            }
+            match kingsong::import_inbox(&app_data, &media_root) {
+                Ok(report) => {
+                    for error in report.errors {
+                        eprintln!("KINGSONG startup import skipped: {error}");
+                    }
+                }
+                Err(error) => eprintln!("KINGSONG startup import failed: {error}"),
+            }
+            if app
+                .state::<runtime_capability::RuntimeCapabilities>()
+                .ai_processing_available
+            {
+                if let Err(error) = ai_worker::start(
+                    &app.handle().clone(),
+                    app.state::<ai_worker::AiWorkerManager>().inner(),
+                ) {
+                    eprintln!("AI worker startup failed: {error}");
+                }
             }
             let main = if let Some(main) = app.get_webview_window("main") {
                 main
@@ -1041,7 +1696,15 @@ pub fn run() {
                     .build()?
             };
             main.show()?;
-            main.maximize()?;
+            main.set_decorations(false)?;
+            main.set_fullscreen(true)?;
+            // A connected LED processor must become active during the native
+            // desktop startup itself.  Do not wait for React to finish loading:
+            // the frontend heartbeat remains responsible only for hot-plug
+            // recovery after startup.
+            if let Err(error) = open_output_window(app.handle().clone(), None) {
+                eprintln!("LED startup output unavailable: {error}");
+            }
             main.set_focus()?;
             Ok(())
         })
@@ -1060,6 +1723,14 @@ mod tests {
             width,
             height,
         }
+    }
+
+    #[test]
+    fn custom_font_directory_accepts_webview_and_desktop_font_formats() {
+        for filename in ["club.ttf", "club.OTF", "club.ttc", "club.woff2"] {
+            assert!(is_supported_font(Path::new(filename)), "{filename}");
+        }
+        assert!(!is_supported_font(Path::new("club.txt")));
     }
 
     #[test]

@@ -5,6 +5,37 @@ const fractionToSeconds = (value = "") => {
   return Number(value) / (10 ** value.length);
 };
 
+const splitLongLyric = (text, maxCharacters = 28) => {
+  const chunks=[];
+  let current="";
+  for(const character of String(text).replace(/\s+/g," ").trim()){
+    current+=character;
+    if((/[，。！？；：,.!?;:]/.test(character)&&current.trim().length>=6)||current.length>=maxCharacters){
+      chunks.push(current.trim());
+      current="";
+    }
+  }
+  if(current.trim()) chunks.push(current.trim());
+  return chunks;
+};
+
+const expandCoarseLines = (lines) => lines.flatMap((line,index)=>{
+  const next=lines[index+1];
+  const duration=next ? next.atSeconds-line.atSeconds : 0;
+  const compactLength=line.text.replace(/\s+/g,"").length;
+  if(compactLength<=28||duration<=0) return [line];
+  const chunks=splitLongLyric(line.text);
+  if(chunks.length<2) return [line];
+  const weights=chunks.map((chunk)=>Math.max(1,chunk.replace(/\s+/g,"").length));
+  const total=weights.reduce((sum,value)=>sum+value,0);
+  let elapsed=0;
+  return chunks.map((chunk,chunkIndex)=>{
+    const atSeconds=line.atSeconds+duration*elapsed/total;
+    elapsed+=weights[chunkIndex];
+    return {atSeconds,text:chunk};
+  });
+});
+
 export const parseLrc = (source) => {
   const text = String(source ?? "").replace(/^\uFEFF/, "");
   let offsetSeconds = 0;
@@ -24,7 +55,8 @@ export const parseLrc = (source) => {
   }
 
   lines.sort((left,right)=>left.atSeconds-right.atSeconds);
-  return lines.filter((line,index)=>index===0||line.atSeconds!==lines[index-1].atSeconds||line.text!==lines[index-1].text);
+  const unique=lines.filter((line,index)=>index===0||line.atSeconds!==lines[index-1].atSeconds||line.text!==lines[index-1].text);
+  return expandCoarseLines(unique);
 };
 
 export const lyricAtTime = (lines, seconds) => {
@@ -47,10 +79,14 @@ export const lyricAtTime = (lines, seconds) => {
 };
 
 export const selectLyricsDeck = ({ playingDecks, enabledDecks, availableDecks, crossfade }) => {
-  const available = [1,2].filter((deck)=>enabledDecks?.[deck]&&availableDecks?.[deck]);
+  const canShow = (deck)=>Boolean(enabledDecks?.[deck]&&availableDecks?.[deck]);
+  const playing = [1,2].filter((deck)=>playingDecks?.[deck]);
+  if (playing.length) {
+    const active = playing.length===1 ? playing[0] : (Number(crossfade)>50 ? 2 : 1);
+    return canShow(active) ? active : null;
+  }
+  const available = [1,2].filter(canShow);
   if (!available.length) return null;
-  const playing = available.filter((deck)=>playingDecks?.[deck]);
-  const candidates = playing.length ? playing : available;
-  if (candidates.length === 1) return candidates[0];
-  return Number(crossfade) > 50 ? 2 : 1;
+  if (available.length===1) return available[0];
+  return Number(crossfade)>50 ? 2 : 1;
 };

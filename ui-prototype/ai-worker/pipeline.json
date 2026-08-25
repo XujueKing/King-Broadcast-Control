@@ -1,19 +1,29 @@
 {
-  "pipelineVersion": "king-audio-ai-v1",
+  "pipelineVersion": "king-audio-ai-moss-v6",
   "pythonVersion": "3.12",
   "concurrency": 1,
+  "compute": {
+    "device": "cuda:0",
+    "dtype": "bfloat16",
+    "requireCuda": true
+  },
   "separator": {
-    "model": "htdemucs",
-    "stems": ["vocals", "no_vocals"]
+    "architecture": "bs-roformer",
+    "model": "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+    "modelDirectory": "D:\\AI-Models\\audio-separator",
+    "batchSize": 1,
+    "overlap": 8,
+    "fallbackModel": "htdemucs_ft",
+    "fallbackShifts": 2,
+    "fallbackOverlap": 0.5,
+    "fallbackAccompaniment": ["drums", "bass", "other"]
   },
-  "asr": {
-    "model": "Qwen/Qwen3-ASR-1.7B",
-    "localDirectory": ".local-tools/models/Qwen3-ASR-1.7B",
-    "fallback": "faster-whisper"
-  },
-  "aligner": {
-    "model": "Qwen/Qwen3-ForcedAligner-0.6B",
-    "localDirectory": ".local-tools/models/Qwen3-ForcedAligner-0.6B"
+  "moss": {
+    "model": "OpenMOSS-Team/MOSS-Music-8B-Thinking",
+    "endpoint": "http://127.0.0.1:30000",
+    "maxTokens": 4096,
+    "temperature": 0.0,
+    "timestampMode": "native"
   },
   "artifacts": [
     "vocals.flac",
@@ -21,6 +31,7 @@
     "lyrics.txt",
     "lyrics.lrc",
     "lyrics.words.json",
+    "reference.json",
     "manifest.json"
   ]
 }

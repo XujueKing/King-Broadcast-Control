@@ -83,6 +83,8 @@ test("Tauri routes the visible PGM window to a physical non-operator display", a
     screenWidth: window.screen.width,
     screenHeight: window.screen.height,
     devicePixelRatio: window.devicePixelRatio,
+    screenRect: (() => { const r=document.querySelector('.output-window-root .led-screen')?.getBoundingClientRect(); return r&&({x:r.x,y:r.y,width:r.width,height:r.height}); })(),
+    transportCanvas: (() => { const e=document.querySelector('.output-window-root .led-physical-canvas'); const r=e?.getBoundingClientRect(); return e&&r&&({offsetWidth:e.offsetWidth,offsetHeight:e.offsetHeight,x:r.x,y:r.y,width:r.width,height:r.height,transform:getComputedStyle(e).transform}); })(),
   })`);
   assert.equal(outputState.visibility, "visible");
   assert.equal(outputState.hasRoot, true);
@@ -97,4 +99,9 @@ test("Tauri routes the visible PGM window to a physical non-operator display", a
     targetDisplay.height,
     JSON.stringify({ outputState, targetDisplay }),
   );
+  assert.equal(Math.round(outputState.screenRect.width / outputState.screenRect.height * 9), 16, JSON.stringify(outputState));
+  assert.equal(outputState.transportCanvas.offsetWidth * 2, Math.round(outputState.screenRect.width));
+  assert.equal(outputState.transportCanvas.offsetHeight, Math.round(outputState.screenRect.height));
+  assert.equal(Math.round(outputState.transportCanvas.width), Math.round(outputState.screenRect.width));
+  assert.match(outputState.transportCanvas.transform, /^matrix\(2, 0, 0, 1,/);
 });

@@ -1,0 +1,28 @@
+{
+  "capturedAt": "2026-08-24",
+  "stage": "SOFTWARE_ROUND_TRIP_PASSED",
+  "hardwareStatus": "HARDWARE_PENDING",
+  "pipelineVersion": "king-audio-ai-moss-v6",
+  "referenceMap": {
+    "sampleRate": 48000,
+    "hopFrames": 128,
+    "generator": "king-reference-pyin-v1",
+    "syntheticFlacHz": 440.0,
+    "detectedMidiNote": 69
+  },
+  "tests": {
+    "pythonWorkerPassed": 19,
+    "tauriRustPassed": 55,
+    "kingsongFocusedPassed": 3,
+    "vocalEnginePassed": 21
+  },
+  "kingsong": {
+    "legacyEntryCount": 4,
+    "newEntryCount": 5,
+    "referenceEntry": "analysis/reference.json",
+    "legacyImportSupported": true,
+    "blake3Verified": true,
+    "songFingerprintVerified": true
+  },
+  "physicalRoundTripMs": null
+}

@@ -8,6 +8,8 @@ Runtime output rule: PGM and PVW are separate states. Only confirmed PGM content
 
 Runtime media milestone: the desktop app owns `%APPDATA%/club.king.broadcast-control/media/videos`, `media/audio`, and `media/images`. It rescans local video/audio folders while running. Until the bundled mpv sidecar replaces it, real MP4 playback uses the WebView2 media element in PGM/output; PVW and the operator-side PGM monitor must stay muted to prevent duplicate venue audio. The output window alone may emit the video's own audio, controlled by the independent R1 video-audio toggle.
 
+Program-video target architecture is one `libmpv` core with GPU hardware decoding and two real-time render targets for the physical PGM output and C1 confidence monitor. Two independent WebView `<video>` players are only the temporary fallback. A low-frame-rate screenshot/JPEG proxy is not an acceptable live preview and must not be reintroduced.
+
 Deck runtime milestone: when local audio files exist, Deck 1 and Deck 2 use independent real audio elements with their own play/pause/seek state. The Crossfader applies equal-power volume to those two audio instances and must never auto-switch merely because a track is loaded. The hard-coded demo tracks remain only as a no-media visual fallback and must not be presented as real playback.
 
 Second-screen deployment is plug-and-play: the desktop app retries detection while running, keeps the preloaded output window hidden while only one logical display exists, and reuses it when an independent LED display appears. It must not force Windows display-mode changes. Hot-plug recovery must re-read monitor bounds and resolution, restore the current PGM without operator assistance, hide output immediately on disconnect, and never move visible output onto the main control display.
@@ -28,6 +30,8 @@ R1 视频网格始终从顶部紧凑排列，grid-auto-rows 使用内容高度�
 
 PVW 使用完整 8:9 矩形画布并以 cover 满铺视频或图片，不应用 T 形遮罩；T 形 LED 实际可见范围只用红色轮廓叠加标示，轮廓外也必须显示素材，以便判断裁切。
 
+现场 LED 几何以 2026-08-25 用户确认尺寸为准：总物理尺寸 5120 mm(W) × 5760 mm(H)，外框 8:9。模组为横向 320 × 160 mm / 128 × 64 px；A 区 8 列 × 18 行，对应 2560 × 2880 mm / 1024 × 1152 px；B 区 16 列 × 18 行，对应 5120 × 2880 mm / 2048 × 1152 px。应用创作逻辑画布固定为 2048 × 2304（8:9），不得把 18 行误按 128px 高的方形单元计算成 4608px。现场 DVP 处理器按完整 1920 × 1080 HDMI 输入映射全墙，因此独立输出必须把 8:9 逻辑画面横向预拉伸 2 倍，铺满 1920 × 1080；处理器映射后恢复 8:9。若只发送居中的 960 × 1080，会只占物理宽度 2560 mm，B 区左右各黑 1280 mm。C1/PVW 仍显示未预拉伸的真实 8:9。
+
 PVW 锁定视频或图片后允许直接拖动位置，并提供自由拉伸、等比缩放、锁宽同比、锁高同比和重置。红色 T 形线固定不动，素材变换参数随确认上屏应用到 PGM。
 
 C2 每个 Deck 的底部控制为两行、每行 5 个等分按钮。第一行第 5 个是独立歌词开关“词”，第二行第 5 个是独立“原唱/伴唱”切换；Deck 1/2 状态互不影响。
@@ -37,3 +41,117 @@ C2 每个 Deck 的底部控制为两行、每行 5 个等分按钮。第一行�
 When implementing from a selected generated mock, treat that image as the source of truth for layout, component anatomy, density, spacing, color, typography, visible content, and hierarchy.
 
 Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts/prepare-sites-build.mjs`, and `tests/sites-worker.test.mjs` intact so the same local prototype can be handed to Sites. Before a Sites handoff, run `npm run build` and `npm run test:sites`; the build must leave `dist/client/index.html`, `dist/server/index.js`, and `dist/.openai/hosting.json`.
+
+Runtime editions are hardware-capability based, not separate source branches. At startup, a detected NVIDIA GPU selects the full production-and-playback mode; no NVIDIA GPU selects the playback-only mode. Playback-only must never start Python, WSL, Demucs, or MOSS and must accept completed `.kingsong` packages.
+
+`.kingsong` is the portable single-song delivery format. It is a versioned `KSG1` binary container carrying the original mix, accompaniment, LRC, native timestamp JSON, model provenance and BLAKE3 integrity records. High-end machines produce and export it; low-end machines verify and unpack it into their local library. Deck playback always reads unpacked local media, never a live package stream.
+
+Newly produced v6 song assets must also contain a compact 48 kHz/128-frame `reference.json` tied to the source song fingerprint and separator profile. New `.kingsong` exports carry it as `analysis/reference.json`; the field remains optional only so legacy KSG1 packages stay importable. Playback-only machines validate and unpack this file but never regenerate it.
+
+歌词显示采用同步上移的三行时间轴并统一用于主预览和独立输出。静止时当前句为中线略偏下的大字，下一句为同区下方的 50% 透明小字，再下一句在更下方保持同样小字号但完全透明。换句时三条同时上移一格：当前句缩小并完全淡出，下一句放大并完全淡入成为当前句，再下一句保持字号不变并由完全透明变为 50% 透明。禁止给其中任何一行另设延迟或独立入场动画。中文歌词按标点断句但屏幕不显示标点，当前歌词优先使用软件字体目录中的“汉仪清雅体简”。
+
+伴唱制作使用 `BS-RoFormer-Viperx-1297`（`model_bs_roformer_ep_317_sdr_12.9755.ckpt`）直接生成 vocals/instrumental，`htdemucs_ft` 完整四分轨只作为故障回退；不得退回粗糙的 `htdemucs --two-stems vocals`。分离流水线升级时只重制 stems，已有 MOSS 歌词与时间戳必须复用。高端 NVIDIA 机器负责重制，低端播放机继续消费已制作的 `.kingsong`。
+
+顶部品牌标题固定为“AI Broadcast Control 2027”。NVIDIA 全功能版状态使用 NVIDIA 官方完整横版标志，不使用闪电图标或手写 NVIDIA 文字；状态区域保持透明底色。
+
+全功能版 AI 制作采用非破坏性三级调度：正在播放歌曲为 0 级、已装入 Deck 的待播歌曲为 1 级、其余曲库为 2 级。播放开始不得杀死 Worker/MOSS 或暂停整队；Worker 始终保持 Windows Idle 优先级、并发 1，当前任务完成后再按级别领取下一首。
+
+Windows 主控窗口默认使用无边框真全屏并覆盖任务栏。C2 Crossfader 下方固定放置一行四等分调音推子：总声音、耳机音量、麦克风 1、麦克风 2；该行与 Crossfader 行等高，不显示通道文字或新增麦克风按钮，每格只显示通道图标、图标旁数值、等距小刻度和统一横向推子。麦克风 1 使用紫色，麦克风 2 使用暖橙色，图标、数值和推子进度同步区分。总声音实际乘入两个 Deck 的输出增益，麦克风在未绑定输入设备前不得自动监听，避免现场啸叫。
+
+点击底部“调音台”后使用 300ms 同步场景动画：L 区向左退出，R 区向右退出，C 区在 L 区收缩时平移至最左侧，右侧展开独立调音台工作区。切换过程不得卸载 Deck、重置播放状态或打断音频；返回首页时执行反向动画。
+
+调音台按可扩展“型号包”加载。首个型号包固定为 Allen & Heath Qu-16，数字孪生 UI 必须保留实物的 SuperStrip、触屏/处理区、16 路通道推子、独立 LR 主推子和 Mix Select 分区，并使用真实可操作控件而不是整图背景。型号包同时声明 UI renderer、通道能力、MIDI/NRPN 控制协议和 Windows 驱动供应策略；设置中选择型号后持久化并切换对应 UI。厂商驱动若受 EULA 或网页验证保护，不得绕过授权静默下载：应自动检测已安装驱动，未安装时进入一次性官方授权流程，授权完成后自动识别。
+
+Qu-16 的现场接线固定为两条独立链路：声音使用后面板 USB-B 2.0 传输并由 Qu Windows ASIO/WDM 驱动提供多通道音频；软件控制使用 Network 口的以太网 MIDI over TCP，默认端口 51325，同一时刻只建立一个 TCP 控制连接并遵守 Active Sense 保活。不得把 USB MIDI 当作本项目的默认控制线。软件中的圆形旋钮必须支持鼠标滚轮微调，Shift + 滚轮可粗调；每个 Mute、Sel、PAFL、Mix Select、SuperStrip 和系统键的提示与行为以 Qu Reference Guide AP9372 iss.10 和 Qu MIDI Protocol V1.9 为准。
+
+Qu-16 官方 PDF 必须原样长期保存在仓库 `docs/hardware/allen-heath-qu16/official/`，并由同目录 `README.md` 提供中文页码索引。调音台 UI 的面板顺序、区域分割线和按钮形状以 AP9372 第 21 页总览及第 28 页处理面板为视觉基准；至少保留 Preamp/HPF、PEQ、Gate/GEQ、Comp/Pan 的上下分组、TouchChannel、Touch Screen、Screen Select、SoftKeys、Master Strip 和 Mix Select 的相对位置，不得退化为通用卡片式调音台。
+
+Qu-16 顶部品牌横梁必须使用从 Allen & Heath 官方 `Qu-16-Page.jpg` 原图直接裁出的连续真实资产 `src/assets/hardware/allen-heath-qu16/qu16-brandbar-clean.png`，一次保留完整的左侧 `ALLEN&HEATH` 铭牌、中央双蓝印刷线和右侧 `Qu-16` 铭牌；裁切边界必须去掉两侧螺钉并让两块铭牌到画布边缘的余量左右对称，禁止出现半颗螺钉或任一端截断。禁止把品牌、折角铭牌或双线改回 CSS/SVG 拼图，也不得拆开后非等比拉伸。品牌栏必须按素材原始宽高比完整显示，不能用 `cover` 二次裁切。真机横梁没有 `USB-B AUDIO · ETHERNET CONTROL · TCP 51325` 丝印；该连接信息只能出现在软件状态或设置区域，不能叠加在品牌资产上。
+
+所有 Qu-16 圆形编码器必须使用基于圆心角度的真正 360 度旋转交互，支持环绕拖动、滚轮和键盘；严禁以 `input[type=range]` 横向滑动条套圆形皮肤。SuperStrip 的 PEQ 必须按真机还原为 LF/LM/HM/HF 四列、Width/Freq/Gain 三行共 12 个旋钮，Gate/Comp/HPF 使用下方椭圆 `In` 灯键，并保持参考照片中的文字位置、按钮比例和蓝色分区标题。
+
+SuperStrip 内所有旋钮统一使用 Gate 旋钮的视觉直径；Preamp、HPF、PEQ、Gate、Comp、Pan 不得因分区密度采用不同大小。工程监听区的 Phones 与 Alt Out 也必须复用该视觉直径；通道条旋钮仍使用自己的紧凑尺寸。
+
+PEQ 的蓝色斜切标题必须在标题下沿接续外框横线，标签右侧必须透出控制台底板，不得形成深色矩形标题背景；内部三条竖分割线只覆盖旋钮矩阵，不穿入底部 LF/LM/HM/HF 与公共 In 按键区。PEQ 公共 In 键保持无中心点并与底框留距；Gate 与 GEQ 椭圆键显示可点击切换的中心指示灯，灭态近黑、亮态红色。其余椭圆键是普通功能键，逻辑动作不得通过按钮本体持续发光或变色表达；所有椭圆键在 hover/pressed/active 状态都不得被全局按钮样式染黑。
+
+SuperStrip 右侧处理区按真机分成两排独立比例：上排 Gate/Comp 等宽，下排 GEQ/Pan 约为 35/65，Pan 明显宽于 GEQ。Comp 的 GR 灯位于旋钮下方并与 `In` 键状态分离；当前交互样机允许点击 `Comp In` 演示 GR 灯切换，接入真实 DSP/硬件后必须由实际增益衰减状态驱动。Pan 旋钮必须锁定正圆，顶部为 7 个弧形刻度灯（左 3、中心 1、右 3）；LR 时控制主声像，FX Send 与 Mono Mix1-4 时禁用，Stereo Mix5-10 时控制发送声像，链接输入对时控制 Width。
+
+Qu-16 的 `TouchChannel` 是彩色 LCD 内部上半部的处理块选择区，不是 LCD 左侧独立的物理窄栏；通道身份、Gate、PEQ、Comp 等处理块必须在同一 LCD 视口内组合并随当前 `Sel` 通道更新。LCD 有效内容保持厂商 800×480（5:3）比例并整体缩放，不得横向或纵向拉伸；在完整 Touch Screen 总成中，LCD 外框约占总成高度 73%，下方物理控制带约占 22%，下方 `Screen Rotary` 区约占该控制行宽度的 30%，不得为了塞入内容把屏幕旋钮缩成装饰点。
+
+`Fn`、`Copy`、`Paste`、`Reset` 和 `Screen Rotary` 都位于 LCD 玻璃区域之外的下方物理控制区；屏内底部只保留状态工具栏、Fn 当前功能、Curr/Next Scene 及设备状态。右侧六个 Screen Select 是独立物理键，必须分成靠近的 `Processing/Routing` Sel 键组与留有明显组间距的 `Home/FX/Scenes/Setup` 系统键组，禁止用 `repeat(6, 1fr)` 做成完全等距列表，也不得额外重复显示一个 Processing 标题。
+
+软件中的 Qu-16 LCD 是根据应用和调音台参数状态重建的操作界面，不是从真机读取或转播 framebuffer；文案、设置和交付说明都不得声称支持硬件触屏画面镜像。Ethernet MIDI/NRPN 只负责协议明确支持的通道、处理、路由、场景等参数状态双向同步；LCD 页面、TouchChannel 当前页签、Fn 弹层以及 Copy/Paste/Reset 操作流程属于本地 UI 状态，不得假定或宣称能够远程切换真机页面导航。
+
+Qu-16 Touch Screen 外部实体键必须隔离于全局按钮主题：右侧 Screen Select、下方 Fn/Copy/Paste/Reset 的 normal、hover、pressed 状态均保持各自固定键帽底色，不得在悬停时变黑或染成全局绿色；暂不可执行的 Paste 仍保持实体红色键帽。右侧当前 Screen Select 只以中心红灯表示激活，灭态为近黑。下方 Fn/Copy/Paste/Reset 的实物基准位置必须保持不动并维持约 10–12 CSS px 的下框间距，禁止为了对齐旋钮而把四组标签和键帽整体抬高；只能移动 Screen Rotary，使其圆心与四个键帽圆心上下居中对齐。Screen Rotary 的可见直径必须与当前 Parametric EQ 旋钮一致，后方两条青线必须关于旋钮圆心上下对称。TOUCH SCREEN、PROCESSING/ROUTING/HOME/FX/SCENES/SETUP、FN/COPY/PASTE/RESET 使用可读的大写粗体丝印，禁止再次缩回 5px 微型字。
+
+Qu-16 右上工程监听区固定按 AP9372 第 21 页还原：左列是 L/R 两条独立 12 段主表、中央共用 `Pk/+12/+6/0/-3/-6/-9/-12/-16/-20/-30/-40` 刻度、底部红色 PAFL 状态灯，下方另设默认按住式 Talk 键；右列由上至下是 ST3 IN 3.5mm 插孔、纵向 Qu-Drive USB-A 插口、蓝色 Phones 区和独立 Alt Out 区。`Engineer’s monitor` 是说明书注释，不得重新做成名为 Monitor 的通用旋钮。Phones/Alt Out 都使用与 PEQ 相同的真正 360 度旋钮，常规 40px、紧凑高度 35px；ST3、USB 与耳机插孔是端口，不得伪装成按钮。Talk 激活时 LCD 状态栏显示绿色 T；通道 PAFL 接管主表并点亮表底红灯，再次按同一路恢复 LR。
+
+工程监听区的总宽固定不扩张，表区/接口区采用 51px/55px 加 4px 间距，使右侧 I/O 列略宽于主表。Qu-16 铭牌跨接两列上方并保留左侧斜切；L/R 丝印必须与对应灯柱共中线，12 个刻度必须与每行灯珠共水平中线，PAFL 点灯与文字作为整体居中。该区域必须显式覆盖工作区全局 `span` 字号，避免丝印被放大或挤位；灯珠采用短矩形而非胶囊。Phones 图标位于插孔右上，插孔与 Phones/Alt Out 两只旋钮保持同一竖向中轴；监听旋钮后方不得出现通用控件的青色横向导轨。Qu-Drive 保留纵向金属孔腔和左下琥珀状态灯。
+
+Qu-16 SuperStrip 必须建立自己的丝印排版隔离层：区域标题居中，`Pk/Thresh/GR/In/Fader Flip/L/R`、PEQ 三行参数名和四个频段名不得继承工作区通用 `span` 的字号或字距，也不得与旋钮、按钮、分割线相交。紧凑高度模式不能通过压缩 SuperStrip 使内容溢出到推子区；当前 820px/800px 窗口的上方面板行至少保留 254 CSS px，旋钮统一缩放为 35px，并以几何 QA 验证所有子区仍在框内。
+
+Qu-16 本地数字孪生的 Processing 状态必须按当前 `Sel` 通道独立保存，实体面板造型控件和本地 LCD 必须读取及写入同一份状态。Preamp、HPF、PEQ、Gate、Comp 和 Pan 的面板操作应立即同步到 LCD，切换通道后恢复该通道自己的值。TCP 51325 的下半部 Fader/Send/Mute/PAFL 双向控制不能冒充 Processing 同步；在 Preamp、HPF、PEQ、Gate、Comp 和 Pan 的 NRPN 映射及回读另行实现并通过真机验证前，LCD 必须保留 `data-sync-mode="local-ui-only"`，不得因为下半部控制已连接就把 Processing 标为真机同步。
+
+Qu-16 的 GEQ Fader Flip 不能只切换灯：按键必须按说明书循环正常 Mix 推子、低频 16 段 `31.5Hz–1kHz`、高频 16 段 `500Hz–16kHz`，两层保留 `500/630/800/1kHz` 四段重叠。GEQ 层中的 16 根推子控制当前 Mix 独立保存的 28 段 1/3 倍频程增益（±12dB）；条屏显示频率和增益，`Sel` 仅在 0dB 时点亮并可一键归零。退出 Fader Flip 后必须恢复原通道推子值，不得把 GEQ 值写入播放混音层。
+
+Qu-16 下半部固定使用实机的四区结构：左侧 Mix Assign/Layers 控制轨、16 条等宽物理通道、独立 Master Strip、右侧 SoftKeys/Mix Select。四区必须处于同一行，并保留真机蓝色印刷线对 Layers、16 路通道、Master、SoftKeys 和 Mix Select 的独立围合与转折，不得合并成无分区的通用竖栏。控制区约占条高 40%–45%，推子区约占 45%–50%，底部保留可见金属底板；不得再用 `.qu-channels::before` 伪造 Layers，也不得让 Mix Select 换行。Mute/SoftKey 是灰白小矩形键，Sel 是绿色椭圆键，PAFL 接近灰白正圆；Mix Select 必须保留三种键帽色族：FX1/FX2 为冷白浅蓝、Mix1–4 为浅青蓝、Mix5-6/Mix7-8/Mix9-10 为饱和蓝，LR 为 Master Strip 内独立的饱和蓝椭圆键。推子轨道必须有双边细刻度和每条可读的 `10/5/0/5/10/20/30/40/∞` 标识，推子帽保持宽厚并有明显中央白线。
+
+Qu-16 三层是同一组 16 个物理槽位的映射，不得创建虚构音频源。Lower 为 CH1–CH16；Upper 严格为 ST1–3、FX1–4 Ret、FX1–2 Send、Mix1–4 Master、Mix5-6/7-8/9-10 Master；Custom 是对既有实体的可配置映射。当前 KING CLUB 实机在 2026-08-25 分槽校准中确认 Custom 第 8、9 槽分别回读 FX1 Return、FX2 Return，其余槽保持对应 CH1–7/CH10–16；该映射保存在型号配置 `ui.customLayerProfile.slots`，不得硬改协议通道号。真机只有上下两个灰白椭圆 Layer 键，两个键各自使用键帽右侧的独立状态灯；中间 Custom 也是独立状态灯和丝印，不是第三个按钮。Custom 由两键同时按下进入；桌面 UI 可在 Custom 指示条提供鼠标快捷入口，但外形不得伪装成第三个椭圆实体键，也不得把 Layer 状态灯塞进两个键帽中央。Upper 中的 FX Send/Mix Master 必须与专用 Master Strip 共用 level、mute、PAFL 和 Processing 状态，严禁形成两套 Master。
+
+Qu-16 的 Mix Select 总线全集固定为 LR、FX1、FX2、Mix1–4、Mix5-6、Mix7-8、Mix9-10；LR 键只位于 Master Strip，右侧只显示其余 9 键。切换 Mix 后 16 路发送推子和当前 Master 必须切到该总线的独立记忆，再按当前 Mix 返回 LR。Mute 与 PAFL 跨 Mix 保持实体状态，PAFL 默认 Auto-cancel；Pre Fade 在 LR 禁用，Assign/Pre Fade 只能作用于真实输入实体，不能包含 Custom 槽位副本或输出 Master。FX1/FX2 不提供 GEQ Fader Flip；GEQ 模式仍允许通道和 Master 的 Mute/PAFL，并在真机表计 LIVE 时使用 Monitor RTA。SoftKeys 1–4 的默认分配是 Mute Group 1–4，状态必须以对应 Mute Group state 保存，不能只是无语义的装饰灯。
+
+下半部带中心点的状态键必须把键帽与指示灯分层：通道/Master PAFL、LR、右侧 Mix Select 和 SoftKeys 在 off/on/hover/pressed 状态下都保持各自原有键帽底色，外层点击容器始终透明且无方形背景；激活时只允许 4×4 CSS px 的中心灯变色并发光。禁止再次用 `.active` 改写整个矩形、圆形或椭圆键帽的背景、边框或阴影。
+
+Qu-16 下半部的实体键尺寸必须与上半部保持同一硬件尺寸族：Mute/SoftKey 为 31×22 CSS px，Sel/Mix Select 为 29×20 CSS px，PAFL 常规为 24×24 CSS px、紧凑高度为 23×23 CSS px。所有实体键中心指示点统一为 4×4 CSS px。常规高度下实体键标签、信号标签、推子刻度、条屏主字和通道编号不得低于 7.5/6.5/7/8.5/8 CSS px，条屏副字不得低于 7px；紧凑高度下条屏主/副字不得低于 8/6.75px。调音台主体应在工作区内水平居中并尽量利用可用宽度，同时保留左右对称的最小 6 CSS px 余量；不得重新退回 890px 的窄版上限。下半部底部金属底板在常规高度使用 `clamp(28px, 3.2vh, 36px)`，紧凑高度为 10px，800px 及以下为 4px，禁止重新留下大块无功能留白。下半部紧凑模板按实际内容高度覆盖到 1040px，1041px 才允许恢复普通右轨；响应式门禁至少检查 1041/1040/980/900/841/840/821/820/800px，防止断点上沿裁掉 Mix Select。
+
+Qu-16 通道 `Pk/0/Sig` 必须固定使用从上到下红色、琥珀色、绿色的独立灯珠，并使用真实 dBFS 表计语义，不得以随机数或 0–100 假百分比驱动。`Sig` 在 `>= -48 dBFS`、`0` 在 `>= -18 dBFS`、`Pk` 在任一公开处理测点 `>= -3 dBFS` 时亮起；三灯是累计阈值，允许同时点亮。输入通道使用推子前/静音前表计，Master 使用推子后/静音后表计；GEQ Fader Flip 时改用 PAFL RTA，主导频段点红。没有新鲜真机表计帧、连接断开或数据超过 1500ms 时必须全部熄灭并显示断开状态，禁止回退到演示灯。以太网驱动必须通过 TCP 51325 完成 Get System State、设备 MIDI 通道、Active Sense、Meter SysEx、7-bitized/7Q8 解码、断线清表与重连，前端桥接最多 20 FPS，避免表计刷新拖慢推子交互。
+
+Qu-16 的 31 段 RTA 从 20Hz 开始，映射 28 段 GEQ 时必须跳过前两个频段并使用索引 `2..29`；GEQ 模式的每帧只允许一个主导频段点红色 Pk，其余频段不得回退显示普通通道灯，ARIA/data 数值也必须来自当前 RTA 频段。RackFX 四块的 Post PEQ L/R 映射 `FX1–FX4 Return`；FX1/FX2 的 Send L/R/Mono 是 RackFX 实际输入，只有默认同名 Mix→Return Patch 下才等同 FX Send，因此 UI 必须可见标注 `FX IN`，不得冒充已验证的专用 Send 总线表计。
+
+Qu-16 表计会话必须在后端串行执行 stop/join/start，并分配单调递增 `sessionId`；旧 Worker 发布前校验 generation，前端监听同时校验 effect generation、host 与 sessionId，旧 cleanup 只能停止自己的 session。ASIO 驱动状态检查调用 `reg.exe` 时必须使用 `CREATE_NO_WINDOW`，并通过互斥和至少 30 秒缓存避免 StrictMode、页面重载或并发设置请求反复弹出 Windows Terminal。
+
+Qu-16 下半部真机控制只允许语义化白名单 Fader、Send Level、Mute 与 PAFL，经表计所用的同一个 TCP 51325 Worker 发送。Get System State 之后必须等同 MIDI 通道的 End Sync `0x14` 才开放写入；推子按约 25–30Hz 合并，Mute/PAFL 立即入队。TCP 写成功只能记为等待回读，协议没有 ACK 时不得冒充已确认；不同回读以真机为准。每次重连清空参数和 pending，并以 `connectionEpoch` 阻止上一连接的指令自动重放。Mix Select、Layer、Sel 和屏幕导航保持本地状态，因为公开协议没有这些实体导航键的远程控制项；真机回读不得擅自切换软件 Layer，因为协议没有携带实体 Layer 键状态，自动推断会导致整组 16 根物理槽位映射错乱。没有实体 Qu-16 验证时只能声明协议/mock 测试通过，禁止声称现场真机闭环已验收。
+
+整套主控界面固定采用 Qu-16 工作区同源的专业石墨灰大底：`radial-gradient(circle at 50% 0,#253039 0,#11161a 57%,#0a0e10 100%)`。渐变只在应用外壳绘制一次，L/C/R、顶部、底部与设置页采用透明或半透明石墨面板和中性灰蓝结构线，不得为三列分别重复径向亮斑。LED 有效画布与独立输出继续保持纯黑；Deck 1 绿色、Deck 2 蓝色、交叉推子双色、麦克风紫/橙、PGM/PVW、连接、告警、Blackout 和灯光色盘仅作为功能语义色保留，不得重新扩展为大面积绿色背景。Qu-16 真机数字孪生内部颜色不随外壳主题改写。
+
+石墨灰主题必须同时覆盖主控界面的文字层级和普通鼠标/键盘交互：主要文字使用冷白，次级文字使用中性灰，普通 hover、pressed、selected 与 focus 统一使用冷灰蓝反馈，不得继续沿用全局绿色染色。绿色、蓝色、紫色、橙色、红色和琥珀色只保留给既定功能语义状态；Qu-16 真机数字孪生的实体键、丝印、灯珠和仪表颜色继续由型号包自身隔离控制。
+
+石墨灰外壳中的 Deck 1 与 Deck 2 必须保留轻微的通道身份环境光：Deck 1 为低饱和淡绿、Deck 2 为低饱和淡蓝，且只作为石墨灰上的微弱径向亮度，不得形成大面积纯色底。Crossfader 及其下方总声音、耳机和麦克风横向推子统一复用 Qu-16 的硬件语言：黑色凹槽、上下成对刻度、厚实深灰推子帽和中央白色定位线；方向保持横向，功能色只用于进度、刻度或微弱轮廓。
+
+曲库中已装入 Deck 的行优先显示通道身份色，不得被普通 selected 样式覆盖：Deck 1 淡绿、Deck 2 淡蓝、同时装入时左右双色。主屏/监控位、灯光预设、自动模式及灯具控制等普通按钮的选中态保持石墨灰键帽，只允许用冷灰蓝细边、中心灯或小色点表达状态；灯具自身颜色只能显示在小色点，不能填满按钮。顶部 King 品牌 Logo 固定显示为白色。Crossfader 只绘制一条连续黑色实体槽，刻度必须在槽的上下两侧关于水平中线严格对称，不得用向单侧偏移的阴影伪造第二排刻度。
+
+Crossfader 推子帽必须比普通音量推子更宽更高，使用纯黑落影，不得出现绿色或蓝色背光。上下所有刻度均以黑槽边缘为共同基线并紧贴槽体，短刻度与长刻度只允许向外延伸长度不同；黑槽内部保持接近纯黑并用内阴影表达凹陷深度。
+
+Crossfader 下方四路横向音量推子必须使用与 Crossfader 相同的独立黑槽和上下 17 位对称刻度结构，长刻度位于两端、四分位和中心，短刻度紧贴槽体边缘。有效音量不允许把槽体整体染色，只能在纯黑槽内部显示对应通道颜色的细发光芯线；总声音绿、耳机蓝、麦克风 1 紫、麦克风 2 橙的语义色保持不变。
+
+四路横向音量推子帽的外部落影固定为纯黑，不得使用对应通道颜色描边或发光；通道颜色只能存在于槽内有效音量芯线、图标和数值。
+
+曲库普通行与表头、文字预设/暂存工作区、灯光预设卡片及底部导航必须完整使用石墨灰面板、冷白主文字和中性灰次级文字，不得残留偏绿色的普通文本、边框或面板底色。曲库 Deck 身份行和真实播放状态、灯具小色点及设备连接状态仍可使用功能语义色；文字节目模板缩略图内部的实际输出内容颜色不受操作界面主题覆盖。
+
+四路横向音量推子的刻度有效宽度必须按推子帽半宽向左右内缩，使 0 与 100 两端的长刻度分别与推子在最小值和最大值时的中心线精确重合；不得按 input 外框全宽铺设刻度。
+
+计算四路音量推子刻度端点时必须使用推子帽包含边框在内的实际外宽：当前 24px 帽体加左右各 1px 边框，总外宽 26px，因此刻度层左右各内缩 13px，禁止只按内容宽度内缩 12px。
+
+Crossfader 与四路音量推子的 17 根刻度禁止使用 `repeat(17,1fr)` 后把刻度放在网格单元中心，因为这会让首尾刻度额外内缩半个单元。刻度层必须用 `display:flex; justify-content:space-between`，使第一根和第十七根精确落在有效行程两端，其余 15 根在两端之间等距分布。
+
+Crossfader 当前推子帽为 40px 内容宽加左右各 1px 边框，实际外宽 42px，因此其刻度层左右各内缩 21px；四路音量推子继续按 26px 实际外宽内缩 13px。
+
+双屏预览区域的 PGM/PVW 画布结构线、中央分隔线及左右监控轨道边线必须使用中性灰蓝，轨道普通文字和图标使用冷白/中性灰，不得残留绿色结构线或偏绿文字。PGM 角色标签使用钢蓝石墨样式；PVW 编辑提示可保留琥珀语义色，红色 T 形裁切轮廓继续作为编辑安全标识保留。
+
+Deck 顶部横向音量条必须显示随真实声音包络律动的输出电平，不得继续把 Crossfader 百分比直接当作静态填充宽度。电平使用歌曲后台分析生成的 RMS/峰值包络，并乘入对应 Deck 的等功率 Crossfader 增益和总音量，因此浏览器音频与 mpv 引擎使用同一数据源；显示约 30 FPS、快起慢落，暂停或无有效分析数据时平滑归零，禁止使用随机动画或高频 React state 刷新拖慢推子。
+
+四路横向音量推子的上下刻度必须低对比度显示，短/长/中心刻度保持同比例但整体比 Crossfader 更短，当前高度固定为 4/7/9px，并使用半透明中性灰，避免密集白线抢过黑槽、推子帽、通道图标和数值。
+
+推子拖动必须即时改变浏览器音频音量；桌面 mpv 音量写入采用约 30Hz、单批在途且只保留最新值的合并队列，禁止每个 pointer 事件都堆积 IPC。按住 Crossfader 或下方任一横向推子时仅冻结两个 Deck 的电平律动显示，释放后立即恢复；实际音乐播放不得暂停。
+
+首页工作区始终保留 L/C/R/调音台四个显式 Grid 列；单屏与双屏预览状态下第 4 列必须明确为零宽，禁止只声明前三列而让隐藏的调音台工作区生成隐式 `auto` 列、挤压 R 区并在最右侧留下空白。进入调音台模式时才允许第 4 列展开。
+
+Deck 电平条以 Crossfader 显示百分比作为当前满刻度：Deck 1 上限为 `100-crossfade`，Deck 2 上限为 `crossfade`；歌曲包络必须先独立换算为 0–100，再乘该上限，禁止先把推子当线性增益乘入音频后再做 dB 显示换算。按住 Crossfader 时停止包络动画，两个电平条必须精确停在各自百分比并随推子同步移动；松开后在各自上限内恢复律动。
+
+双屏预览模式的 L/R 侧栏必须各自保留至少 302 CSS px，并在宽屏按约 18vw 扩展、最高 340px；C 区只能使用扣除两侧后的剩余宽度。L 区不得窄于曲库工具栏和“歌曲/歌手/BPM/时长”表格的固有内容宽度，也不得以父级 `overflow:hidden` 裁掉溢出的按钮、时长或 Deck 标识来掩盖列宽错误。
+
+Deck 电平条的亮色刻度纹理必须始终保持固定像素间距，每根亮色竖线对应底层的一根刻度；电平长度只能通过 `clip-path` 从右侧裁切完整纹理，禁止使用 `scaleX()` 压缩整条纹理，否则百分比降低时刻度会错误变密。
+
+现场人声增强必须由独立的 Rust/C++ 实时音频进程承担，禁止让 Tauri UI、Node、Python、离线 AI Worker 或播放器线程承担音频回调。第一阶段严格按 P0→P3 推进：先完成 48kHz float32 Loopback、Qu-16 USB 路由、物理 RTT，再加入实时 F0；在此前不得接入 Pitch Correction 或生成模型并宣称 AI 修音完成。实时回调禁止动态分配、文件/网络/数据库/JSON/日志、互斥锁、模型推理和阻塞操作；控制参数只能经无锁结构或原子快照注入。
+
+音频延迟证据必须区分请求 buffer、驱动实际 buffer、软件估算和物理 RTT。驱动修正或忽略低延迟 buffer 请求时必须记录实际值；只有物理输出→输入回接测量才允许填写 `roundTripMs`，没有 Qu-16/ASIO、2 小时稳定性和异常拔插证据时必须明确标为 `NOT MEASURED`/`NOT EXECUTED`，禁止用合成 benchmark 或回调耗时冒充现场通过。

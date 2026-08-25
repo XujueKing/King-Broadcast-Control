@@ -41,8 +41,16 @@ pub struct MpvManager(pub Mutex<MpvManagerInner>);
 
 pub struct MpvManagerInner {
     binary: Option<PathBuf>,
+    audio_device: Option<MpvAudioDevice>,
+    output_trim_db: f64,
     instances: HashMap<u8, MpvInstance>,
     process_job: ProcessJob,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MpvAudioDevice {
+    id: String,
+    label: String,
 }
 
 struct MpvInstance {
@@ -123,8 +131,13 @@ impl Drop for ProcessJob {
 
 impl Default for MpvManager {
     fn default() -> Self {
+        let binary = discover_mpv_binary();
+        let audio_device = binary.as_deref().and_then(discover_preferred_audio_device);
+        let output_trim_db = preferred_output_trim_db(audio_device.as_ref());
         Self(Mutex::new(MpvManagerInner {
-            binary: discover_mpv_binary(),
+            binary,
+            audio_device,
+            output_trim_db,
             instances: HashMap::new(),
             process_job: ProcessJob::new().expect("create mpv process job"),
         }))
@@ -146,6 +159,9 @@ pub struct MpvRuntimeStatus {
     pub available: bool,
     pub binary_path: Option<String>,
     pub version: Option<String>,
+    pub audio_device: Option<String>,
+    pub audio_device_label: Option<String>,
+    pub output_trim_db: f64,
     pub active_decks: Vec<u8>,
     pub message: String,
 }
@@ -227,6 +243,71 @@ fn mpv_version(binary: &Path) -> Option<String> {
     })
 }
 
+fn parse_audio_devices(output: &str) -> Vec<MpvAudioDevice> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix('\'')?;
+            let (id, rest) = rest.split_once("' (")?;
+            let label = rest.strip_suffix(')')?;
+            Some(MpvAudioDevice {
+                id: id.to_string(),
+                label: label.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn discover_preferred_audio_device(binary: &Path) -> Option<MpvAudioDevice> {
+    let mut command = Command::new(binary);
+    command
+        .args(["--no-config", "--audio-device=help"])
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let devices = parse_audio_devices(&text);
+    let requested = env::var("KING_MPV_AUDIO_DEVICE").ok();
+    if let Some(requested) = requested
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if requested.eq_ignore_ascii_case("auto") {
+            return None;
+        }
+        if let Some(device) = devices.iter().find(|device| {
+            device.id.eq_ignore_ascii_case(requested)
+                || device.label.eq_ignore_ascii_case(requested)
+        }) {
+            return Some(device.clone());
+        }
+    }
+    devices
+        .into_iter()
+        .find(|device| device.label.eq_ignore_ascii_case("Qu-16 ST3 (Qu-16)"))
+}
+
+fn preferred_output_trim_db(audio_device: Option<&MpvAudioDevice>) -> f64 {
+    if let Ok(configured) = env::var("KING_MPV_OUTPUT_TRIM_DB") {
+        if let Ok(value) = configured.trim().parse::<f64>() {
+            if value.is_finite() {
+                return value.clamp(-60.0, 0.0);
+            }
+        }
+    }
+    audio_device
+        .is_some_and(|device| device.label.contains("Qu-16"))
+        .then_some(-24.0)
+        .unwrap_or(0.0)
+}
+
 fn validate_deck(deck: u8) -> Result<(), String> {
     if matches!(deck, 1 | 2) {
         Ok(())
@@ -270,7 +351,13 @@ fn wait_for_pipe(path: &str, child: &mut Child) -> Result<(), String> {
     }
 }
 
-fn spawn_deck(binary: &Path, deck: u8, process_job: &ProcessJob) -> Result<MpvInstance, String> {
+fn spawn_deck(
+    binary: &Path,
+    deck: u8,
+    process_job: &ProcessJob,
+    audio_device: Option<&MpvAudioDevice>,
+    output_trim_db: f64,
+) -> Result<MpvInstance, String> {
     let pipe_path = pipe_path(deck);
     let mut command = Command::new(binary);
     command
@@ -292,6 +379,12 @@ fn spawn_deck(binary: &Path, deck: u8, process_job: &ProcessJob) -> Result<MpvIn
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(audio_device) = audio_device {
+        command.arg(format!("--audio-device={}", audio_device.id));
+    }
+    if output_trim_db < 0.0 {
+        command.arg(format!("--af=volume={output_trim_db:.1}dB"));
+    }
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command
@@ -373,7 +466,17 @@ fn ensure_instance<'a>(
             .or_else(discover_mpv_binary)
             .ok_or_else(|| "未找到 mpv。请运行 npm run setup:mpv。".to_string())?;
         manager.binary = Some(binary.clone());
-        let instance = spawn_deck(&binary, deck, &manager.process_job)?;
+        if manager.audio_device.is_none() {
+            manager.audio_device = discover_preferred_audio_device(&binary);
+            manager.output_trim_db = preferred_output_trim_db(manager.audio_device.as_ref());
+        }
+        let instance = spawn_deck(
+            &binary,
+            deck,
+            &manager.process_job,
+            manager.audio_device.as_ref(),
+            manager.output_trim_db,
+        )?;
         manager.instances.insert(deck, instance);
     }
     manager
@@ -389,6 +492,11 @@ pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> 
         .map_err(|_| "无法锁定 mpv 状态".to_string())?;
     if manager.binary.is_none() {
         manager.binary = discover_mpv_binary();
+        manager.audio_device = manager
+            .binary
+            .as_deref()
+            .and_then(discover_preferred_audio_device);
+        manager.output_trim_db = preferred_output_trim_db(manager.audio_device.as_ref());
     }
     let binary = manager.binary.clone();
     let mut active_decks = Vec::new();
@@ -407,9 +515,26 @@ pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> 
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
         version,
+        audio_device: manager
+            .audio_device
+            .as_ref()
+            .map(|device| device.id.clone()),
+        audio_device_label: manager
+            .audio_device
+            .as_ref()
+            .map(|device| device.label.clone()),
+        output_trim_db: manager.output_trim_db,
         active_decks,
         message: if binary.is_some() {
-            "mpv 播放引擎可用".to_string()
+            manager.audio_device.as_ref().map_or_else(
+                || "mpv 播放引擎可用 · 系统自动音频设备".to_string(),
+                |device| {
+                    format!(
+                        "mpv 播放引擎可用 · USB-B → {} · 安全衰减 {:.0} dB",
+                        device.label, manager.output_trim_db
+                    )
+                },
+            )
         } else {
             "未找到 mpv；当前使用 WebView2 回退播放".to_string()
         },
@@ -615,6 +740,29 @@ mod tests {
         assert!(candidates
             .iter()
             .any(|path| path.ends_with(Path::new(".local-tools/mpv/mpv.exe"))));
+    }
+
+    #[test]
+    fn parses_mpv_audio_devices_and_keeps_stable_wasapi_id() {
+        let devices = parse_audio_devices(
+            "List of detected audio devices:\n  'auto' (Autoselect device)\n  'wasapi/{f51955ae-1997-4ebd-bb2d-84ac01bed4e2}' (Qu-16 ST3 (Qu-16))\n",
+        );
+        assert_eq!(devices.len(), 2);
+        assert_eq!(
+            devices[1].id,
+            "wasapi/{f51955ae-1997-4ebd-bb2d-84ac01bed4e2}"
+        );
+        assert_eq!(devices[1].label, "Qu-16 ST3 (Qu-16)");
+    }
+
+    #[test]
+    fn qu16_uses_safe_output_trim_by_default() {
+        let device = MpvAudioDevice {
+            id: "wasapi/test".into(),
+            label: "Qu-16 ST3 (Qu-16)".into(),
+        };
+        assert_eq!(preferred_output_trim_db(Some(&device)), -24.0);
+        assert_eq!(preferred_output_trim_db(None), 0.0);
     }
 
     #[test]
