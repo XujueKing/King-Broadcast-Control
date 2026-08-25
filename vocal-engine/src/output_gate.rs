@@ -165,6 +165,28 @@ pub struct OutputGateReplayReport {
     pub hardware_ready: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShadowOutputReport {
+    pub mode: &'static str,
+    pub decision: OutputDecision,
+    pub would_start_output: bool,
+    pub physical_output_started: bool,
+    pub qu16_writes_performed: bool,
+}
+
+pub fn evaluate_shadow_output(conditions: &OutputConditions, now_ms: u64) -> ShadowOutputReport {
+    let mut gate = OutputGate::default();
+    let decision = gate.evaluate(conditions, now_ms);
+    ShadowOutputReport {
+        mode: "shadow_output_gate",
+        would_start_output: decision.authorization.is_some(),
+        decision,
+        physical_output_started: false,
+        qu16_writes_performed: false,
+    }
+}
+
 pub fn run_default_output_gate_replay() -> OutputGateReplayReport {
     let mut gate = OutputGate::default();
     let mut conditions = safe_conditions();
@@ -256,5 +278,17 @@ mod tests {
         );
         assert!(!report.physical_output_started);
         assert!(!report.qu16_writes_performed);
+    }
+
+    #[test]
+    fn shadow_mode_reports_intent_without_starting_output() {
+        let allowed = evaluate_shadow_output(&safe_conditions(), 0);
+        assert!(allowed.would_start_output);
+        assert!(!allowed.physical_output_started);
+        assert!(!allowed.qu16_writes_performed);
+
+        let blocked = evaluate_shadow_output(&OutputConditions::default(), 0);
+        assert!(!blocked.would_start_output);
+        assert!(!blocked.decision.blockers.is_empty());
     }
 }

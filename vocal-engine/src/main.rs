@@ -11,7 +11,7 @@ use king_vocal_engine::{
     joint::run_default_joint_replay,
     live_joint::run_default_live_joint_replay,
     multilane::run_multilane_simulation,
-    output_gate::run_default_output_gate_replay,
+    output_gate::{evaluate_shadow_output, run_default_output_gate_replay, OutputConditions},
     preset::VocalPreset,
     qu16_meter::run_default_qu16_meter_adapter_replay,
     routing::run_virtual_routing_discovery,
@@ -251,6 +251,12 @@ fn run_loopback(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     if !arguments.iter().any(|argument| argument == "--arm") {
         return Err("安全拒绝：run 必须显式提供 --arm；开始前请关闭扬声器或使用耳机/调音台安全返回，避免麦克风啸叫".into());
     }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--shadow-output-gate")
+    {
+        return run_shadow_output_gate(arguments);
+    }
     let key_tonic = string_argument(arguments, "--key")
         .map(|value| parse_tonic(&value))
         .transpose()?;
@@ -300,6 +306,35 @@ fn run_loopback(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     })?;
     let encoded = serde_json::to_vec_pretty(&final_metrics)?;
     if let Some(path) = metrics_path {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
+}
+
+fn run_shadow_output_gate(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let has = |flag: &str| arguments.iter().any(|argument| argument == flag);
+    let report = evaluate_shadow_output(
+        &OutputConditions {
+            operator_requested: true,
+            route_verified: has("--route-verified"),
+            clock_locked: has("--clock-locked"),
+            dry_fallback_verified: has("--dry-fallback-verified"),
+            input_levels_fresh: has("--input-levels-fresh"),
+            input_peaks_dbfs: [
+                number_argument(arguments, "--peak-1")?,
+                number_argument(arguments, "--peak-2")?,
+                number_argument(arguments, "--peak-3")?,
+            ],
+            control_path_healthy: has("--control-path-healthy"),
+        },
+        0,
+    );
+    let encoded = serde_json::to_vec_pretty(&report)?;
+    if let Some(path) = string_argument(arguments, "--metrics").map(PathBuf::from) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -460,6 +495,7 @@ fn print_help() {
 
   run --arm [options]
       启动低延迟直通。--arm 是防啸叫硬门；修音默认关闭。
+      加 --shadow-output-gate 时只判断授权并返回 JSON，不创建输入或输出流。
 
 Options:
   --input NAME
@@ -470,6 +506,10 @@ Options:
   --ring-frames N       default 4096
   --prefill-frames N    default 256
   --gain-db DB          default -18
+  --shadow-output-gate --route-verified --clock-locked
+  --dry-fallback-verified --input-levels-fresh --control-path-healthy
+  --peak-1 DB --peak-2 DB --peak-3 DB
+                        影子授权条件；绝不启动物理输出
   --enable-pitch-correction
                         显式启用实时 Reference/Scale 修音
   --reference PATH      optional reference.json

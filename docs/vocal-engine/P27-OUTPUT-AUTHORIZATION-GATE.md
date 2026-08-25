@@ -23,7 +23,7 @@ P27 只实现一个必要功能：满足安全条件时生成短期输出授权�
 2. 时钟失锁，撤销新授权；
 3. 500 ms 心跳到期，再次撤销。
 
-113 项 Vocal Engine 测试、Clippy `-D warnings` 和 Release 构建全部通过。证据见 [2026-08-25-p27-output-gate.json](evidence/2026-08-25-p27-output-gate.json)。
+114 项 Vocal Engine 测试、Clippy `-D warnings` 和 Release 构建全部通过。证据见 [2026-08-25-p27-output-gate.json](evidence/2026-08-25-p27-output-gate.json)。
 
 ## 边界
 
@@ -32,4 +32,4 @@ P27 只实现一个必要功能：满足安全条件时生成短期输出授权�
 - `qu16WritesPerformed=false`；
 - `hardwareReady=false`。
 
-下一步直接把这个授权判断接到现有音频运行入口的影子模式，先验证调用顺序，不增加新的框架层。
+现有 `run` 入口已支持 `--shadow-output-gate`。该分支在创建声卡输入/输出流之前返回授权判断 JSON，因此可以验证现场条件参数，但不会启动物理音频。
