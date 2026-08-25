@@ -5,7 +5,14 @@ use crate::{
     EngineError, LoopbackConfig, INTERNAL_FORMAT, SAMPLE_RATE,
 };
 use serde::Serialize;
-use std::{array, f32::consts::TAU};
+use std::{
+    array,
+    f32::consts::TAU,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 const DEFAULT_FADE_MS: f32 = 20.0;
 
@@ -26,6 +33,123 @@ pub enum FailoverReason {
     InvalidProcessedOutput,
     ControlBridgeDisconnect,
     InputUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailoverRuntimeState {
+    #[default]
+    Inactive,
+    Processed,
+    DryFallback,
+    Recovering,
+    InputUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailoverTelemetrySnapshot {
+    pub state: FailoverRuntimeState,
+    pub reason: Option<FailoverReason>,
+    pub using_dry_fallback: bool,
+    pub fresh: bool,
+    pub revision: u64,
+}
+
+struct FailoverTelemetryShared {
+    word: AtomicU64,
+}
+
+#[derive(Clone)]
+pub struct FailoverTelemetryPublisher(Arc<FailoverTelemetryShared>);
+
+#[derive(Clone)]
+pub struct FailoverTelemetryReceiver(Arc<FailoverTelemetryShared>);
+
+pub fn failover_telemetry_channel() -> (FailoverTelemetryPublisher, FailoverTelemetryReceiver) {
+    let shared = Arc::new(FailoverTelemetryShared {
+        word: AtomicU64::new(0),
+    });
+    (
+        FailoverTelemetryPublisher(Arc::clone(&shared)),
+        FailoverTelemetryReceiver(shared),
+    )
+}
+
+impl FailoverTelemetryPublisher {
+    pub fn publish(&self, state: FailoverRuntimeState, reason: Option<FailoverReason>) {
+        let using_dry_fallback = matches!(
+            state,
+            FailoverRuntimeState::DryFallback
+                | FailoverRuntimeState::Recovering
+                | FailoverRuntimeState::InputUnavailable
+        );
+        let payload = state_code(state)
+            | (reason.map(reason_code).unwrap_or(0) << 4)
+            | ((using_dry_fallback as u64) << 8)
+            | (1 << 9);
+        let _previous =
+            self.0
+                .word
+                .fetch_update(Ordering::Release, Ordering::Relaxed, |previous| {
+                    let revision = (previous >> 16).wrapping_add(1);
+                    Some(payload | (revision << 16))
+                });
+    }
+}
+
+impl FailoverTelemetryReceiver {
+    pub fn snapshot(&self) -> FailoverTelemetrySnapshot {
+        let word = self.0.word.load(Ordering::Acquire);
+        FailoverTelemetrySnapshot {
+            state: state_from_code(word & 0x0f),
+            reason: reason_from_code((word >> 4) & 0x0f),
+            using_dry_fallback: word & (1 << 8) != 0,
+            fresh: word & (1 << 9) != 0,
+            revision: word >> 16,
+        }
+    }
+}
+
+fn state_code(state: FailoverRuntimeState) -> u64 {
+    match state {
+        FailoverRuntimeState::Inactive => 0,
+        FailoverRuntimeState::Processed => 1,
+        FailoverRuntimeState::DryFallback => 2,
+        FailoverRuntimeState::Recovering => 3,
+        FailoverRuntimeState::InputUnavailable => 4,
+    }
+}
+
+fn state_from_code(code: u64) -> FailoverRuntimeState {
+    match code {
+        1 => FailoverRuntimeState::Processed,
+        2 => FailoverRuntimeState::DryFallback,
+        3 => FailoverRuntimeState::Recovering,
+        4 => FailoverRuntimeState::InputUnavailable,
+        _ => FailoverRuntimeState::Inactive,
+    }
+}
+
+fn reason_code(reason: FailoverReason) -> u64 {
+    match reason {
+        FailoverReason::Healthy => 1,
+        FailoverReason::EngineTimeout => 2,
+        FailoverReason::InvalidProcessedOutput => 3,
+        FailoverReason::ControlBridgeDisconnect => 4,
+        FailoverReason::InputUnavailable => 5,
+    }
+}
+
+fn reason_from_code(code: u64) -> Option<FailoverReason> {
+    match code {
+        1 => Some(FailoverReason::Healthy),
+        2 => Some(FailoverReason::EngineTimeout),
+        3 => Some(FailoverReason::InvalidProcessedOutput),
+        4 => Some(FailoverReason::ControlBridgeDisconnect),
+        5 => Some(FailoverReason::InputUnavailable),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -95,6 +219,8 @@ pub struct ThreeLaneFailoverRouter {
     input_unavailable_frames: u64,
     invalid_processed_samples: u64,
     last_output: [f32; VOCAL_LANE_COUNT],
+    telemetry: Option<FailoverTelemetryPublisher>,
+    last_telemetry: Option<(FailoverRuntimeState, Option<FailoverReason>)>,
 }
 
 impl ThreeLaneFailoverRouter {
@@ -112,7 +238,18 @@ impl ThreeLaneFailoverRouter {
             input_unavailable_frames: 0,
             invalid_processed_samples: 0,
             last_output: [0.0; VOCAL_LANE_COUNT],
+            telemetry: None,
+            last_telemetry: None,
         })
+    }
+
+    pub fn with_telemetry(
+        fade_ms: f32,
+        telemetry: FailoverTelemetryPublisher,
+    ) -> Result<Self, EngineError> {
+        let mut router = Self::new(fade_ms)?;
+        router.telemetry = Some(telemetry);
+        Ok(router)
     }
 
     pub fn process_frame(
@@ -169,6 +306,22 @@ impl ThreeLaneFailoverRouter {
         if reason == Some(FailoverReason::InputUnavailable) {
             self.input_unavailable_frames += 1;
         }
+        let runtime_state = if reason == Some(FailoverReason::InputUnavailable) {
+            FailoverRuntimeState::InputUnavailable
+        } else if reason.is_some() {
+            FailoverRuntimeState::DryFallback
+        } else if self.processed_mix < 0.999 {
+            FailoverRuntimeState::Recovering
+        } else {
+            FailoverRuntimeState::Processed
+        };
+        let telemetry_value = (runtime_state, reason);
+        if self.last_telemetry != Some(telemetry_value) {
+            if let Some(telemetry) = &self.telemetry {
+                telemetry.publish(runtime_state, reason);
+            }
+            self.last_telemetry = Some(telemetry_value);
+        }
         FailoverFrameResult {
             output,
             processed_mix: self.processed_mix,
@@ -191,6 +344,8 @@ pub struct FailoverScenarioReport {
     pub non_finite_output_samples: u64,
     pub crosstalk_maximum: f32,
     pub maximum_output_step: f32,
+    pub telemetry_revision: u64,
+    pub final_runtime_state: FailoverRuntimeState,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -268,7 +423,8 @@ fn run_scenario(
         ..LoopbackConfig::default()
     };
     let mut engine = ThreeLaneVocalEngine::new(&config)?;
-    let mut router = ThreeLaneFailoverRouter::new(DEFAULT_FADE_MS)?;
+    let (telemetry_publisher, telemetry_receiver) = failover_telemetry_channel();
+    let mut router = ThreeLaneFailoverRouter::with_telemetry(DEFAULT_FADE_MS, telemetry_publisher)?;
     let mut fault_energy = [0.0_f64; VOCAL_LANE_COUNT];
     let mut fault_samples = 0_u64;
     let mut non_finite = 0_u64;
@@ -333,6 +489,7 @@ fn run_scenario(
     }
     let output_rms_during_fault =
         array::from_fn(|lane| (fault_energy[lane] / fault_samples.max(1) as f64).sqrt() as f32);
+    let telemetry = telemetry_receiver.snapshot();
     Ok(FailoverScenarioReport {
         fault,
         fallback_reason: observed_reason,
@@ -345,6 +502,8 @@ fn run_scenario(
         non_finite_output_samples: non_finite,
         crosstalk_maximum: run_failover_crosstalk_probe(fault)?,
         maximum_output_step,
+        telemetry_revision: telemetry.revision,
+        final_runtime_state: telemetry.state,
     })
 }
 

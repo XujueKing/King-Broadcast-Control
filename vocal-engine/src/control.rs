@@ -1,4 +1,5 @@
 use crate::{
+    failover::{failover_telemetry_channel, FailoverTelemetryReceiver, FailoverTelemetrySnapshot},
     preset::{ThreeLanePresetBank, VocalLaneId, VocalPreset},
     site::{
         evaluate_calibration_gate, CalibrationArmRequest, CalibrationGateDecision, CalibrationMode,
@@ -48,6 +49,7 @@ pub struct VocalControlStatus {
     pub calibration_mode: CalibrationMode,
     pub physical_audio_started: bool,
     pub hardware_bound: bool,
+    pub failover: FailoverTelemetrySnapshot,
     pub lanes: [VocalLaneTelemetry; 3],
     pub message: &'static str,
 }
@@ -68,19 +70,29 @@ pub struct VocalControlSession {
     controls: ThreeLanePresetBank,
     presets: [VocalPreset; 3],
     calibration_mode: CalibrationMode,
+    failover: FailoverTelemetryReceiver,
 }
 
 impl Default for VocalControlSession {
     fn default() -> Self {
+        let (_, failover) = failover_telemetry_channel();
         Self {
             controls: ThreeLanePresetBank::new(VocalPreset::Professional),
             presets: [VocalPreset::Professional; 3],
             calibration_mode: CalibrationMode::Disarmed,
+            failover,
         }
     }
 }
 
 impl VocalControlSession {
+    pub fn with_failover_telemetry(failover: FailoverTelemetryReceiver) -> Self {
+        Self {
+            failover,
+            ..Self::default()
+        }
+    }
+
     pub fn handle(&mut self, request: VocalControlRequest) -> VocalControlResponse {
         let mut gate = None;
         match request.command {
@@ -123,6 +135,7 @@ impl VocalControlSession {
             calibration_mode: self.calibration_mode,
             physical_audio_started: false,
             hardware_bound: false,
+            failover: self.failover.snapshot(),
             lanes: std::array::from_fn(|index| VocalLaneTelemetry {
                 lane: lanes[index],
                 preset: self.presets[index],
@@ -222,5 +235,21 @@ mod tests {
         assert!(response.gate.unwrap().allowed);
         assert_eq!(response.status.calibration_mode, CalibrationMode::Disarmed);
         assert!(!response.status.physical_audio_started);
+    }
+
+    #[test]
+    fn status_reads_failover_telemetry_without_locking_the_audio_path() {
+        use crate::failover::{FailoverReason, FailoverRuntimeState};
+        let (publisher, receiver) = failover_telemetry_channel();
+        let session = VocalControlSession::with_failover_telemetry(receiver);
+        publisher.publish(
+            FailoverRuntimeState::DryFallback,
+            Some(FailoverReason::EngineTimeout),
+        );
+        let snapshot = session.status().failover;
+        assert_eq!(snapshot.state, FailoverRuntimeState::DryFallback);
+        assert_eq!(snapshot.reason, Some(FailoverReason::EngineTimeout));
+        assert!(snapshot.using_dry_fallback);
+        assert!(snapshot.fresh);
     }
 }
