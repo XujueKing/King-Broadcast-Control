@@ -4,6 +4,7 @@ use crate::{
         DriftRuntimeTelemetrySnapshot,
     },
     failover::{failover_telemetry_channel, FailoverTelemetryReceiver, FailoverTelemetrySnapshot},
+    output_gate::{conditions_from_runtime, OutputDecision, OutputGate, RuntimeOutputInputs},
     preset::{ThreeLanePresetBank, VocalLaneId, VocalPreset},
     site::{
         evaluate_calibration_gate, CalibrationArmRequest, CalibrationGateDecision, CalibrationMode,
@@ -23,6 +24,14 @@ pub enum VocalControlCommand {
     },
     EvaluateArm {
         request: CalibrationArmRequest,
+    },
+    EvaluateOutputShadow {
+        now_ms: u64,
+        operator_requested: bool,
+        route_verified: bool,
+        dry_fallback_verified: bool,
+        input_levels_fresh: bool,
+        input_peaks_dbfs: [Option<f32>; 3],
     },
     Disarm,
 }
@@ -68,6 +77,8 @@ pub struct VocalControlResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate: Option<CalibrationGateDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_authorization: Option<OutputDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -77,6 +88,7 @@ pub struct VocalControlSession {
     calibration_mode: CalibrationMode,
     failover: FailoverTelemetryReceiver,
     clock_drift: DriftRuntimeTelemetryReceiver,
+    output_gate: OutputGate,
 }
 
 impl Default for VocalControlSession {
@@ -89,6 +101,7 @@ impl Default for VocalControlSession {
             calibration_mode: CalibrationMode::Disarmed,
             failover,
             clock_drift,
+            output_gate: OutputGate::default(),
         }
     }
 }
@@ -114,6 +127,7 @@ impl VocalControlSession {
 
     pub fn handle(&mut self, request: VocalControlRequest) -> VocalControlResponse {
         let mut gate = None;
+        let mut output_authorization = None;
         match request.command {
             VocalControlCommand::Status => {}
             VocalControlCommand::SetPreset { lane, preset } => {
@@ -122,6 +136,27 @@ impl VocalControlSession {
             }
             VocalControlCommand::EvaluateArm { request } => {
                 gate = Some(evaluate_calibration_gate(&request));
+            }
+            VocalControlCommand::EvaluateOutputShadow {
+                now_ms,
+                operator_requested,
+                route_verified,
+                dry_fallback_verified,
+                input_levels_fresh,
+                input_peaks_dbfs,
+            } => {
+                let conditions = conditions_from_runtime(
+                    RuntimeOutputInputs {
+                        operator_requested,
+                        route_verified,
+                        dry_fallback_verified,
+                        input_levels_fresh,
+                        input_peaks_dbfs,
+                    },
+                    &self.clock_drift.snapshot(),
+                    &self.failover.snapshot(),
+                );
+                output_authorization = Some(self.output_gate.evaluate(&conditions, now_ms));
             }
             VocalControlCommand::Disarm => {
                 self.calibration_mode = CalibrationMode::Disarmed;
@@ -132,6 +167,7 @@ impl VocalControlSession {
             ok: true,
             status: self.status(),
             gate,
+            output_authorization,
             error: None,
         }
     }
@@ -142,6 +178,7 @@ impl VocalControlSession {
             ok: false,
             status: self.status(),
             gate: None,
+            output_authorization: None,
             error: Some(error.into()),
         }
     }
@@ -310,5 +347,82 @@ mod tests {
         );
         assert!(snapshot.bounded_snapshot);
         assert!(!snapshot.hardware_ready);
+    }
+
+    #[test]
+    fn shadow_output_uses_runtime_clock_and_failover_snapshots() {
+        use crate::{
+            capture::MeterFrame,
+            drift_runtime::{drift_runtime_telemetry_channel, DriftRuntimeController},
+            failover::{FailoverReason, FailoverRuntimeState},
+            routing::AsioDirection,
+        };
+        let (failover_publisher, failover_receiver) = failover_telemetry_channel();
+        let (drift_publisher, drift_receiver) = drift_runtime_telemetry_channel();
+        let mut runtime = DriftRuntimeController::new(drift_publisher);
+        for index in 0..6_u64 {
+            let position = 1_000_000 + index * 480_000;
+            runtime
+                .ingest_input(
+                    MeterFrame {
+                        sequence: index + 1,
+                        frame_position: position,
+                        direction: AsioDirection::Input,
+                        peaks: Vec::new(),
+                    },
+                    index,
+                    index,
+                )
+                .unwrap();
+            runtime
+                .ingest_return(
+                    1,
+                    MeterFrame {
+                        sequence: index + 1,
+                        frame_position: position + 120 + index * 24,
+                        direction: AsioDirection::Output,
+                        peaks: Vec::new(),
+                    },
+                    index,
+                    index,
+                )
+                .unwrap();
+        }
+        failover_publisher.publish(FailoverRuntimeState::Processed, None);
+        let mut session =
+            VocalControlSession::with_runtime_telemetry(failover_receiver, drift_receiver);
+        let request = |id, now_ms| VocalControlRequest {
+            id,
+            command: VocalControlCommand::EvaluateOutputShadow {
+                now_ms,
+                operator_requested: true,
+                route_verified: true,
+                dry_fallback_verified: true,
+                input_levels_fresh: true,
+                input_peaks_dbfs: [Some(-12.0); 3],
+            },
+        };
+        let authorized = session.handle(request(1, 100));
+        let authorization_id = authorized
+            .output_authorization
+            .unwrap()
+            .authorization
+            .unwrap()
+            .id;
+
+        failover_publisher.publish(
+            FailoverRuntimeState::DryFallback,
+            Some(FailoverReason::ControlBridgeDisconnect),
+        );
+        let revoked = session
+            .handle(request(2, 101))
+            .output_authorization
+            .unwrap();
+        assert_eq!(revoked.revoked_id, Some(authorization_id));
+        assert_eq!(
+            revoked.blockers,
+            vec![crate::output_gate::OutputBlocker::ControlPathUnhealthy]
+        );
+        assert!(!revoked.physical_output_started);
     }
 }

@@ -23,7 +23,9 @@ P27 只实现一个必要功能：满足安全条件时生成短期输出授权�
 2. 时钟失锁，撤销新授权；
 3. 500 ms 心跳到期，再次撤销。
 
-114 项 Vocal Engine 测试、Clippy `-D warnings` 和 Release 构建全部通过。证据见 [2026-08-25-p27-output-gate.json](evidence/2026-08-25-p27-output-gate.json)。
+`control-stdio` 的影子授权现已直接读取运行中的时钟漂移与故障回退快照，不再由调用方手工声明 `clockLocked` 或 `controlPathHealthy`。时钟证据失效或控制链进入 `DryFallback` 时会立即撤销授权；现场路由、干声回退验证和三路实时峰值仍由调用方提供。
+
+116 项 Vocal Engine 测试、Clippy `-D warnings` 和 Release 构建全部通过。证据见 [2026-08-25-p27-output-gate.json](evidence/2026-08-25-p27-output-gate.json)。
 
 ## 边界
 

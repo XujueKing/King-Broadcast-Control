@@ -1,3 +1,7 @@
+use crate::{
+    drift_runtime::{DriftRuntimeState, DriftRuntimeTelemetrySnapshot},
+    failover::{FailoverRuntimeState, FailoverTelemetrySnapshot},
+};
 use serde::Serialize;
 
 const DEFAULT_LEASE_MS: u64 = 500;
@@ -26,6 +30,35 @@ pub struct OutputConditions {
     pub input_levels_fresh: bool,
     pub input_peaks_dbfs: [Option<f32>; 3],
     pub control_path_healthy: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeOutputInputs {
+    pub operator_requested: bool,
+    pub route_verified: bool,
+    pub dry_fallback_verified: bool,
+    pub input_levels_fresh: bool,
+    pub input_peaks_dbfs: [Option<f32>; 3],
+}
+
+pub fn conditions_from_runtime(
+    inputs: RuntimeOutputInputs,
+    drift: &DriftRuntimeTelemetrySnapshot,
+    failover: &FailoverTelemetrySnapshot,
+) -> OutputConditions {
+    OutputConditions {
+        operator_requested: inputs.operator_requested,
+        route_verified: inputs.route_verified,
+        clock_locked: drift.state == DriftRuntimeState::Locked && drift.evidence_live,
+        dry_fallback_verified: inputs.dry_fallback_verified,
+        input_levels_fresh: inputs.input_levels_fresh,
+        input_peaks_dbfs: inputs.input_peaks_dbfs,
+        control_path_healthy: failover.fresh
+            && matches!(
+                failover.state,
+                FailoverRuntimeState::Processed | FailoverRuntimeState::Recovering
+            ),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -290,5 +323,50 @@ mod tests {
         let blocked = evaluate_shadow_output(&OutputConditions::default(), 0);
         assert!(!blocked.would_start_output);
         assert!(!blocked.decision.blockers.is_empty());
+    }
+
+    #[test]
+    fn runtime_snapshots_drive_clock_and_control_conditions() {
+        let mut drift = DriftRuntimeTelemetrySnapshot {
+            state: DriftRuntimeState::Locked,
+            evidence_live: true,
+            ..DriftRuntimeTelemetrySnapshot::default()
+        };
+        let failover = FailoverTelemetrySnapshot {
+            state: FailoverRuntimeState::Processed,
+            reason: None,
+            using_dry_fallback: false,
+            fresh: true,
+            revision: 1,
+        };
+        let conditions = conditions_from_runtime(
+            RuntimeOutputInputs {
+                operator_requested: true,
+                route_verified: true,
+                dry_fallback_verified: true,
+                input_levels_fresh: true,
+                input_peaks_dbfs: [Some(-12.0); 3],
+            },
+            &drift,
+            &failover,
+        );
+        assert!(conditions.clock_locked);
+        assert!(conditions.control_path_healthy);
+
+        drift.evidence_live = false;
+        assert!(
+            !conditions_from_runtime(
+                RuntimeOutputInputs {
+                    operator_requested: true,
+                    route_verified: true,
+                    dry_fallback_verified: true,
+                    input_levels_fresh: true,
+                    input_peaks_dbfs: [Some(-12.0); 3],
+                },
+                &drift,
+                &failover,
+            )
+            .clock_locked
+        );
     }
 }
