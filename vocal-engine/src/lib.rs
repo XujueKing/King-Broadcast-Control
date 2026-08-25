@@ -22,6 +22,7 @@ pub mod calibration;
 pub mod capture;
 pub mod control;
 pub mod correction;
+pub mod desktop_bridge;
 pub mod dynamics;
 pub mod failover;
 pub mod formant;
