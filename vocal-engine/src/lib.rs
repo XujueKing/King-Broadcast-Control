@@ -33,10 +33,13 @@ pub mod live_joint;
 pub mod multilane;
 pub mod output_gate;
 pub mod pitch;
+pub mod playback_clock;
 pub mod preset;
+pub mod profile_capture;
 pub mod qu16_meter;
 pub mod quality;
 pub mod reference;
+pub mod rescue;
 pub mod routing;
 pub mod simulation;
 pub mod site;
@@ -74,6 +77,10 @@ pub struct LoopbackConfig {
     pub key_tonic: Option<u8>,
     pub scale_mode: Option<correction::ScaleMode>,
     pub reference_map: Option<PathBuf>,
+    pub reference_rescue_enabled: bool,
+    pub reference_vocal_path: Option<PathBuf>,
+    pub reference_rescue_gain_db: f32,
+    pub reference_start_delay_ms: f32,
     pub vocal_dynamics_enabled: bool,
     pub vocal_quality_enabled: bool,
     pub adaptive_vocal_blend_enabled: bool,
@@ -98,6 +105,10 @@ impl Default for LoopbackConfig {
             key_tonic: None,
             scale_mode: None,
             reference_map: None,
+            reference_rescue_enabled: false,
+            reference_vocal_path: None,
+            reference_rescue_gain_db: 0.0,
+            reference_start_delay_ms: 0.0,
             vocal_dynamics_enabled: false,
             vocal_quality_enabled: false,
             adaptive_vocal_blend_enabled: false,
@@ -154,6 +165,9 @@ pub struct LatencyMetrics {
     pub quality_class_latest: Option<quality::VocalQualityClass>,
     pub adaptive_vocal_blend_enabled: bool,
     pub corrected_mix_latest: Option<f32>,
+    pub reference_rescue_enabled: bool,
+    pub reference_rescue_mix_latest: Option<f32>,
+    pub reference_rescue_active: bool,
     pub round_trip_ms: Option<f64>,
     pub round_trip_evidence: String,
     pub xruns: u64,
@@ -176,6 +190,8 @@ pub struct RunningLoopback {
     metrics: Arc<AtomicMetrics>,
     descriptor: EngineDescriptor,
     preset_control: preset::VocalPresetControl,
+    playback_clock: playback_clock::PlaybackClockControl,
+    reference_rescue_control: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -195,6 +211,7 @@ struct EngineDescriptor {
     vocal_dynamics_enabled: bool,
     vocal_quality_enabled: bool,
     adaptive_vocal_blend_enabled: bool,
+    reference_rescue_enabled: bool,
 }
 
 pub(crate) struct LiveVocalProcessor {
@@ -209,6 +226,10 @@ pub(crate) struct LiveVocalProcessor {
     quality_scorer: quality::VocalQualityScorer,
     adaptive_blender: Option<blend::AdaptiveVocalBlender>,
     dry_delay: Option<blend::FixedDryDelay>,
+    reference_rescue: Option<rescue::ReferenceVocalRescue>,
+    reference_rescue_control: Arc<AtomicBool>,
+    playback_clock: playback_clock::PlaybackClockReceiver,
+    samples_processed: u64,
     preset_smoother: preset::VocalPresetSmoother,
     latest_quality_score: f32,
     maximum_correction_cents: f32,
@@ -219,12 +240,34 @@ impl LiveVocalProcessor {
         config: &LoopbackConfig,
         preset_receiver: preset::VocalPresetReceiver,
     ) -> Result<Self, EngineError> {
+        let clock = playback_clock::PlaybackClockControl::new();
+        Self::new_with_playback_clock(
+            config,
+            preset_receiver,
+            clock.receiver(),
+            Arc::new(AtomicBool::new(config.reference_rescue_enabled)),
+        )
+    }
+
+    pub(crate) fn new_with_playback_clock(
+        config: &LoopbackConfig,
+        preset_receiver: preset::VocalPresetReceiver,
+        playback_clock: playback_clock::PlaybackClockReceiver,
+        reference_rescue_control: Arc<AtomicBool>,
+    ) -> Result<Self, EngineError> {
         if config.key_tonic.is_some() != config.scale_mode.is_some() {
             return Err(EngineError("--key 与 --scale 必须同时提供".into()));
         }
         if config.adaptive_vocal_blend_enabled && !config.pitch_correction_enabled {
             return Err(EngineError(
                 "Adaptive Vocal Blend 需要同时启用 Pitch Correction".into(),
+            ));
+        }
+        if config.reference_rescue_enabled
+            && (config.reference_map.is_none() || config.reference_vocal_path.is_none())
+        {
+            return Err(EngineError(
+                "参考人声救援需要同时提供 --reference 和 --reference-vocal".into(),
             ));
         }
         let pitch_config = pitch::PitchTrackerConfig::default();
@@ -237,13 +280,30 @@ impl LiveVocalProcessor {
         if let (Some(tonic), Some(mode)) = (config.key_tonic, config.scale_mode) {
             planner_config.allowed_pitch_classes = correction::scale_mask(tonic, mode);
         }
-        let quality_enabled = config.vocal_quality_enabled || config.pitch_correction_enabled;
+        let quality_enabled = config.vocal_quality_enabled
+            || config.pitch_correction_enabled
+            || config.reference_rescue_enabled;
         let reference = if config.pitch_correction_enabled || quality_enabled {
             config
                 .reference_map
                 .as_deref()
                 .map(reference::ReferenceVocalMap::load)
                 .transpose()?
+        } else {
+            None
+        };
+        let reference_rescue = if config.reference_rescue_enabled {
+            Some(rescue::ReferenceVocalRescue::load(
+                config
+                    .reference_vocal_path
+                    .as_deref()
+                    .expect("validated above"),
+                rescue::ReferenceRescueConfig {
+                    reference_gain_db: config.reference_rescue_gain_db,
+                    start_delay_ms: config.reference_start_delay_ms,
+                    ..rescue::ReferenceRescueConfig::default()
+                },
+            )?)
         } else {
             None
         };
@@ -281,6 +341,10 @@ impl LiveVocalProcessor {
                     )
                 })
                 .transpose()?,
+            reference_rescue,
+            reference_rescue_control,
+            playback_clock,
+            samples_processed: 0,
             preset_smoother: preset::VocalPresetSmoother::with_default_morph(preset_receiver)?,
             latest_quality_score: 100.0,
             maximum_correction_cents: config.maximum_correction_cents,
@@ -290,7 +354,16 @@ impl LiveVocalProcessor {
     pub(crate) fn process_sample(
         &mut self,
         sample: f32,
-    ) -> (f32, Option<quality::VocalQualityObservation>, Option<f32>) {
+    ) -> (
+        f32,
+        Option<quality::VocalQualityObservation>,
+        Option<f32>,
+        Option<f32>,
+    ) {
+        let fallback_position = self.samples_processed;
+        self.samples_processed = self.samples_processed.saturating_add(1);
+        let playback = self.playback_clock.next(fallback_position);
+        let sample_position = playback.position;
         let preset = self
             .preset_smoother
             .process_sample(self.latest_quality_score);
@@ -310,10 +383,12 @@ impl LiveVocalProcessor {
         let mut quality_update = None;
         if self.pitch_enabled || self.quality_enabled {
             if let Some(observation) = self.tracker.process_block(&input) {
-                let target = self
-                    .reference
-                    .as_ref()
-                    .and_then(|map| map.target_at(observation.sample_position));
+                let target = self.reference.as_ref().and_then(|map| {
+                    playback
+                        .playing
+                        .then(|| map.target_at(sample_position))
+                        .flatten()
+                });
                 if self.quality_enabled {
                     quality_update = Some(self.quality_scorer.process(
                         observation,
@@ -352,12 +427,27 @@ impl LiveVocalProcessor {
         if let Some(dynamics) = &mut self.dynamics {
             dynamics.process_block(&[routed], &mut processed);
         }
+        let rescue_frame = self.reference_rescue.as_mut().map(|rescue| {
+            let expected = self
+                .reference
+                .as_ref()
+                .and_then(|map| map.target_at(sample_position))
+                .is_some();
+            rescue.process_sample(
+                processed[0],
+                expected,
+                self.latest_quality_score,
+                sample_position,
+                playback.playing && self.reference_rescue_control.load(Ordering::Relaxed),
+            )
+        });
         (
-            processed[0],
+            rescue_frame.map_or(processed[0], |frame| frame.sample),
             quality_update,
             self.adaptive_blender
                 .as_ref()
                 .map(blend::AdaptiveVocalBlender::corrected_mix),
+            rescue_frame.map(|frame| frame.mix),
         )
     }
 }
@@ -397,6 +487,7 @@ struct AtomicMetrics {
     quality_score_milli: AtomicU64,
     quality_class: AtomicU64,
     corrected_mix_milli: AtomicU64,
+    reference_rescue_mix_milli: AtomicU64,
 }
 
 impl AtomicMetrics {
@@ -422,6 +513,7 @@ impl AtomicMetrics {
             quality_score_milli: AtomicU64::new(0),
             quality_class: AtomicU64::new(quality::VocalQualityClass::RepairCandidate.code()),
             corrected_mix_milli: AtomicU64::new(0),
+            reference_rescue_mix_milli: AtomicU64::new(0),
         }
     }
 
@@ -561,10 +653,20 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
     }
 
     let preset_control = preset::VocalPresetControl::new(config.vocal_preset);
+    let playback_clock = playback_clock::PlaybackClockControl::new();
+    let reference_rescue_control = Arc::new(AtomicBool::new(config.reference_rescue_enabled));
     let mut live_pitch = (config.pitch_correction_enabled
         || config.vocal_dynamics_enabled
-        || config.vocal_quality_enabled)
-        .then(|| LiveVocalProcessor::new(config, preset_control.receiver()))
+        || config.vocal_quality_enabled
+        || config.reference_rescue_enabled)
+        .then(|| {
+            LiveVocalProcessor::new_with_playback_clock(
+                config,
+                preset_control.receiver(),
+                playback_clock.receiver(),
+                Arc::clone(&reference_rescue_control),
+            )
+        })
         .transpose()?;
 
     let input_metrics = Arc::clone(&metrics);
@@ -579,9 +681,9 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
                 let mut dropped = 0u64;
                 for frame in data.chunks_exact(input_channels as usize) {
                     let input = frame[input_channel];
-                    let (routed, quality_update, corrected_mix) = live_pitch
+                    let (routed, quality_update, corrected_mix, reference_rescue_mix) = live_pitch
                         .as_mut()
-                        .map_or((input, None, None), |processor| {
+                        .map_or((input, None, None, None), |processor| {
                             processor.process_sample(input)
                         });
                     if let Some(quality) = quality_update {
@@ -600,6 +702,12 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
                         input_metrics
                             .corrected_mix_milli
                             .store((corrected_mix * 1_000.0).round() as u64, Ordering::Relaxed);
+                    }
+                    if let Some(reference_rescue_mix) = reference_rescue_mix {
+                        input_metrics.reference_rescue_mix_milli.store(
+                            (reference_rescue_mix * 1_000.0).round() as u64,
+                            Ordering::Relaxed,
+                        );
                     }
                     if producer.push(routed).is_err() {
                         dropped += 1;
@@ -694,6 +802,8 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
         _output_stream: output_stream,
         metrics,
         preset_control,
+        playback_clock,
+        reference_rescue_control,
         descriptor: EngineDescriptor {
             input_device: input_name,
             output_device: output_name,
@@ -719,6 +829,7 @@ pub fn start_loopback(config: &LoopbackConfig) -> Result<RunningLoopback, Engine
             vocal_dynamics_enabled: config.vocal_dynamics_enabled,
             vocal_quality_enabled: config.vocal_quality_enabled || config.pitch_correction_enabled,
             adaptive_vocal_blend_enabled: config.adaptive_vocal_blend_enabled,
+            reference_rescue_enabled: config.reference_rescue_enabled,
         },
     })
 }
@@ -810,6 +921,29 @@ impl RunningLoopback {
         self.preset_control.snapshot()
     }
 
+    pub fn sync_playback(
+        &self,
+        seconds: f64,
+        playing: bool,
+    ) -> playback_clock::PlaybackClockStatus {
+        self.playback_clock.sync(seconds, playing)
+    }
+
+    pub fn playback_clock_status(&self) -> playback_clock::PlaybackClockStatus {
+        self.playback_clock.status()
+    }
+
+    pub fn set_reference_rescue_enabled(&self, enabled: bool) -> bool {
+        let applied = enabled && self.descriptor.reference_rescue_enabled;
+        self.reference_rescue_control
+            .store(applied, Ordering::Relaxed);
+        applied
+    }
+
+    pub fn reference_rescue_enabled(&self) -> bool {
+        self.reference_rescue_control.load(Ordering::Relaxed)
+    }
+
     pub fn metrics(&self) -> LatencyMetrics {
         let processing_count = self.metrics.processing_count.load(Ordering::Relaxed);
         let processing_total_ns = self.metrics.processing_total_ns.load(Ordering::Relaxed);
@@ -831,6 +965,7 @@ impl RunningLoopback {
         let overflow_events = self.metrics.overflow_events.load(Ordering::Relaxed);
         let stream_errors = self.metrics.stream_errors.load(Ordering::Relaxed);
         let quality_updates = self.metrics.quality_updates.load(Ordering::Relaxed);
+        let reference_rescue_enabled = self.reference_rescue_enabled();
         LatencyMetrics {
             schema_version: 1,
             status: if underrun_events + overflow_events + stream_errors == 0 {
@@ -875,6 +1010,19 @@ impl RunningLoopback {
                 .descriptor
                 .adaptive_vocal_blend_enabled
                 .then(|| self.metrics.corrected_mix_milli.load(Ordering::Relaxed) as f32 / 1_000.0),
+            reference_rescue_enabled,
+            reference_rescue_mix_latest: self.descriptor.reference_rescue_enabled.then(|| {
+                self.metrics
+                    .reference_rescue_mix_milli
+                    .load(Ordering::Relaxed) as f32
+                    / 1_000.0
+            }),
+            reference_rescue_active: reference_rescue_enabled
+                && self
+                    .metrics
+                    .reference_rescue_mix_milli
+                    .load(Ordering::Relaxed)
+                    >= 10,
             round_trip_ms: None,
             round_trip_evidence:
                 "not measured: physical output-to-input loopback evidence required".into(),

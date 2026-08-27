@@ -35,6 +35,28 @@ use windows_sys::Win32::{
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const MPV_START_TIMEOUT: Duration = Duration::from_secs(5);
+const MPV_SEEK_SETTLE_TIMEOUT: Duration = Duration::from_millis(900);
+const MPV_SEEK_FADE_STEPS: u32 = 6;
+const MPV_SEEK_FADE_STEP_DELAY: Duration = Duration::from_millis(20);
+const MPV_SEEK_POSITION_TOLERANCE_SECONDS: f64 = 0.25;
+const MPV_SEEK_STABLE_READS: u8 = 2;
+const RESCUE_PREVIEW_INSTANCE_OFFSET: u8 = 10;
+const RESCUE_PREVIEW_DRIFT_SECONDS: f64 = 0.5;
+const MPV_AUDIO_OUTPUT_ARGS: [&str; 6] = [
+    // Qu-16 USB runs at 48 kHz. Keeping both Decks on the same shared-mode
+    // WASAPI format avoids repeated endpoint renegotiation and driver glitches.
+    "--ao=wasapi",
+    "--audio-exclusive=no",
+    "--audio-samplerate=48000",
+    "--audio-channels=stereo",
+    // Strong gapless mode freezes the first file's output parameters. That is
+    // unsafe for a mixed local library; weak mode still avoids needless gaps.
+    "--gapless-audio=weak",
+    // The console is a broadcast player, so stability is more important than
+    // sub-100 ms monitoring latency. A larger buffer absorbs USB scheduling
+    // stalls without changing the Qu-16/DP448 gain structure.
+    "--audio-buffer=0.5",
+];
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct MpvManager(pub Mutex<MpvManagerInner>);
@@ -179,6 +201,20 @@ pub struct MpvDeckState {
     pub eof_reached: bool,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MpvRescuePreviewState {
+    pub deck: u8,
+    pub running: bool,
+    pub path: Option<String>,
+    pub paused: bool,
+    pub time_pos: f64,
+    pub volume: f64,
+    pub software_preview: bool,
+    pub physical_audio_started: bool,
+    pub message: String,
+}
+
 fn executable_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(path) = env::var_os("KING_MPV_PATH") {
@@ -294,7 +330,7 @@ fn discover_preferred_audio_device(binary: &Path) -> Option<MpvAudioDevice> {
         .find(|device| device.label.eq_ignore_ascii_case("Qu-16 ST3 (Qu-16)"))
 }
 
-fn preferred_output_trim_db(audio_device: Option<&MpvAudioDevice>) -> f64 {
+fn preferred_output_trim_db(_audio_device: Option<&MpvAudioDevice>) -> f64 {
     if let Ok(configured) = env::var("KING_MPV_OUTPUT_TRIM_DB") {
         if let Ok(value) = configured.trim().parse::<f64>() {
             if value.is_finite() {
@@ -302,10 +338,10 @@ fn preferred_output_trim_db(audio_device: Option<&MpvAudioDevice>) -> f64 {
             }
         }
     }
-    audio_device
-        .is_some_and(|device| device.label.contains("Qu-16"))
-        .then_some(-24.0)
-        .unwrap_or(0.0)
+    // A hidden fixed trim made the Deck meters move before the Qu channel
+    // while leaving the post-fader LR bus almost inaudible. Gain is controlled
+    // explicitly by the Deck/master controls and the Qu-16 surface instead.
+    0.0
 }
 
 fn validate_deck(deck: u8) -> Result<(), String> {
@@ -313,6 +349,19 @@ fn validate_deck(deck: u8) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("无效 Deck 编号：{deck}"))
+    }
+}
+
+fn rescue_preview_instance_id(deck: u8) -> Result<u8, String> {
+    validate_deck(deck)?;
+    Ok(deck + RESCUE_PREVIEW_INSTANCE_OFFSET)
+}
+
+fn validate_instance(instance: u8) -> Result<(), String> {
+    if matches!(instance, 1 | 2 | 11 | 12) {
+        Ok(())
+    } else {
+        Err(format!("无效 mpv 实例编号：{instance}"))
     }
 }
 
@@ -370,12 +419,12 @@ fn spawn_deck(
             "--audio-display=no",
             "--keep-open=yes",
             "--pause=yes",
-            "--gapless-audio=yes",
             "--audio-client-name=KING CLUB Broadcast Control",
             "--input-default-bindings=no",
             "--input-vo-keyboard=no",
             &format!("--input-ipc-server={pipe_path}"),
         ])
+        .args(MPV_AUDIO_OUTPUT_ARGS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -445,12 +494,12 @@ fn send_command(pipe_path: &str, command: Value) -> Result<Value, String> {
     }
 }
 
-fn ensure_instance<'a>(
-    manager: &'a mut MpvManagerInner,
-    deck: u8,
-) -> Result<&'a mut MpvInstance, String> {
-    validate_deck(deck)?;
-    let should_restart = match manager.instances.get_mut(&deck) {
+fn ensure_instance(
+    manager: &mut MpvManagerInner,
+    instance_id: u8,
+) -> Result<&mut MpvInstance, String> {
+    validate_instance(instance_id)?;
+    let should_restart = match manager.instances.get_mut(&instance_id) {
         Some(instance) => instance
             .child
             .try_wait()
@@ -459,7 +508,7 @@ fn ensure_instance<'a>(
         None => true,
     };
     if should_restart {
-        manager.instances.remove(&deck);
+        manager.instances.remove(&instance_id);
         let binary = manager
             .binary
             .clone()
@@ -472,17 +521,17 @@ fn ensure_instance<'a>(
         }
         let instance = spawn_deck(
             &binary,
-            deck,
+            instance_id,
             &manager.process_job,
             manager.audio_device.as_ref(),
             manager.output_trim_db,
         )?;
-        manager.instances.insert(deck, instance);
+        manager.instances.insert(instance_id, instance);
     }
     manager
         .instances
-        .get_mut(&deck)
-        .ok_or_else(|| format!("Deck {deck} mpv 实例未就绪"))
+        .get_mut(&instance_id)
+        .ok_or_else(|| format!("mpv 实例 {instance_id} 未就绪"))
 }
 
 pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> {
@@ -502,7 +551,7 @@ pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> 
     let mut active_decks = Vec::new();
     manager.instances.retain(|deck, instance| {
         let running = instance.child.try_wait().ok().flatten().is_none();
-        if running {
+        if running && matches!(*deck, 1 | 2) {
             active_decks.push(*deck);
         }
         running
@@ -530,7 +579,7 @@ pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> 
                 || "mpv 播放引擎可用 · 系统自动音频设备".to_string(),
                 |device| {
                     format!(
-                        "mpv 播放引擎可用 · USB-B → {} · 安全衰减 {:.0} dB",
+                        "mpv 播放引擎可用 · USB-B → {} · 输出修整 {:.0} dB",
                         device.label, manager.output_trim_db
                     )
                 },
@@ -633,9 +682,12 @@ pub fn seek(manager: &MpvManager, deck: u8, seconds: f64) -> Result<MpvDeckState
         .lock()
         .map_err(|_| "无法锁定 mpv 状态".to_string())?;
     let instance = ensure_instance(&mut manager, deck)?;
-    send_command(
-        &instance.pipe_path,
-        json!(["seek", seconds.max(0.0), "absolute+exact"]),
+    let previous = deck_state_for_instance(deck, instance)?;
+    safe_seek_instance(
+        instance,
+        seconds,
+        !previous.paused,
+        previous.volume.clamp(0.0, 100.0),
     )?;
     deck_state_for_instance(deck, instance)
 }
@@ -674,6 +726,76 @@ fn property_f64(pipe_path: &str, name: &str) -> f64 {
         .ok()
         .and_then(|value| value.as_f64())
         .unwrap_or(0.0)
+}
+
+fn safe_seek_instance(
+    instance: &mut MpvInstance,
+    seconds: f64,
+    resume_playing: bool,
+    final_volume: f64,
+) -> Result<(), String> {
+    let duration = property_f64(&instance.pipe_path, "duration");
+    let target = if duration.is_finite() && duration > 0.0 {
+        seconds.max(0.0).min(duration)
+    } else {
+        seconds.max(0.0)
+    };
+    let safe_volume = final_volume.clamp(0.0, 100.0);
+
+    // Qu-16 USB/WASAPI endpoints can emit a loud invalid-buffer burst when an
+    // exact seek flushes the decoder while the endpoint is still playing.
+    // Keep that transition away from the physical output and fail closed.
+    send_command(&instance.pipe_path, json!(["set_property", "volume", 0.0]))?;
+    send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+    send_command(
+        &instance.pipe_path,
+        json!(["seek", target, "absolute+exact"]),
+    )?;
+
+    let settle_deadline = Instant::now() + MPV_SEEK_SETTLE_TIMEOUT;
+    let mut stable_reads = 0_u8;
+    while Instant::now() < settle_deadline {
+        let seeking = property(&instance.pipe_path, "seeking")
+            .ok()
+            .and_then(|value| value.as_bool());
+        let position = property(&instance.pipe_path, "time-pos")
+            .ok()
+            .and_then(|value| value.as_f64());
+        let stable = seeking == Some(false)
+            && position.is_some_and(|value| {
+                value.is_finite() && (value - target).abs() <= MPV_SEEK_POSITION_TOLERANCE_SECONDS
+            });
+        stable_reads = if stable {
+            stable_reads.saturating_add(1)
+        } else {
+            0
+        };
+        if stable_reads >= MPV_SEEK_STABLE_READS {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if stable_reads < MPV_SEEK_STABLE_READS {
+        return Err("mpv Seek 未在安全窗口内稳定；Deck 已保持静音暂停".into());
+    }
+
+    if resume_playing {
+        send_command(&instance.pipe_path, json!(["set_property", "pause", false]))?;
+        for step in 1..=MPV_SEEK_FADE_STEPS {
+            thread::sleep(MPV_SEEK_FADE_STEP_DELAY);
+            let volume = safe_volume * f64::from(step) / f64::from(MPV_SEEK_FADE_STEPS);
+            send_command(
+                &instance.pipe_path,
+                json!(["set_property", "volume", volume]),
+            )?;
+        }
+    } else {
+        send_command(
+            &instance.pipe_path,
+            json!(["set_property", "volume", safe_volume]),
+        )?;
+    }
+    Ok(())
 }
 
 fn deck_state_for_instance(deck: u8, instance: &mut MpvInstance) -> Result<MpvDeckState, String> {
@@ -722,6 +844,91 @@ pub fn shutdown_deck(manager: &MpvManager, deck: u8) -> Result<(), String> {
     Ok(())
 }
 
+pub fn sync_rescue_preview(
+    manager: &MpvManager,
+    deck: u8,
+    path: &Path,
+    seconds: f64,
+    playing: bool,
+    enabled: bool,
+    volume: f64,
+) -> Result<MpvRescuePreviewState, String> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err("补音试听时间必须是非负有限数字".into());
+    }
+    if !volume.is_finite() {
+        return Err("补音试听音量必须是有限数字".into());
+    }
+    let instance_id = rescue_preview_instance_id(deck)?;
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    if !enabled {
+        if let Some(mut instance) = manager.instances.remove(&instance_id) {
+            let _ = send_command(&instance.pipe_path, json!(["quit"]));
+            if instance.child.try_wait().ok().flatten().is_none() {
+                let _ = instance.child.kill();
+            }
+            let _ = instance.child.wait();
+        }
+        return Ok(MpvRescuePreviewState {
+            deck,
+            running: false,
+            path: None,
+            paused: true,
+            time_pos: seconds,
+            volume: 0.0,
+            software_preview: false,
+            physical_audio_started: false,
+            message: format!("Deck {deck} 本地补音试听已关闭"),
+        });
+    }
+
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("补音参考轨不存在：{error}"))?;
+    let instance = ensure_instance(&mut manager, instance_id)?;
+    let changed_path = instance.loaded_path.as_ref() != Some(&canonical_path);
+    if changed_path {
+        send_command(
+            &instance.pipe_path,
+            json!(["loadfile", canonical_path.to_string_lossy(), "replace"]),
+        )?;
+        send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+        instance.loaded_path = Some(canonical_path.clone());
+    }
+    let safe_volume = volume.clamp(0.0, 100.0);
+    let current_seconds = property_f64(&instance.pipe_path, "time-pos");
+    if changed_path || (current_seconds - seconds).abs() > RESCUE_PREVIEW_DRIFT_SECONDS {
+        safe_seek_instance(instance, seconds, playing, safe_volume)?;
+    } else {
+        send_command(
+            &instance.pipe_path,
+            json!(["set_property", "volume", safe_volume]),
+        )?;
+        send_command(
+            &instance.pipe_path,
+            json!(["set_property", "pause", !playing]),
+        )?;
+    }
+    Ok(MpvRescuePreviewState {
+        deck,
+        running: true,
+        path: Some(canonical_path.to_string_lossy().into_owned()),
+        paused: !playing,
+        time_pos: property_f64(&instance.pipe_path, "time-pos"),
+        volume: property_f64(&instance.pipe_path, "volume"),
+        software_preview: true,
+        physical_audio_started: false,
+        message: if playing {
+            format!("Deck {deck} 本地补音试听中")
+        } else {
+            format!("Deck {deck} 本地补音试听已跟随暂停")
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +939,16 @@ mod tests {
         assert!(validate_deck(2).is_ok());
         assert!(validate_deck(0).is_err());
         assert!(validate_deck(3).is_err());
+    }
+
+    #[test]
+    fn rescue_preview_uses_private_instances_without_widening_deck_ids() {
+        assert_eq!(rescue_preview_instance_id(1).unwrap(), 11);
+        assert_eq!(rescue_preview_instance_id(2).unwrap(), 12);
+        assert!(rescue_preview_instance_id(3).is_err());
+        assert!(validate_deck(11).is_err());
+        assert!(validate_instance(11).is_ok());
+        assert!(validate_instance(12).is_ok());
     }
 
     #[test]
@@ -756,13 +973,24 @@ mod tests {
     }
 
     #[test]
-    fn qu16_uses_safe_output_trim_by_default() {
+    fn qu16_uses_unity_output_trim_by_default() {
         let device = MpvAudioDevice {
             id: "wasapi/test".into(),
             label: "Qu-16 ST3 (Qu-16)".into(),
         };
-        assert_eq!(preferred_output_trim_db(Some(&device)), -24.0);
+        assert_eq!(preferred_output_trim_db(Some(&device)), 0.0);
         assert_eq!(preferred_output_trim_db(None), 0.0);
+    }
+
+    #[test]
+    fn deck_audio_output_is_fixed_to_stable_qu16_shared_mode() {
+        assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--ao=wasapi"));
+        assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--audio-exclusive=no"));
+        assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--audio-samplerate=48000"));
+        assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--audio-channels=stereo"));
+        assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--gapless-audio=weak"));
+        assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--audio-buffer=0.5"));
+        assert!(!MPV_AUDIO_OUTPUT_ARGS.contains(&"--gapless-audio=yes"));
     }
 
     #[test]

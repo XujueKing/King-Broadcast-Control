@@ -1,5 +1,6 @@
 {
-  "pipelineVersion": "king-audio-ai-moss-v6",
+  "pipelineVersion": "king-audio-ai-moss-v7",
+  "lyricsPostprocessVersion": "moss-native-monotonic-v2",
   "pythonVersion": "3.12",
   "concurrency": 1,
   "compute": {
@@ -21,7 +22,7 @@
   "moss": {
     "model": "OpenMOSS-Team/MOSS-Music-8B-Thinking",
     "endpoint": "http://127.0.0.1:30000",
-    "maxTokens": 4096,
+    "maxTokens": 8192,
     "temperature": 0.0,
     "timestampMode": "native"
   },

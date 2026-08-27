@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  ACCOMPANIMENT_GAIN_DB,
+  deckOutputVolumePercent,
+  deckOutputVolumeScalar,
   equalPowerGains,
   formatDuration,
   getAdjacentPlayableTrack,
@@ -25,7 +28,20 @@ import {
 } from "./vocal-runtime.js";
 import { createOfflineRoutingStatus, normalizeRoutingResponse, routingStageLabel } from "./vocal-routing.js";
 import { createCalibrationStatus, normalizeCalibrationReport } from "./vocal-calibration.js";
+import {
+  clearDeckCueRecovery,
+  deckCueMix,
+  deckRescuePreviewPlans,
+  loadDeckCueRecovery,
+  persistDeckCueRecovery,
+  qu16DeckCueWrites,
+  qu16WritesConfirmed,
+} from "./deck-cue.js";
+import { homeMicrophoneBindings, microphoneFaderReadback, microphoneFaderWrites } from "./microphone-control.js";
 import { MixerWorkspace } from "./MixerConsole.jsx";
+import { clearQu16MeterSnapshot, publishQu16MeterSnapshot } from "./qu16-meter-store.js";
+import { LightingConsoleWorkspace } from "./LightingConsoleWorkspace.jsx";
+import { prewarmPersistentVideoThumbnails } from "./video-thumbnail-cache.js";
 import { defaultMixerModelId, mixerModelById, mixerModels } from "./mixer-models/index.js";
 import {
   nextConfiguredId,
@@ -33,13 +49,29 @@ import {
   rhythmRuleOptions,
   selectDominantDeck,
 } from "./rhythm-automation.js";
+import { createLightingAutomationState, lightingCueIsAuthorized, planLightingCue } from "./lighting-automation.js";
+import { lightingPresetForVideoColor, sampleVideoColor } from "./video-color-runtime.js";
+import { createLightingPackage, normalizeLightingPackage } from "./lighting-package.js";
+import {
+  clearTitanSimulator,
+  createTitanSimulatorState,
+  isTitanPresetSimulated,
+  simulateTitanCue,
+} from "./titan-simulator.js";
 import {
   House, MusicNotes, VideoCamera, LightbulbFilament, SlidersHorizontal,
-  DiceFive, Play, Pause, SkipBack, SkipForward, Lightning, Clock,
+  DiceFive, Play, Pause, SkipBack, SkipForward, Lightning,
   SpeakerHigh, SpeakerSlash, ArrowsClockwise, MonitorPlay, WifiHigh, CheckCircle,
   GearSix, FloppyDisk, MusicNoteSimple, RepeatOnce, ListNumbers, Shuffle,
   ArrowCounterClockwise, Headphones, Microphone,
+  MagnifyingGlass, X,
 } from "@phosphor-icons/react";
+
+function useStableCallback(callback) {
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+  return useCallback((...args) => callbackRef.current(...args), []);
+}
 
 const demoTracks = [
   { title: "Neon Nights", artist: "Cyberwave", duration: "03:42", bpm: 126, tag: "电子节奏" },
@@ -162,16 +194,6 @@ const loadMixerNumber = (key, fallback) => {
     return fallback;
   }
 };
-const loadMicrophoneVolumes = () => {
-  try {
-    const values = JSON.parse(window.localStorage.getItem("king.mixer.microphones"));
-    if (!Array.isArray(values) || values.length < 2) return [80,80];
-    return values.slice(0,2).map(value=>Math.min(100,Math.max(0,Number(value)||0)));
-  } catch {
-    return [80,80];
-  }
-};
-
 const weekdayPlaylists = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const specialPlaylists = ["情人节", "七夕", "万圣节", "圣诞节", "跨年", "店庆", "活动"];
 // 首版先以本地示例预设展示；名称、时长与循环方式后续由“灯光管理”页面配置并保存。
@@ -187,6 +209,58 @@ const lights = [
   { id: 8 },
   { id: 9 },
 ];
+const loadTitanMappings = () => {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("king.lighting.titanMappings"));
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+    return Object.fromEntries(Object.entries(saved)
+      .map(([presetId,titanId])=>[Number(presetId),Number(titanId)])
+      .filter(([presetId,titanId])=>Number.isInteger(presetId)&&presetId>=0&&presetId<=9&&Number.isSafeInteger(titanId)&&titanId>0));
+  } catch {
+    return {};
+  }
+};
+const loadTitanEffectRegistry = () => {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("king.lighting.effectRegistry"));
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+};
+const SITE_TITAN_IDENTITY = {deviceName:"TT-00608"};
+const loadTitanIdentity = () => {
+  try {
+    const saved=JSON.parse(window.localStorage.getItem("king.lighting.titanIdentity"));
+    return saved&&typeof saved==="object"&&!Array.isArray(saved)?saved:null;
+  } catch {
+    return null;
+  }
+};
+const titanIdentityFromStatus = (status) => ({
+  serial:Number.isSafeInteger(Number(status?.serial))&&Number(status.serial)>0?Number(status.serial):null,
+  hardwareIdentifier:String(status?.hardwareIdentifier||"").trim(),
+  deviceName:String(status?.deviceName||"").trim(),
+});
+const titanIdentityMatches = (expected, current) => {
+  if(!expected)return true;
+  if(expected.serial&&current.serial)return expected.serial===current.serial;
+  if(expected.deviceName)return Boolean(current.deviceName)&&expected.deviceName===current.deviceName;
+  if(expected.hardwareIdentifier)return Boolean(current.hardwareIdentifier)&&expected.hardwareIdentifier===current.hardwareIdentifier;
+  return true;
+};
+const titanPlaybackLabel = (playback) => {
+  const location = [playback.group,Number.isFinite(playback.page)?`P${playback.page+1}`:"",Number.isFinite(playback.index)?`#${playback.index+1}`:""]
+    .filter(Boolean).join(" · ");
+  const userNumber = playback.userNumbers?.length ? `U${playback.userNumbers.join("/")}` : "";
+  return [playback.legend||`Playback ${playback.titanId}`,userNumber,location].filter(Boolean).join(" · ");
+};
+const videoLightingPreset = (media, mappings, { allowUnmapped = false } = {}) => {
+  const preferred = ({"激光":1,"舞台":5,"氛围":2,"节日":3,"宣传":0})[media?.category];
+  if (Number.isInteger(preferred) && (allowUnmapped || mappings[preferred])) return preferred;
+  const mapped = Object.keys(mappings).map(Number).filter(Number.isInteger).sort((a,b)=>a-b);
+  return mapped[0] ?? null;
+};
 const fixtureControls = [
   { id: "beam", label: "光束", color: { r: 32, g: 232, b: 154 } },
   { id: "gatling", label: "加特林", color: { r: 255, g: 159, b: 72 } },
@@ -263,16 +337,14 @@ const formatDateTime = (date) => {
 };
 
 function MediaThumbnail({ item }) {
-  const [duration, setDuration] = useState(item.duration ?? "--:--");
-  if (!isPlayableVideoSource(item.src)) return <><img src={item.src} alt=""/><span>{duration}</span></>;
+  const playableVideo = isPlayableVideoSource(item.src);
+  const thumbnailUrl = playableVideo ? item.thumbnailSrc ?? "" : item.src;
+  const duration = item.duration ?? "--:--";
+
   return <>
-    <video
-      src={item.src}
-      muted
-      preload="metadata"
-      playsInline
-      onLoadedMetadata={(event)=>setDuration(formatDuration(event.currentTarget.duration))}
-    />
+    <div className={`media-thumbnail-frame ${thumbnailUrl ? "ready" : "pending"}`}>
+      {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" decoding="async"/> : <b aria-hidden="true"/>}
+    </div>
     <span>{duration}</span>
   </>;
 }
@@ -509,6 +581,15 @@ const deckSignalPercent = (peaks, seconds, durationSeconds, outputPercent) => {
   return sourcePercent * clamp(outputPercent / 100, 0, 1);
 };
 
+function RuntimeClock() {
+  const [clock,setClock]=useState(()=>new Date());
+  useEffect(()=>{
+    const timer=window.setInterval(()=>setClock(new Date()),1000);
+    return()=>window.clearInterval(timer);
+  },[]);
+  return <span className="clock">{formatDateTime(clock)}</span>;
+}
+
 function DeckSignalMeter({ number, side, peaks, progress, durationSeconds, playing, outputPercent, motionPaused }) {
   const rootRef = useRef(null);
   const fillRef = useRef(null);
@@ -569,7 +650,7 @@ function DeckSignalMeter({ number, side, peaks, progress, durationSeconds, playi
   return <div ref={rootRef} className={`waveform deck-signal-meter deck-signal-meter-${side} ${playing?"is-live":""}`} data-motion-paused={motionPaused?"true":"false"} role="meter" aria-label={`Deck ${number} 实时输出电平`} aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span ref={fillRef}/></div>;
 }
 
-function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, onPrevious, onReplay, onNext, active, side, level, progress, onSeek, playbackMode, onPlaybackModeChange, lyricsEnabled, lyricsAvailable, vocalMode, accompanimentAvailable, onLyricsToggle, onVocalToggle, meterMotionPaused }) {
+function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, onPrevious, onReplay, onNext, active, side, level, progress, onSeek, playbackMode, onPlaybackModeChange, lyricsEnabled, lyricsAvailable, vocalMode, accompanimentAvailable, aiRescueEnabled, aiReferenceStatus, onAiRescueToggle, onLyricsToggle, onVocalToggle, cueActive, cueAvailable, cueBusy, cueMessage, onCueToggle, meterMotionPaused }) {
   const demoWaveformPeaks = useMemo(() => buildWaveformPeaks(track.title, WAVEFORM_PEAK_COUNT), [track.title]);
   const dragRef = useRef(null);
   const [seekPreview, setSeekPreview] = useState(null);
@@ -581,6 +662,21 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
   const displayedProgress = Math.min(durationSeconds, Math.max(0, seekPreview ?? progress));
   const waveformPeaks = analysis?.peaks?.length ? analysis.peaks : track.path ? [] : demoWaveformPeaks;
   const analyzedBpm = Number(analysis?.bpm) > 0 ? Number(analysis.bpm).toFixed(1).replace(/\.0$/, "") : track.bpm;
+  const aiReferenceBusy = ["checking","binding"].includes(aiReferenceStatus?.state);
+  const aiReferenceReady = Boolean(aiReferenceStatus?.ready);
+  const aiReferenceBound = Boolean(aiReferenceStatus?.bound);
+  const aiRescueActive = vocalMode==="accompaniment"&&aiReferenceReady&&aiRescueEnabled;
+  const aiRescueTitle = vocalMode!=="accompaniment"
+    ? "先开启伴唱模式，再使用 AI 补音"
+    : aiReferenceBusy
+      ? aiReferenceStatus?.message||"正在检查歌手补音参考"
+      : !aiReferenceReady
+        ? aiReferenceStatus?.message||"请先在音乐管理为此歌生成补音参考"
+        : aiRescueEnabled
+          ? aiReferenceBound
+            ? `${aiReferenceStatus?.displayName||"歌手"}补音已开启；实时参考已绑定，点击关闭`
+            : `${aiReferenceStatus?.displayName||"歌手"}本地补音参考层已开启；实时自适应链路尚未武装，点击关闭`
+            : `${aiReferenceStatus?.displayName||"歌手"}补音参考已就绪；点击打开`;
 
   const openRhythmEditor = () => {
     const firstDownbeat = analysis?.correction?.firstDownbeatSeconds
@@ -687,7 +783,7 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
   };
 
   return <section className={`deck deck-channel-${side} ${active ? "deck-active" : ""}`}>
-    <div className="deck-head"><span className="deck-number">DECK {number}</span><button type="button" className={`deck-play-toggle ${playing?"on":"paused"}`} onClick={onPlay} aria-label={`Deck ${number} ${playing?"暂停":"播放"}`} aria-pressed={playing} title={playing?"暂停":"播放"}>{playing?<Pause weight="fill"/>:<Play weight="fill"/>}</button></div>
+    <div className="deck-head"><span className="deck-number">DECK {number}</span><div className="deck-primary-actions"><button type="button" className={`deck-cue-toggle ${cueActive?"active":""}`} aria-label={`Deck ${number} ${cueActive?"关闭":"开启"} Qu-16 耳机 CUE`} aria-pressed={cueActive} title={cueMessage} disabled={!cueAvailable||cueBusy} onClick={onCueToggle}>{cueBusy&&cueActive?"…":"CUE"}</button><button type="button" className={`deck-play-toggle ${playing?"on":"paused"}`} onClick={onPlay} aria-label={`Deck ${number} ${playing?"暂停":"播放"}`} aria-pressed={playing} title={playing?"暂停":"播放"}>{playing?<Pause weight="fill"/>:<Play weight="fill"/>}</button></div></div>
     <div className="deck-track"><div className={`cover cover-${side}`}><MusicNotes weight="fill" /></div><div><h3>{track.title}</h3><p>{track.artist} · <button type="button" className="deck-bpm-button" disabled={!track.path||!analysis} onClick={openRhythmEditor} title="校正 BPM 与小节第一拍">{analyzedBpm} BPM</button>{analysis?.correction&&<span className="rhythm-corrected">已校正</span>}</p></div></div>
     <DeckSignalMeter key={`fixed-tick-meter-v2-${number}`} number={number} side={side} peaks={waveformPeaks} progress={displayedProgress} durationSeconds={durationSeconds} playing={playing} outputPercent={level} motionPaused={meterMotionPaused}/>
     <div
@@ -710,8 +806,8 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
     ><WaveformCanvas key={track.title} peaks={waveformPeaks} beats={analysis?.beats} downbeats={analysis?.downbeats} bars={analysis?.bars} bpm={analysis?.bpm} progress={displayedProgress} durationSeconds={durationSeconds} side={side} seeking={seekPreview!==null} />{track.path&&!analysis&&<span className="waveform-pending">波形与节拍分析中</span>}</div>
     <div className="time-row"><span>{formatDuration(displayedProgress)}</span><span>{track.duration}</span></div>
     <div className="deck-bottom-controls">
-      <div className="transport" role="group" aria-label={`Deck ${number} 曲目控制`}><button type="button" className="track-step previous" aria-label={`Deck ${number} 装载上一首并暂停`} title="装载上一首（暂停）" onClick={onPrevious}><SkipBack weight="fill" /></button><button type="button" className="track-step replay" aria-label={`Deck ${number} 从头重放当前歌曲`} title="从头重放" onClick={onReplay}><ArrowCounterClockwise weight="bold" /></button><button type="button" className="cue" aria-label={`Deck ${number} CUE 预留`} title="CUE 耳机预听将在接入独立监听声卡后启用" disabled><Clock /> CUE</button><button type="button" className="track-step next" aria-label={`Deck ${number} 装载下一首并暂停`} title="装载下一首（暂停）" onClick={onNext}><SkipForward weight="fill" /></button><button type="button" className={`deck-extra-toggle lyrics-toggle ${lyricsEnabled?"active":""} ${!lyricsAvailable?"missing":""}`} aria-label={`Deck ${number} ${lyricsAvailable?(lyricsEnabled?"关闭":"打开"):"未找到"}歌词`} aria-pressed={lyricsEnabled&&lyricsAvailable} onClick={onLyricsToggle} title={lyricsAvailable?(lyricsEnabled?"关闭歌词":"打开歌词"):"未找到同名 LRC 歌词文件"}>{lyricsAvailable?"词":"无词"}</button></div>
-      <div className="deck-playback-modes" role="group" aria-label={`Deck ${number} 播放模式`}>{playbackModes.map(([id,label,Icon])=><button type="button" key={id} className={playbackMode===id?"active":""} aria-label={label} aria-pressed={playbackMode===id} onClick={()=>onPlaybackModeChange(id)} title={label}><Icon weight={playbackMode===id?"fill":"regular"}/></button>)}<button type="button" className="active vocal-toggle" aria-label={`Deck ${number} 当前${vocalMode==="original"?"原唱":"伴唱"}，点击切换`} aria-pressed={vocalMode==="accompaniment"} disabled={!accompanimentAvailable} onClick={onVocalToggle} title={!accompanimentAvailable?"伴唱音轨尚未生成":vocalMode==="original"?"当前原唱，点击切换为伴唱":"当前伴唱，点击切换为原唱"}>{vocalMode==="original"?"原唱":"伴唱"}</button></div>
+      <div className="transport" role="group" aria-label={`Deck ${number} 曲目控制`}><button type="button" className="track-step previous" aria-label={`Deck ${number} 装载上一首并暂停`} title="装载上一首（暂停）" onClick={onPrevious}><SkipBack weight="fill" /></button><button type="button" className="track-step replay" aria-label={`Deck ${number} 从头重放当前歌曲`} title="从头重放" onClick={onReplay}><ArrowCounterClockwise weight="bold" /></button><button type="button" className={`vocal-rescue-toggle ${aiRescueActive?"active":""} ${aiReferenceReady?"ready":"missing"} ${aiReferenceBusy?"busy":""}`} aria-label={`Deck ${number} ${aiRescueActive?"关闭":"打开"} AI 补音`} aria-pressed={aiRescueActive} disabled={vocalMode!=="accompaniment"||!aiReferenceReady||aiReferenceBusy} onClick={onAiRescueToggle} title={aiRescueTitle}>{aiReferenceBusy?"准备":aiReferenceReady?"补音✓":"补音"}</button><button type="button" className="track-step next" aria-label={`Deck ${number} 装载下一首并暂停`} title="装载下一首（暂停）" onClick={onNext}><SkipForward weight="fill" /></button><button type="button" className={`deck-extra-toggle lyrics-toggle ${lyricsEnabled?"active":""} ${!lyricsAvailable?"missing":""}`} aria-label={`Deck ${number} ${lyricsAvailable?(lyricsEnabled?"关闭":"打开"):"未找到"}歌词`} aria-pressed={lyricsEnabled&&lyricsAvailable} onClick={onLyricsToggle} title={lyricsAvailable?(lyricsEnabled?"关闭歌词":"打开歌词"):"未找到同名 LRC 歌词文件"}>{lyricsAvailable?"词":"无词"}</button></div>
+      <div className="deck-playback-modes" role="group" aria-label={`Deck ${number} 播放模式`}>{playbackModes.map(([id,label,Icon])=><button type="button" key={id} className={playbackMode===id?"active":""} aria-label={label} aria-pressed={playbackMode===id} onClick={()=>onPlaybackModeChange(id)} title={label}><Icon weight={playbackMode===id?"fill":"regular"}/></button>)}<button type="button" className="active vocal-toggle" aria-label={`Deck ${number} 当前${vocalMode==="original"?"原唱":"伴唱"}，点击切换`} aria-pressed={vocalMode==="accompaniment"} disabled={!accompanimentAvailable} onClick={onVocalToggle} title={!accompanimentAvailable?"伴唱音轨尚未生成":vocalMode==="original"?`当前原唱，点击切换为伴唱（自动补偿 +${ACCOMPANIMENT_GAIN_DB} dB）`: `当前伴唱（自动补偿 +${ACCOMPANIMENT_GAIN_DB} dB），点击切换为原唱`}>{vocalMode==="original"?"原唱":"伴唱"}</button></div>
     </div>
     {rhythmEditorOpen&&<div className={`rhythm-editor rhythm-editor-${side}`} role="dialog" aria-label={`Deck ${number} 节拍网格校正`}>
       <header><b>节拍网格校正</b><button type="button" onClick={()=>setRhythmEditorOpen(false)}>关闭</button></header>
@@ -726,6 +822,13 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
 }
 
 const defaultMediaTransform = { x: 0, y: 0, scaleX: 1, scaleY: 1, fit: "cover", mode: "uniform" };
+const resolveBaseMedia = (media) => media?.type === "text"
+  ? media.baseMedia ?? { ...blackScreenImage, type:"image" }
+  : media;
+const cloneOverlayElements = (media) => (media?.elements ?? []).map((element)=>({ ...element }));
+const placeOverlayOnMedia = (baseMedia, overlayMedia) => overlayMedia?.type === "text"
+  ? { ...overlayMedia, baseMedia, elements:cloneOverlayElements(overlayMedia) }
+  : baseMedia;
 const LED_LOGICAL_WIDTH = 2048;
 const LED_LOGICAL_HEIGHT = 2304;
 // The editor exposes familiar point-like values (28, 36, ...), while all output
@@ -734,7 +837,7 @@ const LED_LOGICAL_HEIGHT = 2304;
 // true proportional representation instead of a second, independently sized UI.
 const LED_TEXT_UNIT_SCALE = 3.2;
 
-export function MediaOutputScreen({ media, track, lyrics = null, transform = defaultMediaTransform, allowAudio = false, editable = false, selectedElementId = null, selectedElementIds = [], onElementSelect, onElementChange, onEditStart }) {
+export function MediaOutputScreen({ media, track, lyrics = null, transform = defaultMediaTransform, allowAudio = false, videoRef = null, editable = false, selectedElementId = null, selectedElementIds = [], onElementSelect, onElementChange, onEditStart }) {
   const screenRef = useRef(null);
   const overlayDragRef = useRef(null);
   const inlineEditorRef = useRef(null);
@@ -830,19 +933,22 @@ export function MediaOutputScreen({ media, track, lyrics = null, transform = def
     overlayDragRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
   };
-  const baseMedia = media.type === "text" ? media.baseMedia ?? { type: "image", src: null } : media;
+  const baseMedia = resolveBaseMedia(media);
   const style = !baseMedia.src ? { background: baseMedia.background ?? "#000" } : undefined;
-  const lyricRows = lyrics?.text ? [
+  const lyricRows = lyrics?.text ? (lyrics.visible===false ? [
+    { role:"expired", text:lyrics.text, offset:0 },
+    lyrics.nextText && { role:"following", text:lyrics.nextText, offset:1 },
+  ] : [
     lyrics.previousText && { role:"previous", text:lyrics.previousText, offset:-1 },
     { role:"current", text:lyrics.text, offset:0 },
     lyrics.nextText && { role:"next", text:lyrics.nextText, offset:1 },
     lyrics.followingText && { role:"following", text:lyrics.followingText, offset:2 },
-  ].filter(Boolean) : [];
+  ]).filter(Boolean) : [];
   const lyricFitScale = (text) => Math.max(.5,Math.min(1,27/Math.max(27,[...String(text).replace(/\s+/g," ").trim()].length)));
   return <div ref={screenRef} className={`led-screen ${baseMedia.type === "image" && !baseMedia.src ? "black-output" : ""}`}>
     <div className="led-physical-canvas" style={style}>
     {baseMedia.src&&(isPlayableVideoSource(baseMedia.src)
-      ? <video className={`media-source fit-${transform.fit}`} src={baseMedia.src} autoPlay loop playsInline muted={!allowAudio||baseMedia.muted!==false} draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>
+      ? <video ref={videoRef} className={`media-source fit-${transform.fit}`} src={baseMedia.src} autoPlay loop playsInline muted={!allowAudio||baseMedia.muted!==false} draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>
       : <img className={`media-source fit-${transform.fit}`} src={baseMedia.src} alt="" draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>)}
     {media.type === "text"&&<div className={`led-text-canvas ${editable?"is-editable":""}`} onPointerDown={editable?(event)=>{if(event.target===event.currentTarget)onElementSelect?.(null)}:undefined} onPointerMove={moveElementDrag} onPointerUp={endElementDrag} onPointerCancel={endElementDrag}>
       {editable && !(media.elements ?? []).length && <div className="text-empty-editor-hint"><b>新图文画面</b><small>请从右侧选择预设模板后开始编辑</small></div>}
@@ -992,7 +1098,141 @@ function MediaTransformEditor({ value, onChange }) {
   </div>;
 }
 
-function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitorChange, onSave, dirty, mixerModelId, mixerDriverStatus, mixerControlHost, mixerMeterStatus, onMixerModelChange, onMixerControlHostChange, onOpenMixerDriver, vocalStatus, vocalBusy, onRefreshVocal, onVocalPresetChange, onVocalDisarm, vocalRouting, routingBusy, onDiscoverRouting, onSaveRouting, calibrationStatus, onRunCalibration }) {
+const vocalProfilePrompts = [
+  {id:"low",label:"低音",instruction:"用舒适低音唱“啊—哦—嗯”，保持连贯，不要压嗓"},
+  {id:"mid",label:"中音",instruction:"用中音唱一段熟悉旋律，吐字清楚、音高自然"},
+  {id:"high",label:"高音",instruction:"用安全高音唱“啊—咿—呜”，不要硬顶或喊叫"},
+  {id:"sustain",label:"长音",instruction:"唱 2–3 个 4 至 6 秒长音，保留自然颤音"},
+  {id:"articulation",label:"咬字",instruction:"唱一段节奏稍快的中文歌词，辅音和收尾清楚"},
+  {id:"dynamics",label:"强弱",instruction:"同一句从轻到强，再从强到轻唱两遍"},
+];
+
+const VOCAL_PROFILE_DEVICE_STORAGE_KEY="king.vocalProfile.inputDevice";
+const VOCAL_PROFILE_SONG_STORAGE_KEY="king.vocalProfile.targetSongPath";
+const VOCAL_PROFILE_SELECTED_STORAGE_KEY="king.vocalProfile.selectedId";
+const createDeckReferenceStatus=(state="idle",message="尚未绑定歌手补音参考")=>({state,ready:false,bound:false,message});
+const loadSelectedVocalProfileId=()=>{
+  try{return localStorage.getItem(VOCAL_PROFILE_SELECTED_STORAGE_KEY)||""}catch{return ""}
+};
+const normalizeSongPickerText=value=>String(value??"").trim().toLocaleLowerCase().replace(/\s+/g,"");
+const vocalProfileDeviceScore=(device)=>{
+  const name=String(device?.name||"").toLowerCase();
+  let score=0;
+  if(name.includes("麦克风")||name.includes("microphone")||name.includes("headset"))score+=40;
+  if(name.includes("realtek"))score+=20;
+  if(name.includes("耳麦")||name.includes("headset"))score+=30;
+  if(name.includes("阵列")||name.includes("array"))score-=25;
+  if(name.includes("nahimic")||name.includes("virtual")||name.includes("vad"))score-=80;
+  return score;
+};
+
+function MusicManagementView({ vocalProfiles, vocalProfileDevices, vocalProfileBusy, vocalProfileMessage, songs, selectedProfileId, onSelectedProfileIdChange, onCreateVocalProfile, onRecordVocalProfileSample, onDeleteVocalProfile, onPrepareVocalProfileSong }) {
+  const [profileName,setProfileName]=useState("");
+  const [profileConsent,setProfileConsent]=useState(false);
+  const [profileDevice,setProfileDevice]=useState(()=>{
+    try{return localStorage.getItem(VOCAL_PROFILE_DEVICE_STORAGE_KEY)||""}catch{return ""}
+  });
+  const [profileChannel,setProfileChannel]=useState(0);
+  const [songQuery,setSongQuery]=useState("怎么说我不爱你");
+  const [selectedSongPath,setSelectedSongPath]=useState(()=>{
+    try{return localStorage.getItem(VOCAL_PROFILE_SONG_STORAGE_KEY)||""}catch{return ""}
+  });
+  useEffect(()=>{
+    if(!selectedProfileId&&vocalProfiles[0]?.id)onSelectedProfileIdChange(vocalProfiles[0].id);
+    if(selectedProfileId&&!vocalProfiles.some(profile=>profile.id===selectedProfileId))onSelectedProfileIdChange(vocalProfiles[0]?.id??"");
+  },[vocalProfiles,selectedProfileId,onSelectedProfileIdChange]);
+  useEffect(()=>{
+    if(vocalProfileDevices.length===0)return;
+    if(profileDevice&&vocalProfileDevices.some(device=>device.name===profileDevice))return;
+    let savedDevice="";
+    try{savedDevice=localStorage.getItem(VOCAL_PROFILE_DEVICE_STORAGE_KEY)||""}catch{}
+    const preferred=vocalProfileDevices.find(device=>device.name===savedDevice)
+      ??[...vocalProfileDevices].sort((left,right)=>vocalProfileDeviceScore(right)-vocalProfileDeviceScore(left))[0];
+    if(preferred?.name)setProfileDevice(preferred.name);
+  },[vocalProfileDevices,profileDevice]);
+  useEffect(()=>{
+    if(!profileDevice)return;
+    try{localStorage.setItem(VOCAL_PROFILE_DEVICE_STORAGE_KEY,profileDevice)}catch{}
+    const channels=vocalProfileDevices.find(device=>device.name===profileDevice)?.channels??1;
+    if(profileChannel>=channels)setProfileChannel(0);
+  },[profileDevice,profileChannel,vocalProfileDevices]);
+  useEffect(()=>{
+    if(!songs.length)return;
+    const selectedStillExists=selectedSongPath&&songs.some(song=>song.path===selectedSongPath);
+    if(selectedStillExists)return;
+    let savedPath="";
+    try{savedPath=localStorage.getItem(VOCAL_PROFILE_SONG_STORAGE_KEY)||""}catch{}
+    const saved=songs.find(song=>song.path===savedPath);
+    const requested=songs.find(song=>normalizeSongPickerText(song.title).includes("怎么说我不爱你"));
+    const fallback=saved??requested??null;
+    if(fallback?.path){
+      setSelectedSongPath(fallback.path);
+      setSongQuery(fallback.title||"");
+    }
+  },[songs,selectedSongPath]);
+  useEffect(()=>{
+    if(!selectedSongPath)return;
+    try{localStorage.setItem(VOCAL_PROFILE_SONG_STORAGE_KEY,selectedSongPath)}catch{}
+  },[selectedSongPath]);
+  const selectedProfile=vocalProfiles.find(profile=>profile.id===selectedProfileId)??null;
+  const selectedSong=songs.find(song=>song.path===selectedSongPath)??null;
+  const filteredSongs=useMemo(()=>{
+    const query=normalizeSongPickerText(songQuery);
+    const matches=query
+      ? songs.filter(song=>normalizeSongPickerText(`${song.title} ${song.artist}`).includes(query))
+      : songs;
+    const limited=matches.slice(0,100);
+    if(selectedSong&&!limited.some(song=>song.path===selectedSong.path))return [selectedSong,...limited];
+    return limited;
+  },[songs,songQuery,selectedSong]);
+  return <section className="music-management-view" aria-label="音乐管理">
+    <header className="music-management-header">
+      <div><MusicNotes weight="fill"/><span><b>音乐管理</b><small>歌手包录制与单曲补音制作</small></span></div>
+      <span>歌手只采集一次 · 每首歌离线生成参考轨</span>
+    </header>
+    <section className="vocal-profile-panel" aria-label="歌手音色包">
+      <header>
+        <div><Microphone weight="fill"/><span><b>歌手包 · 一次采集长期复用</b><small>每首歌仍需按歌词和旋律离线生成一次；歌手无需为每首歌重新录音</small></span></div>
+        <strong className={selectedProfile?.state==="samples_ready"?"ready":"collecting"}>{selectedProfile ? (selectedProfile.state==="samples_ready"?"采样已合格":"采集中") : "尚未选择"}</strong>
+      </header>
+      <div className="vocal-profile-create">
+        <label><span>歌手姓名 / 艺名</span><input value={profileName} placeholder="例如：女声 1" onChange={event=>setProfileName(event.target.value)}/></label>
+        <label className="vocal-profile-consent"><input type="checkbox" checked={profileConsent} onChange={event=>setProfileConsent(event.target.checked)}/><span>本人已明确同意采集、生成和本地保存，并可随时删除</span></label>
+        <button type="button" disabled={vocalProfileBusy||!profileName.trim()||!profileConsent} onClick={()=>onCreateVocalProfile(profileName,profileConsent).then(profile=>{if(profile?.id){onSelectedProfileIdChange(profile.id);setProfileName("");setProfileConsent(false)}})}>新建歌手包</button>
+      </div>
+      {vocalProfiles.length>0&&<div className="vocal-profile-selector">
+        <label><span>当前歌手包</span><select value={selectedProfileId} onChange={event=>onSelectedProfileIdChange(event.target.value)}>{vocalProfiles.map(profile=><option value={profile.id} key={profile.id}>{profile.displayName} · {profile.acceptedSampleCount}/{profile.requiredSampleCount}</option>)}</select></label>
+        <label><span>录音设备 · 已保存</span><select value={profileDevice} onChange={event=>setProfileDevice(event.target.value)}>{vocalProfileDevices.map(device=><option value={device.name} key={device.name}>{device.name} · {device.channels}ch / {device.sampleRate}Hz</option>)}</select></label>
+        <label><span>输入声道</span><select value={profileChannel} onChange={event=>setProfileChannel(Number(event.target.value))}>{Array.from({length:Math.max(1,vocalProfileDevices.find(device=>device.name===profileDevice)?.channels??1)},(_,index)=><option value={index} key={index}>通道 {index+1}</option>)}</select></label>
+      </div>}
+      {selectedProfile&&<>
+        <div className="vocal-profile-notice"><b>耳麦录音</b><span>已优先选择 Realtek 耳麦麦克风并记住选择；录音后会自动比较左右输入声道，静音声道不会造成误判。关闭音乐、原唱、伴奏、FX 和混响；每段固定录制 15 秒，总计约 90 秒。</span></div>
+        <div className="vocal-profile-prompts">{vocalProfilePrompts.map(prompt=>{
+          const sample=selectedProfile.samples?.[prompt.id];
+          return <article className={sample?.report?.accepted?"accepted":sample?"rejected":""} key={prompt.id}>
+            <span><b>{prompt.label}</b><small>{prompt.instruction}</small></span>
+            <em>{sample?.report?.accepted?`合格 · 通道 ${Number(sample.report.channel??0)+1} · ${sample.report.rmsDbfs.toFixed(1)} dBFS`:sample?sample.report.message:"未录制"}</em>
+            <button type="button" disabled={vocalProfileBusy||!profileDevice} onClick={()=>onRecordVocalProfileSample(selectedProfile.id,prompt.id,profileDevice,profileChannel)}>{sample?"重录 15 秒":"录制 15 秒"}</button>
+          </article>;
+        })}</div>
+        <div className="vocal-profile-song-picker">
+          <label><span>搜索目标歌曲</span><input type="search" value={songQuery} placeholder="输入歌曲名或歌手，例如：怎么说我不爱你" onChange={event=>setSongQuery(event.target.value)}/></label>
+          <label><span>明确选择歌曲 · 不跟随 Deck</span><select value={selectedSongPath} onChange={event=>setSelectedSongPath(event.target.value)}><option value="" disabled>请选择歌曲</option>{filteredSongs.map(song=><option value={song.path} key={song.path}>{song.title} · {song.artist||"--"}</option>)}</select></label>
+          <small>{filteredSongs.length}{songs.length>100?" / "+songs.length:""} 首匹配；歌手原始母样永久复用，换歌无需重新录音</small>
+        </div>
+        <div className="vocal-profile-generate">
+          <span><b>{selectedSong?.title||"尚未选择歌曲"}</b><small>{selectedSong?`目标歌曲已锁定 · ${selectedSong.artist||"--"} · 不会随当前播放歌曲改变`:"请先搜索并选择要制作补音的歌曲"}</small></span>
+          <button type="button" disabled={vocalProfileBusy||selectedProfile.state!=="samples_ready"||!selectedSong?.path} onClick={()=>onPrepareVocalProfileSong(selectedProfile.id,selectedSong.path)}>为所选歌曲生成女声补音</button>
+          <button type="button" className="danger" disabled={vocalProfileBusy} onClick={()=>{if(window.confirm(`删除歌手包“${selectedProfile.displayName}”及全部录音？`))onDeleteVocalProfile(selectedProfile.id)}}>删除歌手包</button>
+        </div>
+        {selectedProfile.generatorState!=="ready"&&<p className="vocal-generator-warning">歌手采样可以先完成；本机歌声生成模型尚未安装时，只保存生成请求，不会用男原唱冒充女声。</p>}
+      </>}
+      <footer className={vocalProfileMessage?.state??"idle"}>{vocalProfileBusy?"正在录制或处理，请保持安静…":vocalProfileMessage?.message||"尚未建立歌手包"}</footer>
+    </section>
+  </section>;
+}
+
+function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitorChange, onSave, dirty, mixerModelId, mixerDriverStatus, mixerControlHost, mixerMeterStatus, onMixerModelChange, onMixerControlHostChange, onOpenMixerDriver, titanHost, titanStatus, titanPlaybacks, titanMappings, titanActionStatus, lightingPackageStatus, onTitanHostChange, onRefreshTitan, onTitanMappingChange, onExportLightingPackage, onImportLightingPackage, onOpenLightingPackageDirectory, vocalStatus, vocalBusy, onRefreshVocal, onVocalPresetChange, onVocalDisarm, vocalRouting, routingBusy, onDiscoverRouting, onSaveRouting, calibrationStatus, onRunCalibration }) {
   const failoverView=describeVocalFailover(vocalStatus.failover);
   return <section className="settings-view" aria-label="屏幕与监控设置">
     <header className="settings-header">
@@ -1005,6 +1245,22 @@ function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitor
       <label className="settings-mixer-host"><span>以太网控制台 IP / 主机名</span><input value={mixerControlHost} placeholder="例如 192.168.1.60" spellCheck="false" onChange={event=>onMixerControlHostChange(event.target.value)}/></label>
       <div className="settings-mixer-states"><div className={`settings-driver-state ${mixerDriverStatus.state}`}><b>{mixerDriverStatus.title}</b><small>{mixerDriverStatus.message}</small></div><div className={`settings-meter-state ${mixerMeterStatus.state}`}><b>{mixerMeterStatus.title}</b><small>{mixerMeterStatus.message}</small></div></div>
       <button type="button" className="settings-driver-action" onClick={onOpenMixerDriver}>安装驱动 / EULA</button>
+    </section>
+    <section className="settings-lighting-console" aria-label="Avolites Titan 灯光控制台设置">
+      <div className="settings-lighting-identity"><LightbulbFilament weight="fill"/><span><b>Avolites Titan 控制台</b><small>以太网 WebAPI · 真机保留 DMX 权威 · KING 仅读取并映射已编程 Playback</small></span></div>
+      <label><span>控制台 IP / 主机名</span><input value={titanHost} placeholder="例如 192.168.1.154" spellCheck="false" onChange={event=>onTitanHostChange(event.target.value)}/></label>
+      <div className={`settings-titan-state ${titanStatus.connected?"live":"offline"}`}><i/><span><b>{titanStatus.connected?`${titanStatus.deviceName} · LIVE`:titanStatus.environmentMode==="identity-mismatch"?"非绑定 Titan 控制台":"离线模拟模式"}</b><small>{titanStatus.connected?`Titan ${titanStatus.softwareVersion} · Show ${titanStatus.showName} · ${titanPlaybacks.length} 个 Playback/Cue`:titanStatus.message}</small></span></div>
+      <button type="button" className="settings-titan-refresh" onClick={onRefreshTitan}><ArrowsClockwise/>刷新连接</button>
+      <div className="settings-titan-mapping">
+        <header><b>0–9 效果映射</b><small>只绑定 Titan 当前 Show 已编程的 Cue / Chase / Cue List；选择不会立即触发灯光</small></header>
+        <div className="settings-titan-mapping-grid">{lights.map((preset)=><label key={preset.id}><span><b>{preset.id}</b><small>{preset.label||"待命名效果"}</small></span><select value={titanMappings[preset.id]??""} disabled={!titanStatus.connected} onChange={(event)=>onTitanMappingChange(preset.id,event.target.value)}><option value="">未绑定</option>{titanPlaybacks.map((playback)=><option value={playback.titanId} key={playback.titanId}>{titanPlaybackLabel(playback)}</option>)}</select></label>)}</div>
+        <footer className={titanActionStatus.state}>{titanActionStatus.message}</footer>
+      </div>
+      <div className="settings-titan-package">
+        <header><b>.kinglight 配置包</b><small>保存 Show 身份、Playback 映射、语义元数据和自动规则；导入永不触发灯光</small></header>
+        <div><button type="button" onClick={onExportLightingPackage}>导出配置包</button><button type="button" onClick={()=>onOpenLightingPackageDirectory("inbox")}>打开收件箱</button><button type="button" onClick={onImportLightingPackage}>导入收件箱</button><button type="button" onClick={()=>onOpenLightingPackageDirectory("outbox")}>打开导出目录</button></div>
+        <footer className={lightingPackageStatus.state}>{lightingPackageStatus.message}</footer>
+      </div>
     </section>
     <section className="settings-vocal-engine" aria-label="AI 人声补音设置">
       <div className="settings-vocal-heading">
@@ -1093,6 +1349,7 @@ export function App() {
   const lightPanelRef = useRef(null);
   const [library, setLibrary] = useState(1);
   const [playlist, setPlaylist] = useState("周六");
+  const [songSearch, setSongSearch] = useState("");
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [deck1, setDeck1] = useState(0);
   const [deck2, setDeck2] = useState(1);
@@ -1102,11 +1359,28 @@ export function App() {
   const [crossfade, setCrossfade] = useState(28);
   const [masterVolume, setMasterVolume] = useState(()=>loadMixerNumber("king.mixer.master",100));
   const [headphoneVolume, setHeadphoneVolume] = useState(()=>loadMixerNumber("king.mixer.headphones",70));
-  const [microphoneVolumes, setMicrophoneVolumes] = useState(loadMicrophoneVolumes);
+  const [microphoneVolumes, setMicrophoneVolumes] = useState([null,null]);
   const [faderInteractionActive, setFaderInteractionActive] = useState(false);
+  const [vocalStatus,setVocalStatus]=useState(()=>createOfflineVocalStatus(desktopRuntime?"等待读取独立 Vocal Engine":"浏览器预览；未连接独立 Vocal Engine"));
   const [deckPlaybackModes, setDeckPlaybackModes] = useState({ 1: "sequence", 2: "sequence" });
   const [deckLyricsEnabled, setDeckLyricsEnabled] = useState({ 1: true, 2: true });
   const [deckVocalModes, setDeckVocalModes] = useState({ 1: "original", 2: "original" });
+  const [deckAiRescueEnabled, setDeckAiRescueEnabled] = useState({ 1: true, 2: true });
+  const [selectedVocalProfileId,setSelectedVocalProfileId]=useState(loadSelectedVocalProfileId);
+  const [deckReferenceStatus,setDeckReferenceStatus]=useState({
+    1:createDeckReferenceStatus(),
+    2:createDeckReferenceStatus(),
+  });
+  const [vocalReferenceRevision,setVocalReferenceRevision]=useState(0);
+  const vocalReferenceResolutionRef=useRef(0);
+  const vocalReferenceBindKeyRef=useRef("");
+  const vocalReferenceBindingGenerationRef=useRef(0);
+  const initialDeckCueRecoveryRef=useRef(undefined);
+  if(initialDeckCueRecoveryRef.current===undefined)initialDeckCueRecoveryRef.current=loadDeckCueRecovery();
+  const [deckCue, setDeckCue] = useState(()=>initialDeckCueRecoveryRef.current
+    ? {deck:initialDeckCueRecoveryRef.current.deck,busy:false,message:`检测到上次异常退出时 Deck ${initialDeckCueRecoveryRef.current.deck} 的 CUE；关闭后恢复原主扩电平`}
+    : {deck:null,busy:false,message:"连接 Qu-16 后可用耳机 CUE"});
+  const deckCueMainFaderRef=useRef(initialDeckCueRecoveryRef.current?.mainFader??null);
   const [video, setVideo] = useState(0);
   const [videoAssets, setVideoAssets] = useState([]);
   const [audioAssets, setAudioAssets] = useState([]);
@@ -1123,6 +1397,7 @@ export function App() {
   const [runtimeCapability, setRuntimeCapability] = useState({ mode:desktopRuntime?"detecting":"player", hasNvidia:false, aiProcessingAvailable:false, message:desktopRuntime?"正在识别硬件":"浏览器播放版" });
   const [audioAiJobs, setAudioAiJobs] = useState([]);
   const [audioAiWorker, setAudioAiWorker] = useState({ running:false, message:"" });
+  const [manualAiPendingPaths, setManualAiPendingPaths] = useState([]);
   const [songPackageDirectories, setSongPackageDirectories] = useState({ inboxDirectory:"", outboxDirectory:"" });
   const [songPackageMessage, setSongPackageMessage] = useState("");
   const [mpvRuntime, setMpvRuntime] = useState({ available:false, checked:!desktopRuntime, version:null, message:desktopRuntime?"正在检测 mpv":"浏览器原型模式" });
@@ -1138,18 +1413,17 @@ export function App() {
   if (!mpvVolumeWriterRef.current) mpvVolumeWriterRef.current = createMpvVolumeWriter();
   const mpvEnabled = desktopRuntime && mpvRuntime.available;
   const writeDeckOutputVolumes = useCallback((nextCrossfade,nextMasterVolume) => {
-    const { deck1:deckOneGain, deck2:deckTwoGain } = equalPowerGains(nextCrossfade);
-    const masterGain = clamp(Number(nextMasterVolume) / 100,0,1);
+    const { deck1Gain:deckOneGain,deck2Gain:deckTwoGain,outputVolume } = deckCueMix(nextCrossfade,nextMasterVolume,headphoneVolume,deckCue.deck);
     if (mpvEnabled) {
       const batch = [];
-      if (mpvLoadedPathsRef.current[1]) batch.push({deck:1,volume:deckOneGain*masterGain*100});
-      if (mpvLoadedPathsRef.current[2]) batch.push({deck:2,volume:deckTwoGain*masterGain*100});
+      if (mpvLoadedPathsRef.current[1]) batch.push({deck:1,volume:deckOutputVolumePercent(deckOneGain,outputVolume,deckVocalModes[1])});
+      if (mpvLoadedPathsRef.current[2]) batch.push({deck:2,volume:deckOutputVolumePercent(deckTwoGain,outputVolume,deckVocalModes[2])});
       if (batch.length) mpvVolumeWriterRef.current.enqueue(batch);
       return;
     }
-    if (deckOneAudioRef.current) deckOneAudioRef.current.volume = deckOneGain*masterGain;
-    if (deckTwoAudioRef.current) deckTwoAudioRef.current.volume = deckTwoGain*masterGain;
-  },[mpvEnabled]);
+    if (deckOneAudioRef.current) deckOneAudioRef.current.volume = deckOutputVolumeScalar(deckOneGain,outputVolume,deckVocalModes[1]);
+    if (deckTwoAudioRef.current) deckTwoAudioRef.current.volume = deckOutputVolumeScalar(deckTwoGain,outputVolume,deckVocalModes[2]);
+  },[deckCue.deck,deckVocalModes,headphoneVolume,mpvEnabled]);
   const beginFaderInteraction = useCallback(() => {
     setFaderInteractionActive(true);
   },[]);
@@ -1157,7 +1431,7 @@ export function App() {
   const tracks = useMemo(() => audioAssets.length ? audioAssets.map((item)=>({
     id:item.id,
     title:item.title || item.name,
-    artist:item.artist || "未知歌手",
+    artist:item.artist?.trim() || "--",
     duration:formatDuration(item.durationSeconds ?? 0),
     bpm:"—",
     tag:item.album || item.category || "本地音乐",
@@ -1171,14 +1445,82 @@ export function App() {
     vocalsPath:item.vocalsPath ?? null,
     accompanimentPath:item.accompanimentPath ?? null,
   })) : demoTracks.map((item)=>({...item,demo:true,tag:`演示 · ${item.tag}`})), [audioAssets]);
+  useEffect(() => {
+    if (!desktopRuntime) return;
+    const deck = selectDominantDeck(playingDecks,crossfade) ?? (crossfade < 50 ? 1 : 2);
+    invoke("vocal_sync_playback",{
+      deck,
+      seconds:Math.max(0,Number(deckProgress[deck])||0),
+      playing:Boolean(playingDecks[deck]),
+    }).catch((error)=>console.debug("Vocal Engine 播放时钟等待中",error));
+  },[desktopRuntime,crossfade,deckProgress,playingDecks]);
+  useEffect(() => {
+    if (!desktopRuntime) return;
+    const deck = selectDominantDeck(playingDecks,crossfade) ?? (crossfade < 50 ? 1 : 2);
+    const enabled = deckVocalModes[deck] === "accompaniment"
+      && Boolean(deckAiRescueEnabled[deck])
+      && Boolean(deckReferenceStatus[deck]?.bound);
+    invoke("vocal_set_rescue_enabled",{enabled})
+      .catch((error)=>console.debug("Vocal Engine 补音开关等待中",error));
+  },[desktopRuntime,crossfade,deckAiRescueEnabled,deckReferenceStatus,deckVocalModes,playingDecks]);
+  useEffect(() => {
+    if (!desktopRuntime || !mpvEnabled) return;
+    const plans=deckRescuePreviewPlans({
+      crossfade,
+      masterVolume,
+      headphoneVolume,
+      cueDeck:deckCue.deck,
+      playingDecks,
+      vocalModes:deckVocalModes,
+      rescueEnabled:deckAiRescueEnabled,
+      referenceStatus:deckReferenceStatus,
+      physicalAudioStarted:vocalStatus.physicalAudioStarted,
+    });
+    for(const plan of plans){
+      invoke("mpv_rescue_preview_sync",{
+        ...plan,
+        seconds:Math.max(0,Number(deckProgress[plan.deck])||0),
+      }).catch((error)=>console.error(`Deck ${plan.deck} 本地补音试听同步失败`,error));
+    }
+  },[
+    crossfade,
+    deckAiRescueEnabled,
+    deckCue.deck,
+    deckProgress,
+    deckReferenceStatus,
+    deckVocalModes,
+    desktopRuntime,
+    headphoneVolume,
+    masterVolume,
+    mpvEnabled,
+    playingDecks,
+    vocalStatus.physicalAudioStarted,
+  ]);
+  useEffect(()=>()=>{
+    if(!desktopRuntime||!mpvEnabled)return;
+    for(const deck of [1,2]){
+      invoke("mpv_rescue_preview_sync",{
+        deck,
+        path:".",
+        seconds:0,
+        playing:false,
+        enabled:false,
+        volume:0,
+      }).catch(()=>{});
+    }
+  },[desktopRuntime,mpvEnabled]);
   const normalizeMediaPath = (value) => {
     const path = String(value ?? "");
     return (path.startsWith("\\\\?\\") ? path.slice(4) : path).toLowerCase();
   };
-  const audioAiJobByPath = useMemo(
-    () => new Map(audioAiJobs.map((job)=>[normalizeMediaPath(job.mediaPath),job])),
-    [audioAiJobs],
-  );
+  const audioAiJobByPath = useMemo(() => {
+    const newestJobByPath = new Map();
+    for (const job of audioAiJobs) {
+      const path = normalizeMediaPath(job.mediaPath);
+      if (path && !newestJobByPath.has(path)) newestJobByPath.set(path,job);
+    }
+    return newestJobByPath;
+  },[audioAiJobs]);
   const deckLyricsLines = useMemo(() => ({
     1:parseLrc(tracks[deck1]?.lyrics),
     2:parseLrc(tracks[deck2]?.lyrics),
@@ -1189,9 +1531,10 @@ export function App() {
     availableDecks:{ 1:deckLyricsLines[1].length>0, 2:deckLyricsLines[2].length>0 },
     crossfade,
   });
-  const activeLyricIndex = lyricsDeck
-    ? (lyricAtTime(deckLyricsLines[lyricsDeck],deckProgress[lyricsDeck])?.index ?? -1)
-    : -1;
+  const activeLyric = lyricsDeck
+    ? lyricAtTime(deckLyricsLines[lyricsDeck],deckProgress[lyricsDeck])
+    : null;
+  const activeLyricIndex = activeLyric?.index ?? -1;
   const activeLyrics = useMemo(() => {
     if (!lyricsDeck||activeLyricIndex<0) return null;
     const lines=deckLyricsLines[lyricsDeck];
@@ -1199,12 +1542,13 @@ export function App() {
       deck:lyricsDeck,
       trackId:tracks[lyricsDeck===1?deck1:deck2]?.id ?? null,
       index:activeLyricIndex,
+      visible:activeLyric?.visible!==false,
       previousText:lines[activeLyricIndex-1]?.text ?? "",
       text:lines[activeLyricIndex].text,
       nextText:lines[activeLyricIndex+1]?.text ?? "",
       followingText:lines[activeLyricIndex+2]?.text ?? "",
     };
-  },[lyricsDeck,activeLyricIndex,deckLyricsLines,tracks,deck1,deck2]);
+  },[lyricsDeck,activeLyricIndex,activeLyric?.visible,deckLyricsLines,tracks,deck1,deck2]);
   const audioAnalysisFingerprint = useMemo(
     () => audioAssets.map((item)=>audioAnalysisKey(item)).filter(Boolean).join("\n"),
     [audioAssets],
@@ -1226,7 +1570,7 @@ export function App() {
     const loadedDeckPaths=[tracks[deck1]?.path,tracks[deck2]?.path].filter(Boolean);
     const playingPaths=[playingDecks[1]?tracks[deck1]?.path:null,playingDecks[2]?tracks[deck2]?.path:null].filter(Boolean);
     invoke("set_audio_ai_scheduler",{playingPaths,deckPaths:[...new Set(loadedDeckPaths)]})
-      .then(setAudioAiWorker)
+      .then((worker)=>setAudioAiWorker((current)=>JSON.stringify(current)===JSON.stringify(worker)?current:worker))
       .catch((error)=>console.error("更新 AI 三级调度失败",error));
   },[runtimeCapability.aiProcessingAvailable,playingDecks[1],playingDecks[2],tracks,deck1,deck2]);
   useEffect(() => {
@@ -1235,8 +1579,9 @@ export function App() {
     const refresh = () => Promise.all([invoke("list_audio_ai_jobs"),invoke("audio_ai_worker_status")])
       .then(([jobs,worker])=>{
         if (disposed) return;
-        setAudioAiJobs(Array.isArray(jobs)?jobs:[]);
-        setAudioAiWorker(worker);
+        const nextJobs=Array.isArray(jobs)?jobs:[];
+        setAudioAiJobs((current)=>JSON.stringify(current)===JSON.stringify(nextJobs)?current:nextJobs);
+        setAudioAiWorker((current)=>JSON.stringify(current)===JSON.stringify(worker)?current:worker);
       })
       .catch((error)=>console.error("读取 AI 制作队列失败",error));
     refresh();
@@ -1259,8 +1604,10 @@ export function App() {
     .then(async (library)=>{
       await registerCustomFonts(library?.customFonts);
       applyPreferredLyricsFont(library);
-      setSystemFonts(mergeFontFamilies(library,fallbackFontFamilies));
-      setFontLibraryDirectory(library?.directory??"");
+      const nextFonts=mergeFontFamilies(library,fallbackFontFamilies);
+      setSystemFonts(current=>current.length===nextFonts.length&&current.every((font,index)=>font===nextFonts[index])?current:nextFonts);
+      const nextDirectory=library?.directory??"";
+      setFontLibraryDirectory(current=>current===nextDirectory?current:nextDirectory);
       setCustomFontCount(library?.customFonts?.length??0);
       return library;
     });
@@ -1294,6 +1641,29 @@ export function App() {
   const [videoRhythmRule, setVideoRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.video","off"));
   const automationVideoIndexRef = useRef(-1);
   const [lightingEnabled, setLightingEnabled] = useState(true);
+  const [titanHost,setTitanHost]=useState(()=>window.localStorage.getItem("king.lighting.titanHost")||"192.168.1.154");
+  const [titanStatus,setTitanStatus]=useState({connected:false,environmentMode:"detecting",host:"",port:4430,deviceName:"Avolites Titan",softwareVersion:"--",showName:"--",message:"正在识别酒吧灯光控制台"});
+  const [titanInventory,setTitanInventory]=useState({state:"idle",authoritative:false,fixtureCount:0,groupCount:0,playbackCount:0,fixtures:[],groups:[],liveShowName:"",cachedShowName:"",blockedReason:"尚未读取真机 Patch"});
+  const [titanPlaybacks,setTitanPlaybacks]=useState([]);
+  const [titanStaticPlaybacks,setTitanStaticPlaybacks]=useState([]);
+  const [titanMappings,setTitanMappings]=useState(loadTitanMappings);
+  const [titanEffectRegistry,setTitanEffectRegistry]=useState(loadTitanEffectRegistry);
+  const [titanMappingShowName,setTitanMappingShowName]=useState(()=>window.localStorage.getItem("king.lighting.mappingShowName")||"");
+  const [titanActionStatus,setTitanActionStatus]=useState({state:"idle",message:"尚未由 KING 触发 Titan Playback"});
+  const [lightingPackageStatus,setLightingPackageStatus]=useState({state:"idle",message:"可导出当前灯光配置，或从收件箱导入"});
+  const [lightingPackageDirectories,setLightingPackageDirectories]=useState({inboxDirectory:"",outboxDirectory:""});
+  const [titanSimulation,setTitanSimulation]=useState(createTitanSimulatorState);
+  const titanPollGenerationRef=useRef(0);
+  const titanStatusProbeRef=useRef(null);
+  const titanActiveHandleRef=useRef({scene:null,accent:null});
+  const titanSimulationRef=useRef(titanSimulation);
+  const titanCommandQueueRef=useRef(Promise.resolve());
+  const titanVideoMediaRef=useRef(null);
+  const titanAutomationRef=useRef(createLightingAutomationState());
+  const outputVideoElementRef=useRef(null);
+  const videoColorCanvasRef=useRef(null);
+  const videoColorSamplingErrorRef=useRef(null);
+  const videoColorAutomationRef=useRef({family:null,stableSamples:0});
   const [lightPlaybackModes, setLightPlaybackModes] = useState(() => Object.fromEntries(lights.filter((item) => item.label).map((item) => [item.id, item.loop ? "loop" : "once"])));
   const [fixtureColorEditor, setFixtureColorEditor] = useState(null);
   const [fixtureColors, setFixtureColors] = useState(() => Object.fromEntries(fixtureControls.map((fixture) => [fixture.id, fixture.color])));
@@ -1306,13 +1676,16 @@ export function App() {
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [mixerModelId, setMixerModelId] = useState(()=>window.localStorage.getItem("king.mixer.model")||defaultMixerModelId);
   const [mixerDriverStatus, setMixerDriverStatus] = useState({state:"checking",title:"正在检测驱动",message:"Windows 桌面端会核对当前型号的驱动状态"});
-  const [mixerControlHost,setMixerControlHost]=useState(()=>window.localStorage.getItem("king.mixer.controlHost")||"");
-  const [mixerMeterSnapshot,setMixerMeterSnapshot]=useState(null);
+  const [mixerControlHost,setMixerControlHost]=useState(()=>window.localStorage.getItem("king.mixer.controlHost")||"192.168.1.60");
   const [mixerMeterStatus,setMixerMeterStatus]=useState({state:"disconnected",title:"真机表计未连接",message:"在设置中填写 Qu-16 的以太网 IP"});
   const [mixerParameterSnapshot,setMixerParameterSnapshot]=useState(null);
+  const mixerParameterSnapshotRef=useRef(null);
   const [mixerControlStatus,setMixerControlStatus]=useState({mode:"local-ui-only",state:"offline",title:"本地控制",message:"离线数字孪生模式"});
-  const [vocalStatus,setVocalStatus]=useState(()=>createOfflineVocalStatus(desktopRuntime?"等待读取独立 Vocal Engine":"浏览器预览；未连接独立 Vocal Engine"));
   const [vocalBusy,setVocalBusy]=useState(false);
+  const [vocalProfiles,setVocalProfiles]=useState([]);
+  const [vocalProfileDevices,setVocalProfileDevices]=useState([]);
+  const [vocalProfileBusy,setVocalProfileBusy]=useState(false);
+  const [vocalProfileMessage,setVocalProfileMessage]=useState({state:"idle",message:"请选择或新建歌手包"});
   const [vocalRouting,setVocalRouting]=useState(()=>createOfflineRoutingStatus(desktopRuntime?"等待读取已保存映射":"浏览器预览；可执行离线演练"));
   const [routingBusy,setRoutingBusy]=useState(false);
   const [calibrationStatus,setCalibrationStatus]=useState(()=>createCalibrationStatus());
@@ -1320,10 +1693,14 @@ export function App() {
   const qu16ControlSessionRef=useRef({generation:0,host:"",sessionId:null,revision:-1,live:false});
   const qu16ParameterFrameApplyRef=useRef(null);
   const qu16BrowserParameterFrameRef=useRef({host:null,sessionId:null,revision:-1});
+  const homeMicrophoneWritesRef=useRef(new Map());
+  const homeMicrophoneFlushTimerRef=useRef(null);
+  const homeMicrophoneWriterRef=useRef(null);
+  const homeMicrophoneControlModeRef=useRef("local-ui-only");
   const [activeNav, setActiveNav] = useState("首页");
-  const [now, setNow] = useState(() => new Date());
   const effectiveLight = light === null ? autoLightPreset : light;
   const activeMixerModel = mixerModelById(mixerModelId);
+  const microphoneBindings = useMemo(()=>homeMicrophoneBindings(activeMixerModel),[activeMixerModel]);
   const refreshVocalStatus=useCallback(async()=>{
     if(!desktopRuntime){
       setVocalStatus(current=>normalizeVocalResponse(createOfflineVocalStatus(),current));
@@ -1348,12 +1725,348 @@ export function App() {
       setVocalRouting(current=>({...current,hardwareReady:false,message:`通道映射读取失败：${String(error)}`}));
     }
   },[desktopRuntime]);
+  const refreshVocalProfiles=useCallback(async()=>{
+    if(!desktopRuntime){
+      setVocalProfileMessage({state:"error",message:"歌手包录制仅在桌面版中可用"});
+      return;
+    }
+    try{
+      const [profiles,devices]=await Promise.all([
+        invoke("list_vocal_profiles"),
+        invoke("vocal_profile_input_devices"),
+      ]);
+      setVocalProfiles(Array.isArray(profiles)?profiles:[]);
+      setVocalProfileDevices(Array.isArray(devices)?devices:[]);
+      setVocalProfileMessage(current=>current.state==="error"?{state:"idle",message:"请选择或新建歌手包"}:current);
+    }catch(error){
+      setVocalProfileMessage({state:"error",message:`读取歌手包失败：${String(error)}`});
+    }
+  },[desktopRuntime]);
+  const selectVocalProfile=useCallback((profileId)=>{
+    const next=String(profileId||"");
+    setSelectedVocalProfileId(next);
+    try{
+      if(next)localStorage.setItem(VOCAL_PROFILE_SELECTED_STORAGE_KEY,next);
+      else localStorage.removeItem(VOCAL_PROFILE_SELECTED_STORAGE_KEY);
+    }catch{}
+  },[]);
+  useEffect(()=>{
+    if(!desktopRuntime)return;
+    refreshVocalProfiles();
+  },[desktopRuntime,refreshVocalProfiles]);
+  useEffect(()=>{
+    if(vocalProfiles.length===0)return;
+    if(!selectedVocalProfileId||!vocalProfiles.some(profile=>profile.id===selectedVocalProfileId)){
+      selectVocalProfile(vocalProfiles[0].id);
+    }
+  },[selectedVocalProfileId,selectVocalProfile,vocalProfiles]);
+  useEffect(()=>{
+    const generation=++vocalReferenceResolutionRef.current;
+    const deckTracks={1:tracks[deck1],2:tracks[deck2]};
+    if(!desktopRuntime||!selectedVocalProfileId){
+      const message=desktopRuntime?"请先在音乐管理选择歌手包":"歌手补音绑定仅在桌面版中可用";
+      setDeckReferenceStatus({1:createDeckReferenceStatus("idle",message),2:createDeckReferenceStatus("idle",message)});
+      return;
+    }
+    for(const deck of [1,2]){
+      const track=deckTracks[deck];
+      if(!track?.path){
+        setDeckReferenceStatus(current=>({...current,[deck]:createDeckReferenceStatus("idle","Deck 尚未装入本地歌曲")}));
+        continue;
+      }
+      setDeckReferenceStatus(current=>({...current,[deck]:createDeckReferenceStatus("checking",`正在检查 ${track.title} 的歌手补音参考`)}));
+      invoke("resolve_vocal_profile_song_reference",{profileId:selectedVocalProfileId,mediaPath:track.path})
+        .then(report=>{
+          if(vocalReferenceResolutionRef.current!==generation)return;
+          setDeckReferenceStatus(current=>({...current,[deck]:{...report,bound:false}}));
+        })
+        .catch(error=>{
+          if(vocalReferenceResolutionRef.current!==generation)return;
+          setDeckReferenceStatus(current=>({...current,[deck]:createDeckReferenceStatus("missing",`补音参考检查失败：${String(error)}`)}));
+        });
+    }
+  },[deck1,deck2,desktopRuntime,selectedVocalProfileId,tracks,vocalReferenceRevision]);
+  useEffect(()=>{
+    const pendingStates=new Set(["queued","preparing_reference","converting_voice","encoding"]);
+    if(!pendingStates.has(deckReferenceStatus[1]?.state)&&!pendingStates.has(deckReferenceStatus[2]?.state))return;
+    const timer=window.setTimeout(()=>setVocalReferenceRevision(current=>current+1),3000);
+    return ()=>window.clearTimeout(timer);
+  },[deckReferenceStatus]);
+  useEffect(()=>{
+    const deck=selectDominantDeck(playingDecks,crossfade)??(crossfade<50?1:2);
+    const status=deckReferenceStatus[deck];
+    const shouldBind=desktopRuntime
+      && deckVocalModes[deck]==="accompaniment"
+      && Boolean(deckAiRescueEnabled[deck])
+      && Boolean(status?.ready);
+    if(!shouldBind){
+      if(vocalReferenceBindKeyRef.current){
+        vocalReferenceBindKeyRef.current="";
+        const generation=++vocalReferenceBindingGenerationRef.current;
+        invoke("vocal_unbind_reference")
+          .then(()=>{
+            if(vocalReferenceBindingGenerationRef.current!==generation)return;
+            setDeckReferenceStatus(current=>({
+              1:{...current[1],bound:false},
+              2:{...current[2],bound:false},
+            }));
+          })
+          .catch((error)=>console.debug("解除 Vocal Engine 补音参考等待中",error));
+      }
+      return;
+    }
+    const bindingKey=[deck,status.profileId,status.mediaPath,status.referencePath,status.referenceVocalPath].join("|");
+    if(status.bound||vocalReferenceBindKeyRef.current===bindingKey)return;
+    vocalReferenceBindKeyRef.current=bindingKey;
+    const generation=++vocalReferenceBindingGenerationRef.current;
+    setDeckReferenceStatus(current=>({...current,[deck]:{...current[deck],state:"binding",bound:false,message:`正在把 ${status.displayName} 的女声参考绑定到 Deck ${deck}`}}));
+    invoke("vocal_bind_reference",{request:{
+      profileId:status.profileId,
+      displayName:status.displayName,
+      mediaPath:status.mediaPath,
+      referencePath:status.referencePath,
+      referenceVocalPath:status.referenceVocalPath,
+    }}).then(response=>{
+      if(vocalReferenceBindingGenerationRef.current!==generation)return;
+      setDeckReferenceStatus(current=>({
+        1:deck===1?{...current[1],state:"ready",ready:true,bound:true,message:response.message||"Deck 1 补音参考已绑定；现场路由未启动"}:{...current[1],bound:false},
+        2:deck===2?{...current[2],state:"ready",ready:true,bound:true,message:response.message||"Deck 2 补音参考已绑定；现场路由未启动"}:{...current[2],bound:false},
+      }));
+    }).catch(error=>{
+      if(vocalReferenceBindingGenerationRef.current!==generation)return;
+      setDeckReferenceStatus(current=>({...current,[deck]:{...current[deck],state:"binding-error",ready:true,bound:false,message:`Deck ${deck} 补音绑定失败：${String(error)}`}}));
+    });
+  },[crossfade,deckAiRescueEnabled,deckReferenceStatus,deckVocalModes,desktopRuntime,playingDecks]);
   useEffect(()=>{
     if(activeNav==="设置"){
       refreshVocalStatus();
       refreshVocalRouting();
     }
   },[activeNav,refreshVocalStatus,refreshVocalRouting]);
+  const refreshTitanStatus=useCallback(()=>{
+    if(titanStatusProbeRef.current)return titanStatusProbeRef.current;
+    const probe=(async()=>{
+    const host=titanHost.trim();
+    if(!desktopRuntime||!host){
+      const message=host?"桌面端启动后连接 Titan":"请填写 Titan 控制台 IP";
+      setTitanStatus(current=>current.connected===false&&current.host===host&&current.message===message?current:{...current,connected:false,environmentMode:"offline",host,message});
+      setTitanPlaybacks(current=>current.length?[]:current);
+      setTitanStaticPlaybacks(current=>current.length?[]:current);
+      return false;
+    }
+    try{
+      const status=await invoke("titan_status",{host});
+      const identity=titanIdentityFromStatus(status);
+      const storedIdentity=loadTitanIdentity();
+      const expected=storedIdentity||SITE_TITAN_IDENTITY;
+      if(!titanIdentityMatches(expected,identity)){
+        const expectedName=expected?.deviceName||expected?.hardwareIdentifier||`序列号 ${expected?.serial}`;
+        const actualName=identity.deviceName||identity.hardwareIdentifier||`序列号 ${identity.serial}`;
+        const message=`检测到 ${actualName}，但不是已绑定的酒吧控制台 ${expectedName}；已保持离线模拟`;
+        setTitanStatus(current=>({...current,...status,connected:false,environmentMode:"identity-mismatch",host,message}));
+        setTitanPlaybacks(current=>current.length?[]:current);
+        setTitanStaticPlaybacks(current=>current.length?[]:current);
+        return false;
+      }
+      if(!storedIdentity)window.localStorage.setItem("king.lighting.titanIdentity",JSON.stringify(identity));
+      const liveStatus={...status,connected:true,environmentMode:"live",message:`已识别酒吧控制台 · ${status.message}`};
+      setTitanStatus(current=>JSON.stringify(current)===JSON.stringify(liveStatus)?current:liveStatus);
+      window.localStorage.setItem("king.lighting.titanHost",host);
+      return true;
+    }catch(error){
+      console.info("当前网络未识别到酒吧 Titan 控制台",error);
+      const message="当前未识别到酒吧 Titan 控制台；已进入离线模拟，20 秒后自动重试";
+      setTitanStatus(current=>current.connected===false&&current.host===host&&current.message===message?current:{...current,connected:false,environmentMode:"offline",host,message});
+      setTitanPlaybacks(current=>current.length?[]:current);
+      setTitanStaticPlaybacks(current=>current.length?[]:current);
+      return false;
+    }
+    })();
+    titanStatusProbeRef.current=probe;
+    return probe.finally(()=>{if(titanStatusProbeRef.current===probe)titanStatusProbeRef.current=null;});
+  },[desktopRuntime,titanHost]);
+  const refreshTitanInventory=useCallback(async()=>{
+    const host=titanHost.trim();
+    if(!desktopRuntime||!host){
+      setTitanInventory({state:"offline",authoritative:false,fixtureCount:0,groupCount:0,playbackCount:0,fixtures:[],groups:[],liveShowName:"",cachedShowName:"",blockedReason:host?"桌面端启动后读取真机 Patch":"请先配置 Titan 控制台 IP"});
+      return null;
+    }
+    setTitanInventory(current=>({...current,state:"scanning",blockedReason:"正在只读扫描 Titan Show / Patch…"}));
+    try{
+      const inventory=await invoke("titan_inventory",{host});
+      const next={...inventory,state:inventory?.authoritative?"ready":"blocked"};
+      setTitanInventory(next);
+      return next;
+    }catch(error){
+      const next={state:"error",authoritative:false,fixtureCount:0,groupCount:0,playbackCount:0,fixtures:[],groups:[],liveShowName:"",cachedShowName:"",blockedReason:`真机 Patch 扫描失败：${String(error)}`};
+      setTitanInventory(next);
+      return next;
+    }
+  },[desktopRuntime,titanHost]);
+  useEffect(()=>{
+    const generation=++titanPollGenerationRef.current;
+    let disposed=false;
+    let timer;
+    const schedule=async(immediate=false)=>{
+      if(disposed||titanPollGenerationRef.current!==generation)return;
+      if(!immediate)window.clearTimeout(timer);
+      const connected=await refreshTitanStatus();
+      if(disposed||titanPollGenerationRef.current!==generation)return;
+      timer=window.setTimeout(()=>schedule(),connected?3000:20000);
+    };
+    const retryNow=()=>{
+      if(disposed||document.visibilityState==="hidden")return;
+      window.clearTimeout(timer);
+      schedule(true);
+    };
+    schedule(true);
+    window.addEventListener("online",retryNow);
+    document.addEventListener("visibilitychange",retryNow);
+    return ()=>{
+      disposed=true;
+      window.clearTimeout(timer);
+      window.removeEventListener("online",retryNow);
+      document.removeEventListener("visibilitychange",retryNow);
+    };
+  },[refreshTitanStatus]);
+  useEffect(()=>{
+    if(!desktopRuntime)return;
+    invoke("lighting_package_directories")
+      .then(setLightingPackageDirectories)
+      .catch((error)=>setLightingPackageStatus({state:"error",message:`灯光配置目录建立失败：${String(error)}`}));
+  },[desktopRuntime]);
+  const refreshTitanPlaybacks=useCallback(async()=>{
+    if(!desktopRuntime||!titanStatus.connected||!titanStatus.host)return [];
+    try{
+      const handles=await invoke("titan_playbacks",{host:titanStatus.host});
+      const next=Array.isArray(handles)?handles:[];
+      setTitanPlaybacks(current=>JSON.stringify(current)===JSON.stringify(next)?current:next);
+      return next;
+    }catch(error){
+      console.error("Titan Playback 状态读取失败",error);
+      return [];
+    }
+  },[desktopRuntime,titanStatus.connected,titanStatus.host]);
+  const refreshTitanStaticPlaybacks=useCallback(async()=>{
+    if(!desktopRuntime||!titanStatus.connected||!titanStatus.host)return [];
+    try{
+      const handles=await invoke("titan_static_playbacks",{host:titanStatus.host});
+      const next=Array.isArray(handles)?handles:[];
+      setTitanStaticPlaybacks(current=>JSON.stringify(current)===JSON.stringify(next)?current:next);
+      return next;
+    }catch(error){
+      console.error("Titan StaticPlayback 状态读取失败",error);
+      return [];
+    }
+  },[desktopRuntime,titanStatus.connected,titanStatus.host]);
+  useEffect(()=>{
+    if(!desktopRuntime||!titanStatus.connected||!titanStatus.host)return undefined;
+    let disposed=false;
+    let refreshing=false;
+    const refresh=async()=>{
+      if(refreshing)return;
+      refreshing=true;
+      try{await refreshTitanPlaybacks();}finally{refreshing=false;}
+    };
+    refresh();
+    const timer=window.setInterval(()=>{if(!disposed)refresh();},5000);
+    return ()=>{disposed=true;window.clearInterval(timer);};
+  },[desktopRuntime,titanStatus.connected,titanStatus.host,titanStatus.showName,refreshTitanPlaybacks]);
+  useEffect(()=>{
+    if(!desktopRuntime||!titanStatus.connected||!titanStatus.host)return;
+    refreshTitanStaticPlaybacks();
+  },[desktopRuntime,titanStatus.connected,titanStatus.host,titanStatus.showName,refreshTitanStaticPlaybacks]);
+  useEffect(()=>{
+    if(activeNav!=="Avolites Tiger Touch Pro")return;
+    refreshTitanInventory();
+  },[activeNav,refreshTitanInventory]);
+  const triggerTitanPlayback=useCallback((presetId,source="manual")=>{
+    if(!lightingEnabled){
+      setTitanActionStatus({state:"paused",message:"KING 灯光联动已暂停；未向 Titan 发送命令"});
+      return Promise.resolve(false);
+    }
+    const liveConnection=Boolean(desktopRuntime&&titanStatus.connected&&titanStatus.host);
+    const titanId=Number(titanMappings[presetId]);
+    if(!lightingCueIsAuthorized({source,presetId,titanId,effectRegistry:titanEffectRegistry})){
+      setTitanActionStatus({state:"blocked",message:`中控 ${presetId} 号效果未明确标记“可自动”，已拒绝${source==="rhythm"?"节拍":"视频"}触发`});
+      return Promise.resolve(false);
+    }
+    if(liveConnection&&(!titanMappingShowName||!titanStatus.showName)){
+      setTitanActionStatus({state:"error",message:"当前映射或 Titan 未提供可验证的 Show 名称；已拒绝触发"});
+      return Promise.resolve(false);
+    }
+    if(liveConnection&&titanMappingShowName!==titanStatus.showName){
+      setTitanActionStatus({state:"error",message:`映射属于 Show ${titanMappingShowName}，当前为 ${titanStatus.showName}；已拒绝触发`});
+      return Promise.resolve(false);
+    }
+    if(liveConnection&&(!Number.isSafeInteger(titanId)||titanId<=0)){
+      setTitanActionStatus({state:"unmapped",message:`中控 ${presetId} 号效果尚未绑定 Titan Playback`});
+      return Promise.resolve(false);
+    }
+    const automationPlan=planLightingCue(titanAutomationRef.current,{presetId,source});
+    if(!automationPlan.accepted){
+      if(automationPlan.reason==="cooldown")setTitanActionStatus({state:"waiting",message:"自动灯光切换冷却中；已忽略过密节拍"});
+      if(automationPlan.reason==="category-hold")setTitanActionStatus({state:"waiting",message:"保持视频分类灯光；取色结果稍后接管"});
+      return Promise.resolve(false);
+    }
+    titanAutomationRef.current=automationPlan.state;
+    const sourceLabel=source==="rhythm"?"音乐动态层":source==="video-color"?"视频取色层":source==="video"?"视频基础层":"手动";
+    if(!liveConnection){
+      const simulation=simulateTitanCue(titanSimulationRef.current,{
+        presetId,
+        lane:automationPlan.lane,
+        source,
+      });
+      if(!simulation.accepted)return Promise.resolve(false);
+      titanSimulationRef.current=simulation.state;
+      setTitanSimulation(simulation.state);
+      setTitanActionStatus({state:"simulation",message:`离线模拟：中控 ${presetId} 号效果 · ${sourceLabel}；未向灯光控制台发送命令`});
+      return Promise.resolve(true);
+    }
+    setTitanActionStatus({state:"busy",message:`正在触发中控 ${presetId} 号效果…`});
+    const command=titanCommandQueueRef.current.catch(()=>undefined).then(async()=>{
+      const lane=automationPlan.lane;
+      const owners={...titanActiveHandleRef.current};
+      const previous=owners[lane];
+      const handlesToRelease=source==="manual"
+        ? [...new Set(Object.values(owners).filter((handle)=>handle&&handle!==titanId))]
+        : previous&&previous!==titanId&&!Object.entries(owners).some(([ownerLane,handle])=>ownerLane!==lane&&handle===previous)
+          ? [previous]
+          : [];
+      for(const handle of handlesToRelease){
+        await invoke("titan_release_playback",{host:titanStatus.host,titanId:handle,expectedShowName:titanMappingShowName});
+      }
+      if(source==="manual"){owners.scene=null;owners.accent=null;}
+      const result=await invoke("titan_fire_playback",{host:titanStatus.host,titanId,level:1,alwaysRefire:true,expectedShowName:titanMappingShowName});
+      owners[lane]=titanId;
+      titanActiveHandleRef.current=owners;
+      setTitanActionStatus({state:"live",message:`${result?.message||`已启动 TitanId ${titanId}`} · ${sourceLabel}`});
+      window.setTimeout(refreshTitanPlaybacks,120);
+      return true;
+    }).catch((error)=>{
+      setTitanActionStatus({state:"error",message:`Titan 控制失败：${String(error)}`});
+      return false;
+    });
+    titanCommandQueueRef.current=command;
+    return command;
+  },[desktopRuntime,lightingEnabled,refreshTitanPlaybacks,titanEffectRegistry,titanMappingShowName,titanMappings,titanStatus.connected,titanStatus.host,titanStatus.showName]);
+  useEffect(()=>{
+    if(lightingEnabled)return;
+    const clearedSimulation=clearTitanSimulator(titanSimulationRef.current);
+    titanSimulationRef.current=clearedSimulation;
+    setTitanSimulation(clearedSimulation);
+    const titanIds=[...new Set(Object.values(titanActiveHandleRef.current).filter(Boolean))];
+    titanActiveHandleRef.current={scene:null,accent:null};
+    titanAutomationRef.current=createLightingAutomationState();
+    if(!titanIds.length||!desktopRuntime||!titanStatus.connected||!titanStatus.host){
+      setTitanActionStatus({state:"paused",message:"KING 灯光联动已暂停；离线模拟状态已清空"});
+      return;
+    }
+    titanCommandQueueRef.current=titanCommandQueueRef.current.catch(()=>undefined)
+      .then(async()=>{for(const titanId of titanIds)await invoke("titan_release_playback",{host:titanStatus.host,titanId,expectedShowName:titanMappingShowName});})
+      .then(()=>{setTitanActionStatus({state:"paused",message:"KING 灯光联动已暂停；已释放自动灯光两层"});refreshTitanPlaybacks();})
+      .catch((error)=>setTitanActionStatus({state:"error",message:`暂停灯光联动失败：${String(error)}`}));
+  },[desktopRuntime,lightingEnabled,refreshTitanPlaybacks,titanMappingShowName,titanStatus.connected,titanStatus.host]);
   useEffect(()=>{
     if (!desktopRuntime) {
       setMixerDriverStatus({state:"preview",title:"浏览器预览",message:`${activeMixerModel.driver.name} ${activeMixerModel.driver.version}`});
@@ -1366,10 +2079,11 @@ export function App() {
   useEffect(()=>{
     const acceptFrame=(frame)=>{
       if(!frame||typeof frame!=="object")return;
-      setMixerMeterSnapshot(frame);
-      setMixerMeterStatus(frame.connected
+      publishQu16MeterSnapshot(frame);
+      const nextStatus=frame.connected
         ? {state:"live",title:"真机表计 LIVE",message:`${frame.source||"Qu-16 TCP Meter"} · ${mixerControlHost||"测试帧"}`}
-        : {state:"disconnected",title:"真机表计已断开",message:frame.message||"等待 Qu-16 重新连接"});
+        : {state:"disconnected",title:"真机表计已断开",message:frame.message||"等待 Qu-16 重新连接"};
+      setMixerMeterStatus(current=>current.state===nextStatus.state&&current.title===nextStatus.title&&current.message===nextStatus.message?current:nextStatus);
     };
     const handleBrowserFrame=(event)=>acceptFrame(event.detail);
     window.addEventListener("king:qu16-meter-frame",handleBrowserFrame);
@@ -1397,7 +2111,7 @@ export function App() {
     const host=mixerControlHost.trim();
     const effectGeneration=++qu16MeterEffectGenerationRef.current;
     if(!desktopRuntime||mixerModelId!=="allen-heath-qu16"||!host){
-      setMixerMeterSnapshot(null);
+      clearQu16MeterSnapshot();
       setMixerMeterStatus({state:"disconnected",title:"真机表计未连接",message:host?"桌面端启动后连接 Qu-16":"在设置中填写 Qu-16 的以太网 IP"});
       setMixerParameterSnapshot(null);
       setMixerControlStatus({mode:"local-ui-only",state:"offline",title:"本地控制",message:host?"桌面端未连接 Qu-16":"未配置 Qu-16 控制地址"});
@@ -1429,19 +2143,30 @@ export function App() {
     };
     const applyFrame=(frame)=>{
       if(!isCurrent()||!frame||frame.host!==host||Number(frame.sessionId)!==startedSessionId)return;
-      setMixerMeterSnapshot(frame);
-      if(frame.connected)setMixerMeterStatus({sessionId:startedSessionId,host,state:"live",title:"真机表计 LIVE",message:`Qu-16 TCP Meter · ${host}`});
+      publishQu16MeterSnapshot(frame);
+      if(frame.connected){
+        const nextStatus={sessionId:startedSessionId,host,state:"live",title:"真机表计 LIVE",message:`Qu-16 TCP Meter · ${host}`};
+        setMixerMeterStatus(current=>current.sessionId===nextStatus.sessionId&&current.host===nextStatus.host&&current.state===nextStatus.state&&current.title===nextStatus.title&&current.message===nextStatus.message?current:nextStatus);
+      }
     };
     const applyStatus=(status)=>{
       if(!isCurrent()||!status||status.host!==host||Number(status.sessionId)!==startedSessionId)return;
-      setMixerMeterStatus(status);
+      setMixerMeterStatus(current=>current.sessionId===status.sessionId
+        &&current.host===status.host
+        &&current.state===status.state
+        &&current.title===status.title
+        &&current.message===status.message
+        ? current
+        : status);
       const session=qu16ControlSessionRef.current;
       if(session.generation!==effectGeneration||session.sessionId!==startedSessionId)return;
       if(status.state==="disconnected"||status.state==="error"){
         session.live=false;
-        setMixerControlStatus({mode:"local-ui-only",state:status.state,title:"本地控制",message:status.message||"Qu-16 控制连接已断开"});
+        const nextControl={mode:"local-ui-only",state:status.state,title:"本地控制",message:status.message||"Qu-16 控制连接已断开"};
+        setMixerControlStatus(current=>current.mode===nextControl.mode&&current.state===nextControl.state&&current.title===nextControl.title&&current.message===nextControl.message?current:nextControl);
       }else if(!session.live){
-        setMixerControlStatus({mode:"hardware-syncing",state:"syncing",title:"正在同步控制状态",message:`Qu-16 TCP-MIDI · ${host}`});
+        const nextControl={mode:"hardware-syncing",state:"syncing",title:"正在同步控制状态",message:`Qu-16 TCP-MIDI · ${host}`};
+        setMixerControlStatus(current=>current.mode===nextControl.mode&&current.state===nextControl.state&&current.title===nextControl.title&&current.message===nextControl.message?current:nextControl);
       }
     };
     const applyParameterFrame=(frame)=>{
@@ -1455,11 +2180,12 @@ export function App() {
       const acceptedFrame={...frame,revision,receivedAtMs:Date.now()};
       const pendingCount=Number.isFinite(Number(frame.pending))?Math.max(0,Number(frame.pending)):0;
       setMixerParameterSnapshot(acceptedFrame);
-      setMixerControlStatus(session.live
+      const nextControlStatus=session.live
         ? {mode:"hardware-live",state:"live",title:"真机控制 LIVE",message:`Qu-16 参数已同步 · ${host}${pendingCount?` · ${pendingCount} 项待确认`:""}`}
         : frame.connected
           ? {mode:"hardware-syncing",state:"syncing",title:"正在同步控制状态",message:`Qu-16 TCP-MIDI · ${host}`}
-          : {mode:"local-ui-only",state:"disconnected",title:"本地控制",message:"Qu-16 控制连接已断开"});
+          : {mode:"local-ui-only",state:"disconnected",title:"本地控制",message:"Qu-16 控制连接已断开"};
+      setMixerControlStatus(current=>current.mode===nextControlStatus.mode&&current.state===nextControlStatus.state&&current.title===nextControlStatus.title&&current.message===nextControlStatus.message?current:nextControlStatus);
       return true;
     };
     qu16ParameterFrameApplyRef.current=applyParameterFrame;
@@ -1503,7 +2229,7 @@ export function App() {
         pendingParameterFrame=null;
       }catch(error){
         if(isCurrent()){
-          setMixerMeterSnapshot(null);
+          clearQu16MeterSnapshot();
           setMixerMeterStatus({state:"error",title:"Qu-16 连接失败",message:String(error)});
           qu16ControlSessionRef.current.live=false;
           setMixerControlStatus({mode:"local-ui-only",state:"error",title:"本地控制",message:String(error)});
@@ -1512,6 +2238,7 @@ export function App() {
     },650);
     return ()=>{
       disposed=true;
+      clearQu16MeterSnapshot();
       window.clearTimeout(timer);
       detachListeners();
       if(qu16ParameterFrameApplyRef.current===applyParameterFrame)qu16ParameterFrameApplyRef.current=null;
@@ -1545,10 +2272,105 @@ export function App() {
       return {accepted:false,mode:transportLost?"local-ui-only":"hardware-live",error:message};
     }
   },[desktopRuntime,mixerModelId]);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+  homeMicrophoneWriterRef.current=writeQu16Parameters;
+  homeMicrophoneControlModeRef.current=mixerControlStatus.mode;
+  const flushHomeMicrophoneWrites=useCallback(()=>{
+    homeMicrophoneFlushTimerRef.current=null;
+    if(homeMicrophoneControlModeRef.current!=="hardware-live"){
+      homeMicrophoneWritesRef.current.clear();
+      return;
+    }
+    const writes=[...homeMicrophoneWritesRef.current.values()];
+    homeMicrophoneWritesRef.current.clear();
+    if(writes.length)homeMicrophoneWriterRef.current?.(writes);
+  },[]);
+  const queueHomeMicrophoneWrites=useCallback((writes)=>{
+    if(homeMicrophoneControlModeRef.current!=="hardware-live")return;
+    for(const write of writes)homeMicrophoneWritesRef.current.set(write.key,write);
+    if(homeMicrophoneFlushTimerRef.current===null){
+      homeMicrophoneFlushTimerRef.current=window.setTimeout(flushHomeMicrophoneWrites,38);
+    }
+  },[flushHomeMicrophoneWrites]);
+  useEffect(()=>()=>{
+    if(homeMicrophoneFlushTimerRef.current!==null)window.clearTimeout(homeMicrophoneFlushTimerRef.current);
+    homeMicrophoneFlushTimerRef.current=null;
+    homeMicrophoneWritesRef.current.clear();
+  },[]);
+  useEffect(()=>{
+    if(mixerControlStatus.mode==="hardware-live")return;
+    if(homeMicrophoneFlushTimerRef.current!==null)window.clearTimeout(homeMicrophoneFlushTimerRef.current);
+    homeMicrophoneFlushTimerRef.current=null;
+    homeMicrophoneWritesRef.current.clear();
+  },[mixerControlStatus.mode]);
+  useEffect(()=>{
+    mixerParameterSnapshotRef.current=mixerParameterSnapshot;
+  },[mixerParameterSnapshot]);
+  const waitForQu16Readback=useCallback(async(writes,timeoutMs=2500)=>{
+    const deadline=Date.now()+timeoutMs;
+    while(Date.now()<deadline){
+      if(qu16WritesConfirmed(mixerParameterSnapshotRef.current,writes))return true;
+      await new Promise((resolve)=>window.setTimeout(resolve,40));
+    }
+    return false;
+  },[]);
+  useEffect(()=>{
+    if(faderInteractionActive)return;
+    setMicrophoneVolumes(current=>[0,1].map((index)=>{
+      const readback=microphoneFaderReadback(mixerParameterSnapshot,microphoneBindings[index]);
+      return readback.available?readback.value:(current[index]??null);
+    }));
+  },[faderInteractionActive,microphoneBindings,mixerParameterSnapshot]);
+  const toggleDeckCue=useCallback(async(deckNumber)=>{
+    if(deckCue.busy)return;
+    const turningOff=deckCue.deck===deckNumber;
+    const switchingDeck=deckCue.deck!==null&&!turningOff;
+    if(switchingDeck){
+      const saved=persistDeckCueRecovery({deck:deckNumber,mainFader:deckCueMainFaderRef.current});
+      if(!saved){
+        setDeckCue(current=>({...current,busy:false,message:"无法保存 CUE 恢复状态，已拒绝切换 Deck"}));
+        return;
+      }
+      setDeckCue({deck:deckNumber,busy:false,message:`Deck ${deckNumber} 的完整声音正在送往 Qu-16 Phones`});
+      return;
+    }
+    const liveFader=Number(mixerParameterSnapshot?.parameters?.["fader:st-3"]);
+    if(!turningOff&&!Number.isFinite(liveFader)){
+      setDeckCue(current=>({...current,busy:false,message:"尚未取得 ST3 主扩推子真值，CUE 未改变"}));
+      return;
+    }
+    const restoreFader=turningOff?deckCueMainFaderRef.current:liveFader;
+    if(turningOff&&!Number.isFinite(restoreFader)){
+      setDeckCue(current=>({...current,busy:false,message:"缺少 CUE 前的 ST3 推子值，已拒绝不安全切换"}));
+      return;
+    }
+    if(!turningOff&&!persistDeckCueRecovery({deck:deckNumber,mainFader:liveFader})){
+      setDeckCue(current=>({...current,busy:false,message:"无法保存 ST3 原主扩电平，CUE 未改变"}));
+      return;
+    }
+    if(!turningOff)deckCueMainFaderRef.current=liveFader;
+    setDeckCue(current=>({...current,busy:true,message:turningOff?"正在关闭耳机 CUE 并恢复主扩":"正在把完整 Deck 声音从主扩切到耳机"}));
+    const cueWrites=qu16DeckCueWrites(!turningOff,restoreFader);
+    const response=await writeQu16Parameters(cueWrites);
+    if(!response.accepted){
+      setDeckCue(current=>({...current,busy:false,message:"Qu-16 CUE 写入未接受；恢复状态已保留，请以真机 LR/PAFL/Fader 为准"}));
+      return;
+    }
+    if(!await waitForQu16Readback(cueWrites)){
+      setDeckCue(current=>({...current,busy:false,message:"Qu-16 CUE 权威回读超时；恢复状态已保留，请以真机 LR/PAFL/Fader 为准"}));
+      return;
+    }
+    if(turningOff){
+      clearDeckCueRecovery();
+      deckCueMainFaderRef.current=null;
+    }
+    setDeckCue({
+      deck:turningOff?null:deckNumber,
+      busy:false,
+      message:turningOff
+        ? "CUE 已关闭；完整 Deck 声音已恢复到原主扩电平"
+        : `Deck ${deckNumber} 的完整声音正在送往 Qu-16 Phones；主扩已隔离`,
+    });
+  },[deckCue.busy,deckCue.deck,mixerParameterSnapshot,waitForQu16Readback,writeQu16Parameters]);
   useEffect(() => {
     if (!desktopRuntime) return undefined;
     let disposed = false;
@@ -1652,8 +2474,7 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("king.mixer.master",String(masterVolume));
     window.localStorage.setItem("king.mixer.headphones",String(headphoneVolume));
-    window.localStorage.setItem("king.mixer.microphones",JSON.stringify(microphoneVolumes));
-  },[masterVolume,headphoneVolume,microphoneVolumes]);
+  },[masterVolume,headphoneVolume]);
   useEffect(() => {
     window.localStorage.setItem("king.textDrafts", JSON.stringify(textDrafts));
   }, [textDrafts]);
@@ -1686,9 +2507,11 @@ export function App() {
           id: `local-video:${item.path}`,
           type: "video",
           src: convertFileSrc(item.path),
+          thumbnailSrc: item.thumbnailPath ? convertFileSrc(item.thumbnailPath) : "",
           durationSeconds: Number(item.durationMs ?? 0) / 1000,
           duration: item.durationMs ? formatDuration(Number(item.durationMs) / 1000) : "--:--",
         }));
+        prewarmPersistentVideoThumbnails(nextVideos);
         const loadedPaths = Object.values(deckSelectionRef.current).map((item)=>item?.path).filter(Boolean);
         const stableAudio = reconcileStableAssets(
           audioAssetsRef.current,
@@ -1710,7 +2533,7 @@ export function App() {
           // Keep fingerprinting and persistent AI-job creation strictly serial. This
           // only registers work; model inference runs in the separate Python worker.
           audioAiQueueChainRef.current = audioAiQueueChainRef.current
-            .then(() => invoke("queue_audio_ai_analysis", { path:item.path }))
+            .then(() => invoke("queue_audio_ai_analysis", { path:item.path, artist:item.artist??null }))
             .catch((error) => {
               audioAiQueuedRef.current.delete(sourceVersion);
               console.error(`AI 分析任务登记失败：${item.name ?? item.path}`, error);
@@ -1745,7 +2568,7 @@ export function App() {
     const refresh=()=>refreshFontLibrary()
       .catch((error)=>console.error("读取 Windows 系统字体失败",error));
     refresh();
-    const timer=window.setInterval(refresh,5000);
+    const timer=window.setInterval(refresh,30000);
     return ()=>window.clearInterval(timer);
   },[]);
   useEffect(() => {
@@ -1903,6 +2726,170 @@ export function App() {
     setMixerControlHost(value);
     window.localStorage.setItem("king.mixer.controlHost",value.trim());
   };
+  const updateTitanHost=(value)=>{
+    setTitanHost(value);
+    window.localStorage.setItem("king.lighting.titanHost",value.trim());
+  };
+  const updateTitanEffect=(playback,patch)=>{
+    const titanId=Number(playback?.titanId);
+    if(!Number.isSafeInteger(titanId)||titanId<=0)return;
+    setTitanEffectRegistry((current)=>{
+      const existingIndex=current.findIndex((effect)=>Number(effect.titanHandle)===titanId);
+      const existing=existingIndex>=0?current[existingIndex]:{};
+      const nextEffect={
+        effectId:existing.effectId||`titan:${titanId}`,
+        presetId:existing.presetId??null,
+        titanHandle:titanId,
+        titanLegend:playback.legend||existing.titanLegend||"",
+        kingName:"",
+        layer:null,
+        category:"",
+        colorFamily:"",
+        energy:null,
+        motion:null,
+        strobe:false,
+        beatSync:false,
+        continuous:false,
+        safeAuto:false,
+        priority:0,
+        ...existing,
+        ...patch,
+      };
+      if(nextEffect.layer==="event")nextEffect.safeAuto=false;
+      const next=existingIndex>=0?current.map((effect,index)=>index===existingIndex?nextEffect:effect):[...current,nextEffect];
+      window.localStorage.setItem("king.lighting.effectRegistry",JSON.stringify(next));
+      return next;
+    });
+  };
+  const updateTitanMapping=(presetId,value)=>{
+    const slot=Number(presetId);
+    const titanId=Number(value);
+    if(!Number.isInteger(slot)||slot<0||slot>9)return;
+    setTitanMappings((current)=>{
+      const next={...current};
+      if(Number.isSafeInteger(titanId)&&titanId>0){
+        Object.entries(next).forEach(([otherSlot,handle])=>{
+          if(Number(handle)===titanId&&Number(otherSlot)!==slot)delete next[otherSlot];
+        });
+        next[slot]=titanId;
+      }else delete next[slot];
+      window.localStorage.setItem("king.lighting.titanMappings",JSON.stringify(next));
+      return next;
+    });
+    setTitanEffectRegistry((current)=>{
+      let found=false;
+      const next=current.map((effect)=>{
+        if(effect.presetId===slot||Number(effect.titanHandle)===titanId){
+          if(Number(effect.titanHandle)===titanId&&Number.isSafeInteger(titanId)&&titanId>0){
+            found=true;
+            return {...effect,presetId:slot};
+          }
+          return {...effect,presetId:null};
+        }
+        return effect;
+      });
+      if(!found&&Number.isSafeInteger(titanId)&&titanId>0){
+        const playback=titanPlaybacks.find((item)=>Number(item.titanId)===titanId);
+        next.push({effectId:`titan:${titanId}`,presetId:slot,titanHandle:titanId,titanLegend:playback?.legend||"",kingName:"",layer:null,category:"",colorFamily:"",energy:null,motion:null,strobe:false,beatSync:false,continuous:false,safeAuto:false,priority:0});
+      }
+      window.localStorage.setItem("king.lighting.effectRegistry",JSON.stringify(next));
+      return next;
+    });
+    if(titanStatus.connected&&titanStatus.showName){
+      setTitanMappingShowName(titanStatus.showName);
+      window.localStorage.setItem("king.lighting.mappingShowName",titanStatus.showName);
+    }
+    setTitanActionStatus({state:"idle",message:value?`中控 ${presetId} 号映射已保存；尚未触发灯光`:`中控 ${presetId} 号映射已清除`});
+  };
+  const updateTitanPlaybackQuickSlot=(playback,value)=>{
+    if(value===""){
+      const currentSlot=Object.entries(titanMappings).find(([,handle])=>Number(handle)===Number(playback.titanId))?.[0];
+      if(currentSlot!==undefined)updateTitanMapping(Number(currentSlot),"");
+      return;
+    }
+    updateTitanMapping(Number(value),playback.titanId);
+  };
+  const exportLightingPackage=async()=>{
+    const lightingPackage=createLightingPackage({
+      titanHost,
+      titanStatus:{...titanStatus,showName:titanStatus.showName||titanMappingShowName},
+      titanMappings,
+      titanPlaybacks,
+      presets:lights,
+      rhythmRule:lightRhythmRule,
+      videoRule:videoRhythmRule,
+      playbackModes:lightPlaybackModes,
+      fixtureColors,
+      effectRegistry:titanEffectRegistry,
+    });
+    if(!desktopRuntime){
+      const url=URL.createObjectURL(new Blob([JSON.stringify(lightingPackage,null,2)],{type:"application/json"}));
+      const anchor=document.createElement("a");
+      anchor.href=url;
+      anchor.download=`KING-${lightingPackage.console.showName||"lighting"}.kinglight`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setLightingPackageStatus({state:"ready",message:"浏览器预览已生成 .kinglight 下载"});
+      return;
+    }
+    setLightingPackageStatus({state:"busy",message:"正在导出灯光配置包…"});
+    try{
+      const result=await invoke("export_kinglight",{payload:JSON.stringify(lightingPackage)});
+      setLightingPackageStatus({state:"ready",message:`已导出：${result.path}`});
+    }catch(error){
+      setLightingPackageStatus({state:"error",message:`导出失败：${String(error)}`});
+    }
+  };
+  const importLightingPackage=async()=>{
+    if(!desktopRuntime){
+      setLightingPackageStatus({state:"error",message:"浏览器预览不能读取本机收件箱，请在桌面端操作"});
+      return;
+    }
+    setLightingPackageStatus({state:"busy",message:"正在校验 .kinglight；导入过程不会触发灯光…"});
+    try{
+      const result=await invoke("import_kinglight_inbox");
+      const lightingPackage=normalizeLightingPackage(result.package);
+      setTitanMappings(lightingPackage.mappings);
+      setTitanEffectRegistry(lightingPackage.effects);
+      setLightRhythmRule(lightingPackage.automation.rhythmRule);
+      setVideoRhythmRule(lightingPackage.automation.videoRule);
+      setLightPlaybackModes((current)=>({...current,...lightingPackage.presentation.playbackModes}));
+      setFixtureColors((current)=>({...current,...lightingPackage.presentation.fixtureColors}));
+      if(lightingPackage.console.host){
+        setTitanHost(lightingPackage.console.host);
+        window.localStorage.setItem("king.lighting.titanHost",lightingPackage.console.host);
+      }
+      setTitanMappingShowName(lightingPackage.console.showName);
+      window.localStorage.setItem("king.lighting.titanMappings",JSON.stringify(lightingPackage.mappings));
+      window.localStorage.setItem("king.lighting.effectRegistry",JSON.stringify(lightingPackage.effects));
+      window.localStorage.setItem("king.lighting.mappingShowName",lightingPackage.console.showName);
+      window.localStorage.setItem("king.rhythm.lighting",lightingPackage.automation.rhythmRule);
+      window.localStorage.setItem("king.rhythm.video",lightingPackage.automation.videoRule);
+      const cleared=clearTitanSimulator(titanSimulationRef.current);
+      titanSimulationRef.current=cleared;
+      setTitanSimulation(cleared);
+      titanAutomationRef.current=createLightingAutomationState();
+      setLight(0);
+      setLightingPackageStatus({state:"ready",message:`已导入：${result.path}；未触发任何 Playback`});
+    }catch(error){
+      setLightingPackageStatus({state:"error",message:`导入失败：${String(error)}`});
+    }
+  };
+  const openLightingPackageDirectory=async(kind)=>{
+    if(!desktopRuntime)return;
+    try{
+      const directory=await invoke("open_lighting_package_directory",{kind});
+      setLightingPackageStatus({state:"idle",message:`${kind==="inbox"?"收件箱":"导出目录"}：${directory}`});
+    }catch(error){
+      setLightingPackageStatus({state:"error",message:`打开目录失败：${String(error)}`});
+    }
+  };
+  const stableUpdateTitanEffect=useStableCallback(updateTitanEffect);
+  const stableUpdateTitanMapping=useStableCallback(updateTitanMapping);
+  const stableUpdateTitanPlaybackQuickSlot=useStableCallback(updateTitanPlaybackQuickSlot);
+  const stableExportLightingPackage=useStableCallback(exportLightingPackage);
+  const stableImportLightingPackage=useStableCallback(importLightingPackage);
+  const stableOpenLightingPackageDirectory=useStableCallback(openLightingPackageDirectory);
   const openMixerDriver = async () => {
     if (!desktopRuntime) return window.open(activeMixerModel.driver.officialResourceUrl,"_blank","noopener,noreferrer");
     setMixerDriverStatus({state:"installing",title:"准备驱动安装",message:"仅执行 Allen & Heath 有效数字签名的官方安装程序"});
@@ -1989,6 +2976,73 @@ export function App() {
       setRoutingBusy(false);
     }
   };
+  const createVocalProfile=async(displayName,consentConfirmed)=>{
+    if(!desktopRuntime){
+      setVocalProfileMessage({state:"error",message:"请在 KINGCLUB 桌面版中录制歌手包"});
+      return null;
+    }
+    setVocalProfileBusy(true);
+    setVocalProfileMessage({state:"working",message:"正在建立歌手包…"});
+    try{
+      const profile=await invoke("create_vocal_profile",{displayName,consentConfirmed});
+      await refreshVocalProfiles();
+      setVocalProfileMessage({state:"success",message:`已建立“${profile.displayName}”，请依次录制六段干声`});
+      return profile;
+    }catch(error){
+      setVocalProfileMessage({state:"error",message:`建立失败：${String(error)}`});
+      return null;
+    }finally{
+      setVocalProfileBusy(false);
+    }
+  };
+  const recordVocalProfileSample=async(profileId,promptId,deviceName,channel)=>{
+    const prompt=vocalProfilePrompts.find(item=>item.id===promptId);
+    setVocalProfileBusy(true);
+    setVocalProfileMessage({state:"working",message:`正在录制${prompt?.label??"采样"}，请连续演唱 15 秒…`});
+    try{
+      const profile=await invoke("record_vocal_profile_sample",{profileId,promptId,deviceName,channel});
+      await refreshVocalProfiles();
+      const sample=profile.samples?.[promptId];
+      setVocalProfileMessage({
+        state:sample?.report?.accepted?"success":"error",
+        message:sample?.report?.accepted?`${prompt?.label??"采样"}合格：${sample.report.message}`:`${prompt?.label??"采样"}需重录：${sample?.report?.message??"录音质量未通过"}`,
+      });
+      return profile;
+    }catch(error){
+      setVocalProfileMessage({state:"error",message:`录音失败：${String(error)}`});
+      return null;
+    }finally{
+      setVocalProfileBusy(false);
+    }
+  };
+  const deleteVocalProfile=async(profileId)=>{
+    setVocalProfileBusy(true);
+    setVocalProfileMessage({state:"working",message:"正在删除歌手包及其本地录音…"});
+    try{
+      await invoke("delete_vocal_profile",{profileId});
+      await refreshVocalProfiles();
+      setVocalProfileMessage({state:"success",message:"歌手包及其本地录音已删除"});
+    }catch(error){
+      setVocalProfileMessage({state:"error",message:`删除失败：${String(error)}`});
+    }finally{
+      setVocalProfileBusy(false);
+    }
+  };
+  const prepareVocalProfileSong=async(profileId,mediaPath)=>{
+    setVocalProfileBusy(true);
+    setVocalProfileMessage({state:"working",message:"正在核对当前歌曲的歌词、旋律和伴奏产物…"});
+    try{
+      const report=await invoke("prepare_vocal_profile_song",{profileId,mediaPath});
+      setVocalProfileMessage({state:report.generatorAvailable?"success":"warning",message:report.message});
+      setVocalReferenceRevision(current=>current+1);
+      return report;
+    }catch(error){
+      setVocalProfileMessage({state:"error",message:`补音准备失败：${String(error)}`});
+      return null;
+    }finally{
+      setVocalProfileBusy(false);
+    }
+  };
   const insertTrack = (deck, index) => prepareTrack(deck, index);
   const getDeckAudio = (deckNumber) => deckNumber === 1 ? deckOneAudioRef.current : deckTwoAudioRef.current;
   const playbackPathForDeck = (deckNumber, track) => (
@@ -1998,8 +3052,14 @@ export function App() {
   );
   const applyMpvDeckState = (state) => {
     if (!state?.deck) return;
-    setDeckProgress((current)=>({...current,[state.deck]:Math.max(0,Number(state.timePos)||0)}));
-    setPlayingDecks((current)=>({...current,[state.deck]:!state.paused}));
+    const nextProgress=Math.max(0,Number(state.timePos)||0);
+    const nextPlaying=!state.paused;
+    setDeckProgress((current)=>Math.abs((current[state.deck]??0)-nextProgress)<.18
+      ? current
+      : {...current,[state.deck]:nextProgress});
+    setPlayingDecks((current)=>current[state.deck]===nextPlaying
+      ? current
+      : {...current,[state.deck]:nextPlaying});
   };
   const ensureMpvDeckLoaded = async (deckNumber, trackIndex) => {
     const track = tracks[trackIndex];
@@ -2010,7 +3070,11 @@ export function App() {
     mpvLoadedPathsRef.current[deckNumber] = playbackPath;
     mpvEofHandledRef.current[deckNumber] = false;
     const { deck1: deckOneGain, deck2: deckTwoGain } = equalPowerGains(crossfade);
-    const volume = (deckNumber===1?deckOneGain:deckTwoGain)*masterVolume;
+    const volume = deckOutputVolumePercent(
+      deckNumber===1?deckOneGain:deckTwoGain,
+      masterVolume,
+      deckVocalModes[deckNumber],
+    );
     await invoke("mpv_deck_set_volume",{deck:deckNumber,volume});
     applyMpvDeckState(state);
     return state;
@@ -2020,6 +3084,9 @@ export function App() {
     if (!track?.accompanimentPath) return;
     const currentMode = deckVocalModes[deckNumber];
     const nextMode = currentMode === "original" ? "accompaniment" : "original";
+    if (nextMode === "accompaniment") {
+      setDeckAiRescueEnabled((current)=>({...current,[deckNumber]:true}));
+    }
     const nextPath = nextMode === "accompaniment" ? track.accompanimentPath : track.path;
     if (!nextPath) return;
     if (mpvEnabled) {
@@ -2032,6 +3099,15 @@ export function App() {
           path:nextPath,
         });
         mpvLoadedPathsRef.current[deckNumber] = nextPath;
+        const { deck1: deckOneGain, deck2: deckTwoGain } = equalPowerGains(crossfade);
+        await invoke("mpv_deck_set_volume",{
+          deck:deckNumber,
+          volume:deckOutputVolumePercent(
+            deckNumber===1?deckOneGain:deckTwoGain,
+            masterVolume,
+            nextMode,
+          ),
+        });
         setDeckVocalModes((current)=>({...current,[deckNumber]:nextMode}));
         applyMpvDeckState(state);
       } catch (error) {
@@ -2048,6 +3124,12 @@ export function App() {
       audio.src = convertFileSrc(nextPath);
       audio.load();
       audio.currentTime = Math.max(0, Number(seconds) || 0);
+      const { deck1: deckOneGain, deck2: deckTwoGain } = equalPowerGains(crossfade);
+      audio.volume = deckOutputVolumeScalar(
+        deckNumber===1?deckOneGain:deckTwoGain,
+        masterVolume,
+        nextMode,
+      );
       if (wasPlaying) audio.play().catch((error)=>console.error(`Deck ${deckNumber} 伴唱播放失败`,error));
     }
   };
@@ -2246,7 +3328,7 @@ export function App() {
       }
     };
     poll();
-    const timer=window.setInterval(poll,100);
+    const timer=window.setInterval(poll,160);
     return()=>{disposed=true;window.clearInterval(timer)};
   },[mpvEnabled,deck1,deck2,deckOnePath,deckTwoPath,deckPlaybackModes,tracks.length]);
   const activeMediaType = mediaTypes.find(type => type.id === mediaType) ?? mediaTypes[0];
@@ -2262,11 +3344,20 @@ export function App() {
     resolutionTestImage,
     ...imageAssets.filter((item) => mediaCategory === "全部" || item.category === mediaCategory),
   ];
-  const displayMedia = hoverMedia ?? stagedMedia ?? outputMedia;
-  const outputTransform = mediaTransforms[outputMedia.id] ?? defaultMediaTransform;
-  const displayTransform = stagedMedia?.id === displayMedia.id && stagedTransform
+  const outputBaseMedia = resolveBaseMedia(outputMedia);
+  const stagedBaseMedia = resolveBaseMedia(stagedMedia);
+  const activeOverlayMedia = stagedMedia?.type === "text"
+    ? stagedMedia
+    : outputMedia?.type === "text"
+      ? outputMedia
+      : null;
+  const hoverDisplayMedia = hoverMedia ? placeOverlayOnMedia(hoverMedia,activeOverlayMedia) : null;
+  const displayMedia = hoverDisplayMedia ?? stagedMedia ?? outputMedia;
+  const displayBaseMedia = resolveBaseMedia(displayMedia);
+  const outputTransform = mediaTransforms[outputBaseMedia?.id ?? outputMedia.id] ?? defaultMediaTransform;
+  const displayTransform = displayMedia === stagedMedia && stagedTransform
     ? stagedTransform
-    : mediaTransforms[displayMedia.id] ?? defaultMediaTransform;
+    : mediaTransforms[displayBaseMedia?.id ?? displayMedia.id] ?? defaultMediaTransform;
   // Media and transforms are updated immutably. Sharing the committed snapshot
   // reference makes the dirty check constant-time, even when a text composition
   // contains large PNG data URLs.
@@ -2274,36 +3365,42 @@ export function App() {
     stagedMedia !== outputMedia || (stagedTransform ?? defaultMediaTransform) !== outputTransform
   );
   useEffect(() => {
-    const configuredLightIds = lights.filter((preset)=>preset.label).map((preset)=>preset.id);
+    const mappedLightIds = Object.keys(titanMappings).map(Number).filter(Number.isInteger).sort((a,b)=>a-b);
+    const configuredLightIds = mappedLightIds.length ? mappedLightIds : lights.filter((preset)=>preset.label).map((preset)=>preset.id);
     const handleRhythmAutomation = (event) => {
       const rhythmEvent = event.detail;
       const dominantDeck = selectDominantDeck(playingDecks, crossfade);
       if (!dominantDeck || rhythmEvent?.deck !== dominantDeck) return;
 
       if (lightingEnabled && light === null && rhythmEventMatchesRule(lightRhythmRule, rhythmEvent)) {
-        setAutoLightPreset((current)=>{
-          const next = nextConfiguredId(configuredLightIds, current);
-          if (next !== null) {
+        const next = nextConfiguredId(configuredLightIds, autoLightPreset);
+        if (next !== null) {
+          triggerTitanPlayback(next,"rhythm").then((triggered)=>{
+            if(!triggered)return;
+            setAutoLightPreset(next);
             window.dispatchEvent(new CustomEvent("king:lighting-cue", { detail:{
               presetId:next,
               source:"rhythm",
               rule:lightRhythmRule,
               rhythm:rhythmEvent,
             } }));
-          }
-          return next ?? current;
-        });
+          });
+        }
       }
 
       if (rhythmEventMatchesRule(videoRhythmRule, rhythmEvent) && availableVideos.length) {
         automationVideoIndexRef.current = (automationVideoIndexRef.current + 1) % availableVideos.length;
         const source = availableVideos[automationVideoIndexRef.current];
         const candidate = { ...source, id:source.id, type:"video", name:source.name, src:source.src };
+        const overlaySource = stagedMedia?.type === "text" ? stagedMedia : outputMedia?.type === "text" ? outputMedia : null;
+        const stagedCandidate = placeOverlayOnMedia(candidate,overlaySource);
         setHoverMedia(null);
-        setStagedMedia(candidate);
+        setStagedMedia(stagedCandidate);
         setStagedTransform({ ...(mediaTransforms[candidate.id] ?? defaultMediaTransform) });
-        setSelectedTextElement(null);
-        setSelectedTextElements([]);
+        if (!overlaySource) {
+          setSelectedTextElement(null);
+          setSelectedTextElements([]);
+        }
         setPreviewMode(true);
         setMonitorTarget(null);
         window.dispatchEvent(new CustomEvent("king:video-cue", { detail:{
@@ -2316,7 +3413,56 @@ export function App() {
     };
     window.addEventListener("king:rhythm", handleRhythmAutomation);
     return () => window.removeEventListener("king:rhythm", handleRhythmAutomation);
-  }, [availableVideos, crossfade, light, lightingEnabled, lightRhythmRule, mediaTransforms, playingDecks, videoRhythmRule]);
+  }, [autoLightPreset, availableVideos, crossfade, light, lightingEnabled, lightRhythmRule, mediaTransforms, outputMedia, playingDecks, stagedMedia, titanMappings, triggerTitanPlayback, videoRhythmRule]);
+  useEffect(()=>{
+    if(!lightingEnabled||light!==null||outputBaseMedia?.type!=="video")return;
+    const presetId=videoLightingPreset(outputBaseMedia,titanMappings,{allowUnmapped:!titanStatus.connected});
+    if(presetId===null||titanVideoMediaRef.current===outputBaseMedia.id)return;
+    titanVideoMediaRef.current=outputBaseMedia.id;
+    triggerTitanPlayback(presetId,"video").then((triggered)=>{
+      if(!triggered)return;
+      setAutoLightPreset(presetId);
+      window.dispatchEvent(new CustomEvent("king:lighting-cue",{detail:{presetId,source:"video",mediaId:outputBaseMedia.id,category:outputBaseMedia.category||""}}));
+    });
+  },[autoLightPreset,light,lightingEnabled,outputBaseMedia,titanMappings,titanStatus.connected,triggerTitanPlayback]);
+  useEffect(()=>{
+    if(!lightingEnabled||light!==null||outputBaseMedia?.type!=="video")return undefined;
+    videoColorSamplingErrorRef.current=null;
+    videoColorAutomationRef.current={family:null,stableSamples:0};
+    if(!videoColorCanvasRef.current)videoColorCanvasRef.current=document.createElement("canvas");
+    const sample=()=>{
+      try{
+        const color=sampleVideoColor(outputVideoElementRef.current,videoColorCanvasRef.current);
+        if(!color)return;
+        window.dispatchEvent(new CustomEvent("king:video-color",{detail:{mediaId:outputBaseMedia.id,...color}}));
+      }catch(error){
+        if(videoColorSamplingErrorRef.current===outputBaseMedia.id)return;
+        videoColorSamplingErrorRef.current=outputBaseMedia.id;
+        console.warn("视频主色取样不可用",error);
+      }
+    };
+    const timer=window.setInterval(sample,1500);
+    sample();
+    return()=>window.clearInterval(timer);
+  },[light,lightingEnabled,outputBaseMedia]);
+  useEffect(()=>{
+    const handleVideoColor=(event)=>{
+      if(!lightingEnabled||light!==null||outputBaseMedia?.type!=="video"||event.detail?.mediaId!==outputBaseMedia.id)return;
+      const presetId=lightingPresetForVideoColor(event.detail,titanMappings,{allowUnmapped:!titanStatus.connected});
+      if(presetId===null)return;
+      const tracker=videoColorAutomationRef.current;
+      if(tracker.family===event.detail.family)tracker.stableSamples+=1;
+      else videoColorAutomationRef.current={family:event.detail.family,stableSamples:1};
+      if(videoColorAutomationRef.current.stableSamples<2)return;
+      triggerTitanPlayback(presetId,"video-color").then((triggered)=>{
+        if(!triggered)return;
+        setAutoLightPreset(presetId);
+        window.dispatchEvent(new CustomEvent("king:lighting-cue",{detail:{presetId,source:"video-color",mediaId:outputBaseMedia.id,color:event.detail}}));
+      });
+    };
+    window.addEventListener("king:video-color",handleVideoColor);
+    return()=>window.removeEventListener("king:video-color",handleVideoColor);
+  },[light,lightingEnabled,outputBaseMedia,titanMappings,titanStatus.connected,triggerTitanPlayback]);
   const connectLedOutput = async () => {
     if (!window.__TAURI_INTERNALS__) return;
     setLedOutputStatus((current)=>current.previewMode
@@ -2331,44 +3477,53 @@ export function App() {
   };
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return;
-    const programMedia = outputMedia.type === "video"
-      ? { ...outputMedia, muted:!videoAudioEnabled }
-      : outputMedia;
+    const programMedia = outputMedia.type === "text" && outputBaseMedia?.type === "video"
+      ? { ...outputMedia, baseMedia:{ ...outputBaseMedia, muted:!videoAudioEnabled } }
+      : outputBaseMedia?.type === "video"
+        ? { ...outputMedia, muted:!videoAudioEnabled }
+        : outputMedia;
     invoke("set_program_state", { program:{ media:programMedia, transform:outputTransform, lyrics:activeLyrics } })
       .catch((error)=>console.error("同步 LED 节目画面失败",error));
-  },[outputMedia,outputTransform,videoAudioEnabled,activeLyrics]);
+  },[outputMedia,outputBaseMedia,outputTransform,videoAudioEnabled,activeLyrics]);
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return;
     connectLedOutput();
     const timer=window.setInterval(async()=>{
       try {
         const status=await invoke("output_window_status");
-        setLedOutputStatus(status);
+        setLedOutputStatus(current=>JSON.stringify(current)===JSON.stringify(status)?current:status);
         if(!status.connected) await connectLedOutput();
       } catch(error) {
-        setLedOutputStatus({connected:false,previewMode:false,message:String(error)});
+        const next={connected:false,previewMode:false,message:String(error)};
+        setLedOutputStatus(current=>JSON.stringify(current)===JSON.stringify(next)?current:next);
         await connectLedOutput();
       }
     },5000);
     return ()=>window.clearInterval(timer);
   },[]);
   const chosenTextElements = stagedMedia?.type === "text" ? stagedMedia.elements.filter((element)=>selectedTextElements.includes(element.id)) : [];
-  const outputLabel = outputMedia.name;
+  const outputLabel = `${outputBaseMedia?.name ?? outputMedia.name}${outputMedia.type === "text" ? " · 文字/Logo 覆盖" : ""}`;
   const stageMedia = (candidate) => {
     setTextDraftClearSlot(null);
-    const stagedCandidate = candidate.type === "text"
-      ? { ...candidate, baseMedia: outputMedia.type === "text" ? outputMedia.baseMedia : outputMedia, elements: (candidate.elements ?? []).map((element)=>({...element})) }
-      : candidate;
+    const replacesOverlay = candidate.type === "text";
+    const currentBaseMedia = resolveBaseMedia(stagedMedia ?? outputMedia);
+    const overlaySource = stagedMedia?.type === "text" ? stagedMedia : outputMedia?.type === "text" ? outputMedia : null;
+    const stagedCandidate = replacesOverlay
+      ? { ...candidate, baseMedia:currentBaseMedia, elements:cloneOverlayElements(candidate) }
+      : placeOverlayOnMedia(candidate,overlaySource);
     setStagedMedia(stagedCandidate);
-    textUndoRef.current = [];
     setStagedTransform({ ...(mediaTransforms[candidate.id] ?? defaultMediaTransform) });
-    const firstTextElement = stagedCandidate.type === "text" ? stagedCandidate.elements?.[0]?.id ?? null : null;
-    setSelectedTextElement(firstTextElement);
-    setSelectedTextElements(firstTextElement?[firstTextElement]:[]);
-    if (stagedCandidate.type === "text") {
-      setPreviewMode(true);
-      setMonitorTarget(null);
+    if (replacesOverlay) {
+      textUndoRef.current = [];
+      const firstTextElement = stagedCandidate.elements?.[0]?.id ?? null;
+      setSelectedTextElement(firstTextElement);
+      setSelectedTextElements(firstTextElement?[firstTextElement]:[]);
+    } else if (!overlaySource) {
+      setSelectedTextElement(null);
+      setSelectedTextElements([]);
     }
+    setPreviewMode(true);
+    setMonitorTarget(null);
   };
   const selectTextElement = (elementId, options = {}) => {
     if (!elementId) {
@@ -2500,14 +3655,15 @@ export function App() {
   const confirmStagedMedia = () => {
     if (!stagedMedia) return;
     const committedMedia = structuredClone(stagedMedia);
+    const committedBaseMedia = resolveBaseMedia(committedMedia);
     const committedTransform = { ...(stagedTransform ?? defaultMediaTransform) };
-    setMediaTransforms((current)=>({...current,[committedMedia.id]:committedTransform}));
+    setMediaTransforms((current)=>({...current,[committedBaseMedia?.id ?? committedMedia.id]:committedTransform}));
     // 上屏后保留一份独立的 PVW 副本，让操作员可立即继续编辑下一版。
     setOutputMedia(committedMedia);
     setStagedMedia(committedMedia);
     setStagedTransform(committedTransform);
-    if (committedMedia.type === "video") setVideo(committedMedia.index);
-    if (committedMedia.type === "image") setSelectedImage(committedMedia.id);
+    if (committedBaseMedia?.type === "video") setVideo(committedBaseMedia.index);
+    if (committedBaseMedia?.type === "image") setSelectedImage(committedBaseMedia.id);
     setHoverMedia(null);
     textUndoRef.current = [];
     setTextDraftClearSlot(null);
@@ -2583,7 +3739,9 @@ export function App() {
     return () => window.removeEventListener("keydown",handleTextShortcut);
   }, [stagedMedia,selectedTextElement,selectedTextElements]);
 
-  const deckMeterCeilings = { deck1:100-crossfade, deck2:crossfade };
+  const deckMeterCeilings = deckCue.deck
+    ? { deck1:deckCue.deck===1?headphoneVolume:0, deck2:deckCue.deck===2?headphoneVolume:0 }
+    : { deck1:100-crossfade, deck2:crossfade };
   const handleCrossfadeChange = (event) => {
     const nextCrossfade = Number(event.target.value);
     writeDeckOutputVolumes(nextCrossfade,masterVolume);
@@ -2594,6 +3752,13 @@ export function App() {
     writeDeckOutputVolumes(crossfade,nextMasterVolume);
     setMasterVolume(nextMasterVolume);
   };
+  const handleMicrophoneVolumeChange = (index,event) => {
+    const binding=microphoneBindings[index];
+    if(!binding||mixerControlStatus.mode!=="hardware-live")return;
+    const value=Number(event.target.value);
+    setMicrophoneVolumes(current=>[0,1].map(itemIndex=>itemIndex===index?value:(current[itemIndex]??null)));
+    queueHomeMicrophoneWrites(microphoneFaderWrites(binding,value));
+  };
   const faderPointerHandlers = {
     onPointerDown:beginFaderInteraction,
     onPointerUp:endFaderInteraction,
@@ -2601,6 +3766,76 @@ export function App() {
     onMouseDown:beginFaderInteraction,
     onMouseUp:endFaderInteraction,
     onBlur:endFaderInteraction,
+  };
+  const filteredTrackEntries = useMemo(() => {
+    const query = songSearch.trim().toLocaleLowerCase("zh-CN");
+    if (!query) return tracks.map((track,index)=>({track,index}));
+    return tracks
+      .map((track,index)=>({track,index}))
+      .filter(({track}) => [track.title,track.artist,track.tag,track.path]
+        .some((value)=>String(value ?? "").toLocaleLowerCase("zh-CN").includes(query)));
+  },[tracks,songSearch]);
+  const requestManualAiProduction = useCallback(async (track) => {
+    if (!track?.path || !runtimeCapability.aiProcessingAvailable) return;
+    const normalizedPath = normalizeMediaPath(track.path);
+    setManualAiPendingPaths((current)=>current.includes(normalizedPath)?current:[...current,normalizedPath]);
+    try {
+      await invoke("prioritize_audio_ai_analysis", {
+        path:track.path,
+        artist:track.artist&&track.artist!=="--"?track.artist:null,
+      });
+      const jobs = await invoke("list_audio_ai_jobs");
+      setAudioAiJobs(Array.isArray(jobs)?jobs:[]);
+      setSongPackageMessage(`已优先制作：${track.title}`);
+    } catch (error) {
+      const message=String(error);
+      setSongPackageMessage(`AI 制作未提交：${message}`);
+      console.error(`手动 AI 制作失败：${track.title}`,error);
+    } finally {
+      setManualAiPendingPaths((current)=>current.filter((path)=>path!==normalizedPath));
+    }
+  },[runtimeCapability.aiProcessingAvailable]);
+  const trackRows = useMemo(() => filteredTrackEntries.map(({track:t,index:i})=>{
+    const trackAnalysis = audioAnalyses[audioAnalysisKey(t)];
+    const aiJob = t.path ? audioAiJobByPath.get(normalizeMediaPath(t.path)) : null;
+    const aiError = String(aiJob?.errorMessage ?? aiJob?.error_message ?? "");
+    const aiFailureLabel = /JSON transcript|transcript/i.test(aiError)
+      ? "歌词识别失败"
+      : /allocate|allocation|memory/i.test(aiError)
+        ? "资源不足/未制作"
+        : /convert string to float/i.test(aiError)
+          ? "时间解析失败"
+          : "制作失败";
+    const aiLabel = aiJob?.status==="ready"?"已制作":aiJob?.status==="skipped"?(aiJob.stage==="missing-artist"?"无歌手/仅播放":"DJ长音频/仅播放"):aiJob?.status==="running"?`制作中/${aiJob.stage}`:aiJob?.status==="paused"?"播放中/制作暂停":aiJob?.status==="queued"?"待制作":aiJob?.status==="failed"?aiFailureLabel:runtimeCapability.mode==="player"?"可播放":"待登记";
+    const aiTitle = aiJob?.status==="failed" && aiError ? `${aiLabel}：${aiError}` : aiLabel;
+    const trackBpm = Number(trackAnalysis?.bpm) > 0 ? Number(trackAnalysis.bpm).toFixed(1).replace(/\.0$/, "") : t.bpm;
+    const inDeck1 = i===deck1;
+    const inDeck2 = i===deck2;
+    const onAirDeck1 = playingDecks[1]&&inDeck1;
+    const onAirDeck2 = playingDecks[2]&&inDeck2;
+    const onAir = onAirDeck1||onAirDeck2;
+    const bothOnAir = onAirDeck1&&onAirDeck2;
+    const locked = inDeck1||inDeck2;
+    const rowSelected = !locked&&selectedTrack===i;
+    const manualAiPending = Boolean(t.path&&manualAiPendingPaths.includes(normalizeMediaPath(t.path)));
+    const missingArtist = !t.artist||t.artist==="--";
+    const manualAiDisabled = manualAiPending||!runtimeCapability.aiProcessingAvailable||missingArtist||["ready","running","paused"].includes(aiJob?.status)||aiJob?.status==="skipped";
+    const manuallyPrioritized = aiJob?.status==="queued"&&["manual-priority","manual-retry"].includes(aiJob?.stage);
+    const manualAiLabel = manualAiPending?"提交中":aiJob?.status==="ready"?"已完成":aiJob?.status==="running"||aiJob?.status==="paused"?"制作中":manuallyPrioritized?"已置顶":aiJob?.status==="queued"?"优先":aiJob?.status==="failed"?"重做":missingArtist?"补歌手":aiJob?.status==="skipped"?"仅播放":"AI制作";
+    const manualAiTitle = missingArtist?"请先在歌曲文件名或标签中补充歌手名":manuallyPrioritized?"已置顶，当前任务结束后立即制作":aiJob?.status==="queued"?"将这首歌提到 AI 制作队列最前面":aiJob?.status==="failed"?"重新制作歌词和原唱/伴唱":"制作歌词和原唱/伴唱";
+    return <div key={t.id??`${t.title}-${i}`} role="button" aria-disabled={locked} tabIndex={locked?-1:0} className={`track-row ${rowSelected?"selected":""} ${locked?"deck-locked":""} ${inDeck1?"deck-one":""} ${inDeck2?"deck-two":""} ${onAir?"on-air":""} ${bothOnAir?"on-air-both":""}`} onClick={()=>{if(!locked)setSelectedTrack(i)}} onDoubleClick={()=>{if(!locked)loadTrack(i)}} onKeyDown={event=>{if(event.key==="Enter"&&!locked)setSelectedTrack(i)}}>
+      <span className={`track-index ${inDeck1||inDeck2?"deck-indicators":""}`}>{inDeck1||inDeck2?[inDeck1&&<SpeakerHigh key="deck-1" className="deck-one-indicator" weight={onAirDeck1?"fill":"regular"}/>,inDeck2&&<SpeakerHigh key="deck-2" className="deck-two-indicator" weight={onAirDeck2?"fill":"regular"}/>]:String(i+1).padStart(2,"0")}</span><span className="track-info"><b title={t.title}>{t.title}</b><small title={`${t.tag} · ${aiTitle}`}>{t.tag} · {aiLabel}</small></span><span className="track-artist" title={t.artist}>{t.artist}</span><span title={`BPM ${trackBpm}`}>{trackBpm}</span><span title={`时长 ${t.duration}`}>{t.duration}</span>
+      {onAir&&<span className="track-playing-decks" aria-label={`正在由${bothOnAir?" Deck 1 和 Deck 2":` Deck ${onAirDeck1?1:2}`}播放`}>{onAirDeck1&&<span className="track-playing-badge deck-one-label">1</span>}{onAirDeck2&&<span className="track-playing-badge deck-two-label">2</span>}</span>}
+      <button className="track-insert track-ai-action" disabled={manualAiDisabled} aria-label={`${manualAiLabel}：${t.title}`} title={manualAiTitle} onClick={event=>{event.stopPropagation();requestManualAiProduction(t)}} onDoubleClick={event=>event.stopPropagation()}>{manualAiLabel}</button>
+      <button className="track-insert track-deck-one-action" aria-label="装载到 1 号 Deck，不自动播放" title="装载到 1 号 Deck（不自动播放）" onClick={event=>{event.stopPropagation();insertTrack(1,i)}} onDoubleClick={event=>event.stopPropagation()}>1</button>
+      <button className="track-insert track-deck-two-action" aria-label="装载到 2 号 Deck，不自动播放" title="装载到 2 号 Deck（不自动播放）" onClick={event=>{event.stopPropagation();insertTrack(2,i)}} onDoubleClick={event=>event.stopPropagation()}>2</button>
+    </div>;
+  }), [filteredTrackEntries,audioAnalyses,audioAiJobByPath,runtimeCapability.mode,runtimeCapability.aiProcessingAvailable,manualAiPendingPaths,deck1,deck2,playingDecks,selectedTrack,library,requestManualAiProduction]);
+  const exitApplication = () => {
+    invoke("exit_application").catch((error) => {
+      console.error("退出桌面程序失败", error);
+      window.close();
+    });
   };
 
   return <div className="app-shell">
@@ -2610,10 +3845,10 @@ export function App() {
     </div>
     <header className="topbar">
       <div className="brand"><img src="/assets/king-club-logo-white.svg" alt="King Club"/><div><strong>AI Broadcast Control 2027</strong></div></div>
-      <div className="system-status"><span className={`runtime-mode runtime-mode-${runtimeCapability.mode}`} title={`${runtimeCapability.message}${runtimeCapability.aiProcessingAvailable?` · AI worker ${audioAiWorker.running?"运行中":"等待中"}`:""}`}>{runtimeCapability.mode==="full"?<><span className="nvidia-runtime-logo" aria-label="NVIDIA"><img src="/assets/nvidia-logo-horiz-wht-16x9.png" alt="NVIDIA"/></span><span className="runtime-edition">全功能版</span></>:<><Lightning weight="fill"/> {runtimeCapability.mode==="detecting"?"识别硬件":"播放版"}</>}</span><span><WifiHigh /> 本机控制</span><span className={ledOutputStatus.connected?"led-connected":"led-disconnected"} title={ledOutputStatus.message}><MonitorPlay /> {ledOutputStatus.previewMode?"单屏 · C1 预览":ledOutputStatus.connected?"第二屏 + C1 预览":"LED 主屏未连接"}</span><span className="clock">{formatDateTime(now)}</span></div>
+      <div className="system-status"><span className={`runtime-mode runtime-mode-${runtimeCapability.mode}`} title={`${runtimeCapability.message}${runtimeCapability.aiProcessingAvailable?` · AI worker ${audioAiWorker.running?"运行中":"等待中"}`:""}`}>{runtimeCapability.mode==="full"?<><span className="nvidia-runtime-logo" aria-label="NVIDIA"><img src="/assets/nvidia-logo-horiz-wht-16x9.png" alt="NVIDIA"/></span><span className="runtime-edition">全功能版</span></>:<><Lightning weight="fill"/> {runtimeCapability.mode==="detecting"?"识别硬件":"播放版"}</>}</span><span><WifiHigh /> 本机控制</span><span className={ledOutputStatus.connected?"led-connected":"led-disconnected"} title={ledOutputStatus.message}><MonitorPlay /> {ledOutputStatus.previewMode?"单屏 · C1 预览":ledOutputStatus.connected?"第二屏 + C1 预览":"LED 主屏未连接"}</span><RuntimeClock/><button type="button" className="app-exit-button" onClick={exitApplication} title="退出软件" aria-label="退出软件"><X weight="bold"/></button></div>
     </header>
 
-    <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""} ${activeNav==="调音台"?"mixer-layout":""}`}>
+    <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""} ${activeNav==="调音台"?"mixer-layout":""} ${activeNav==="Avolites Tiger Touch Pro"?"titan-layout":""}`}>
       {activeNav === "设置" ? <SettingsView
         screenTargets={screenTargets}
         monitorTargets={monitorTargets}
@@ -2628,6 +3863,18 @@ export function App() {
         onMixerModelChange={configureMixerModel}
         onMixerControlHostChange={updateMixerControlHost}
         onOpenMixerDriver={openMixerDriver}
+        titanHost={titanHost}
+        titanStatus={titanStatus}
+        titanPlaybacks={titanPlaybacks}
+        titanMappings={titanMappings}
+        titanActionStatus={titanActionStatus}
+        lightingPackageStatus={lightingPackageStatus}
+        onTitanHostChange={updateTitanHost}
+        onRefreshTitan={refreshTitanStatus}
+        onTitanMappingChange={updateTitanMapping}
+        onExportLightingPackage={exportLightingPackage}
+        onImportLightingPackage={importLightingPackage}
+        onOpenLightingPackageDirectory={openLightingPackageDirectory}
         vocalStatus={vocalStatus}
         vocalBusy={vocalBusy}
         onRefreshVocal={refreshVocalStatus}
@@ -2639,7 +3886,39 @@ export function App() {
         onSaveRouting={saveVocalRouting}
         calibrationStatus={calibrationStatus}
         onRunCalibration={runVocalCalibration}
+      /> : activeNav === "音乐管理" ? <MusicManagementView
+        vocalProfiles={vocalProfiles}
+        vocalProfileDevices={vocalProfileDevices}
+        vocalProfileBusy={vocalProfileBusy}
+        vocalProfileMessage={vocalProfileMessage}
+        songs={tracks.filter(track=>track.path).map(track=>({title:track.title,artist:track.artist,path:track.path}))}
+        selectedProfileId={selectedVocalProfileId}
+        onSelectedProfileIdChange={selectVocalProfile}
+        onCreateVocalProfile={createVocalProfile}
+        onRecordVocalProfileSample={recordVocalProfileSample}
+        onDeleteVocalProfile={deleteVocalProfile}
+        onPrepareVocalProfileSong={prepareVocalProfileSong}
       /> : <>
+      <LightingConsoleWorkspace
+        titanHost={titanHost}
+        titanStatus={titanStatus}
+        titanInventory={titanInventory}
+        titanPlaybacks={titanPlaybacks}
+        titanStaticPlaybacks={titanStaticPlaybacks}
+        titanMappings={titanMappings}
+        effectRegistry={titanEffectRegistry}
+        titanActionStatus={titanActionStatus}
+        lightingPackageStatus={lightingPackageStatus}
+        lightingEnabled={lightingEnabled}
+        onLightingEnabledChange={setLightingEnabled}
+        onRefreshTitan={()=>Promise.allSettled([refreshTitanStatus(),refreshTitanInventory()])}
+        onQuickSlotChange={stableUpdateTitanMapping}
+        onPlaybackQuickSlotChange={stableUpdateTitanPlaybackQuickSlot}
+        onEffectChange={stableUpdateTitanEffect}
+        onExportPackage={stableExportLightingPackage}
+        onImportPackage={stableImportLightingPackage}
+        onOpenPackageDirectory={stableOpenLightingPackageDirectory}
+      />
       <aside className="panel library-panel">
         <div className="panel-title"><MusicNotes weight="fill"/><div><b>播放曲库</b><small title={mpvRuntime.message}>{audioAssets.length?`${playlist}常规歌单 · ${tracks.length} 首 · ${mpvEnabled?"mpv 播放引擎":"兼容引擎"}`:`${playlist}常规歌单 · 当前为演示数据`}</small></div></div>
         <div className="library-switch"><button className={library===1?"active":""} onClick={()=>setLibrary(1)}>1号曲库</button><button className={library===2?"active":""} onClick={()=>setLibrary(2)}>2号曲库</button></div>
@@ -2653,27 +3932,14 @@ export function App() {
           <div className="playlist-row weekday-row">{weekdayPlaylists.map(p=><button key={p} className={playlist===p?"active":""} onClick={()=>setPlaylist(p)}>{p}</button>)}</div>
           <div className="playlist-row special-row">{specialPlaylists.map(p=><button key={p} className={playlist===p?"active":""} onClick={()=>setPlaylist(p)}>{p}</button>)}</div>
         </div>
+        <label className="song-search">
+          <MagnifyingGlass weight="bold"/>
+          <input value={songSearch} onChange={event=>setSongSearch(event.target.value)} placeholder="搜索歌曲、歌手或目录" aria-label="搜索歌曲、歌手或目录"/>
+          <span>{filteredTrackEntries.length}/{tracks.length}</span>
+          {songSearch&&<button type="button" onClick={()=>setSongSearch("")} title="清空搜索" aria-label="清空搜索"><X weight="bold"/></button>}
+        </label>
         <div className="table-head"><span>歌曲</span><span>歌手</span><span>BPM</span><span>时长</span></div>
-        <div className="track-list">{tracks.map((t,i)=>{
-          const trackAnalysis = audioAnalyses[audioAnalysisKey(t)];
-          const aiJob = t.path ? audioAiJobByPath.get(normalizeMediaPath(t.path)) : null;
-          const aiLabel = aiJob?.status==="ready"?"已制作":aiJob?.status==="skipped"?"DJ长音频/仅播放":aiJob?.status==="running"?`制作中/${aiJob.stage}`:aiJob?.status==="paused"?"播放中/制作暂停":aiJob?.status==="queued"?"待制作":aiJob?.status==="failed"?"制作失败":runtimeCapability.mode==="player"?"可播放":"待登记";
-          const trackBpm = Number(trackAnalysis?.bpm) > 0 ? Number(trackAnalysis.bpm).toFixed(1).replace(/\.0$/, "") : t.bpm;
-          const inDeck1 = i===deck1;
-          const inDeck2 = i===deck2;
-          const onAirDeck1 = playingDecks[1]&&inDeck1;
-          const onAirDeck2 = playingDecks[2]&&inDeck2;
-          const onAir = onAirDeck1||onAirDeck2;
-          const bothOnAir = onAirDeck1&&onAirDeck2;
-          const locked = inDeck1||inDeck2;
-          const rowSelected = !locked&&selectedTrack===i;
-          return <div key={t.id??`${t.title}-${i}`} role="button" aria-disabled={locked} tabIndex={locked?-1:0} className={`track-row ${rowSelected?"selected":""} ${locked?"deck-locked":""} ${inDeck1?"deck-one":""} ${inDeck2?"deck-two":""} ${onAir?"on-air":""} ${bothOnAir?"on-air-both":""}`} onClick={()=>{if(!locked)setSelectedTrack(i)}} onDoubleClick={()=>{if(!locked)loadTrack(i)}} onKeyDown={event=>{if(event.key==="Enter"&&!locked)setSelectedTrack(i)}}>
-            <span className={`track-index ${inDeck1||inDeck2?"deck-indicators":""}`}>{inDeck1||inDeck2?[inDeck1&&<SpeakerHigh key="deck-1" className="deck-one-indicator" weight={onAirDeck1?"fill":"regular"}/>,inDeck2&&<SpeakerHigh key="deck-2" className="deck-two-indicator" weight={onAirDeck2?"fill":"regular"}/>]:String(i+1).padStart(2,"0")}</span><span className="track-info"><b>{t.title}</b><small>{t.tag} · {aiLabel}</small></span><span className="track-artist" title={t.artist}>{t.artist}</span><span>{trackBpm}</span><span>{t.duration}</span>
-            {onAir&&<span className="track-playing-decks" aria-label={`正在由${bothOnAir?" Deck 1 和 Deck 2":` Deck ${onAirDeck1?1:2}`}播放`}>{onAirDeck1&&<span className="track-playing-badge deck-one-label">1</span>}{onAirDeck2&&<span className="track-playing-badge deck-two-label">2</span>}</span>}
-            <button className="track-insert" aria-label="装载到 1 号 Deck，不自动播放" title="装载到 1 号 Deck（不自动播放）" onClick={event=>{event.stopPropagation();insertTrack(1,i)}} onDoubleClick={event=>event.stopPropagation()}>1</button>
-            <button className="track-insert" aria-label="装载到 2 号 Deck，不自动播放" title="装载到 2 号 Deck（不自动播放）" onClick={event=>{event.stopPropagation();insertTrack(2,i)}} onDoubleClick={event=>event.stopPropagation()}>2</button>
-          </div>;
-        })}</div>
+        <div className="track-list">{trackRows.length?trackRows:<div className="track-search-empty"><b>没有找到歌曲</b><small>请更换歌曲名、歌手或目录关键词</small></div>}</div>
       </aside>
 
       <section className="center-column">
@@ -2687,8 +3953,8 @@ export function App() {
           <div className={`led-stage ${previewMode&&monitorTarget===null?"dual-preview-stage":""}`}>
             {monitorTarget===null
               ? previewMode
-                ? <><div className="dual-screen-pane program-pane"><span className="screen-role-label">PGM · 当前上屏</span><MediaOutputScreen media={outputMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={outputTransform}/></div><div className="dual-screen-pane preview-pane"><span className="screen-role-label">{previewPending?"PVW · 编辑中":"PVW · 已同步"}</span><MediaOutputScreen media={displayMedia} track={tracks[deck1]} transform={displayTransform} editable={stagedMedia?.type==="text"&&stagedMedia.id===displayMedia.id} selectedElementId={selectedTextElement} selectedElementIds={selectedTextElements} onElementSelect={selectTextElement} onElementChange={updateTextElementById} onEditStart={rememberTextState}/>{stagedMedia?.id===displayMedia.id&&stagedMedia.src&&<MediaTransformEditor value={displayTransform} onChange={setStagedTransform}/>}<svg className="preview-visible-outline" viewBox="0 0 2048 2304" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><path d="M512 0h1024v1152h512v1152H0V1152h512z"/></svg></div></>
-                : <MediaOutputScreen media={displayMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={displayTransform}/>
+                ? <><div className="dual-screen-pane program-pane"><span className="screen-role-label">PGM · 当前上屏</span><MediaOutputScreen media={outputMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={outputTransform} videoRef={outputVideoElementRef}/></div><div className="dual-screen-pane preview-pane"><span className="screen-role-label">{previewPending?"PVW · 编辑中":"PVW · 已同步"}</span><MediaOutputScreen media={displayMedia} track={tracks[deck1]} transform={displayTransform} editable={stagedMedia?.type==="text"&&stagedMedia===displayMedia} selectedElementId={selectedTextElement} selectedElementIds={selectedTextElements} onElementSelect={selectTextElement} onElementChange={updateTextElementById} onEditStart={rememberTextState}/>{stagedMedia===displayMedia&&resolveBaseMedia(stagedMedia)?.src&&<MediaTransformEditor value={displayTransform} onChange={setStagedTransform}/>}<svg className="preview-visible-outline" viewBox="0 0 2048 2304" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><path d="M512 0h1024v1152h512v1152H0V1152h512z"/></svg></div></>
+                : <MediaOutputScreen media={displayMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={displayTransform} videoRef={outputVideoElementRef}/>
               : <div className="monitor-feed" style={{backgroundImage:`linear-gradient(180deg,rgba(0,0,0,.05),rgba(0,0,0,.28)),url(${monitorTargets[monitorTarget].src})`}}><div className="monitor-live"><span className="live-dot"/> LIVE</div><b>{monitorTargets[monitorTarget].name}</b><small>摄像机视频流接口预留</small></div>}
           </div>
           {previewMode&&monitorTarget===null&&stagedMedia?.type==="text"&&<TextFormatToolbar elements={chosenTextElements} fonts={systemFonts} fontDirectory={fontLibraryDirectory} customFontCount={customFontCount} onOpenFontDirectory={()=>invoke("open_font_directory").then(setFontLibraryDirectory).catch((error)=>console.error("打开字体目录失败",error))} onRefreshFonts={()=>refreshFontLibrary().catch((error)=>console.error("刷新字体目录失败",error))} onApply={applyTextSelection} onAlign={alignTextSelection} onUpload={uploadTextGraphic} saveSlot={activeTextDraftSlot} onSave={saveActiveTextDraft}/>}
@@ -2696,7 +3962,7 @@ export function App() {
           {monitorTarget===null&&previewMode&&stagedMedia&&<div className={`media-preview-confirm ${previewPending?"is-pending":"is-synced"}`}><span>{previewPending?"PVW · 有修改":"PVW · 与 PGM 一致"}</span><button type="button" className="reset" onClick={resetMediaPreview}>重置</button><button type="button" className="take" onClick={confirmStagedMedia}>上屏</button></div>}
           <div className="preview-footer">
             <span><CheckCircle weight="fill"/> {monitorTarget===null?(ledOutputStatus.previewMode?"单屏模式 · C1 实时预览":ledOutputStatus.connected?"第二屏输出正常 · C1 实时预览":"第二屏等待连接"):"监控已选择"}</span>
-            <span>{monitorTarget===null?`${outputMedia.type === "image" ? "图片" : outputMedia.type === "text" ? "文字" : "视频"}：${outputLabel}`:"等待摄像机接入"}</span>
+            <span>{monitorTarget===null?`${outputBaseMedia?.type === "image" ? "图片" : outputBaseMedia?.type === "video" ? "视频" : "画面"}：${outputLabel}`:"等待摄像机接入"}</span>
             <span>{monitorTarget===null?`灯光：${light===null?`自动 · ${lights[effectiveLight]?.label??"等待节拍"}`:lights[effectiveLight]?.label??"未配置"}`:"延迟：-- ms"}</span>
           </div>
           <div className="c1-side-rail monitor-rail" aria-label="监控画面选择">
@@ -2731,9 +3997,17 @@ export function App() {
               lyricsAvailable={deckLyricsLines[1].length>0}
               vocalMode={deckVocalModes[1]}
               accompanimentAvailable={Boolean(tracks[deck1]?.accompanimentPath)}
+              aiRescueEnabled={deckAiRescueEnabled[1]}
+              aiReferenceStatus={deckReferenceStatus[1]}
+              onAiRescueToggle={()=>setDeckAiRescueEnabled(current=>({...current,1:!current[1]}))}
               onLyricsToggle={()=>setDeckLyricsEnabled(current=>({...current,1:!current[1]}))}
               onVocalToggle={()=>switchDeckVocalMode(1,deck1)}
               onPlay={()=>toggleDeckPlayback(1,deck1)}
+              cueActive={deckCue.deck===1}
+              cueAvailable={mpvEnabled&&mixerControlStatus.mode==="hardware-live"}
+              cueBusy={deckCue.busy}
+              cueMessage={deckCue.message}
+              onCueToggle={()=>toggleDeckCue(1)}
               meterMotionPaused={faderInteractionActive}
             />
             <Deck
@@ -2756,17 +4030,25 @@ export function App() {
               lyricsAvailable={deckLyricsLines[2].length>0}
               vocalMode={deckVocalModes[2]}
               accompanimentAvailable={Boolean(tracks[deck2]?.accompanimentPath)}
+              aiRescueEnabled={deckAiRescueEnabled[2]}
+              aiReferenceStatus={deckReferenceStatus[2]}
+              onAiRescueToggle={()=>setDeckAiRescueEnabled(current=>({...current,2:!current[2]}))}
               onLyricsToggle={()=>setDeckLyricsEnabled(current=>({...current,2:!current[2]}))}
               onVocalToggle={()=>switchDeckVocalMode(2,deck2)}
               onPlay={()=>toggleDeckPlayback(2,deck2)}
+              cueActive={deckCue.deck===2}
+              cueAvailable={mpvEnabled&&mixerControlStatus.mode==="hardware-live"}
+              cueBusy={deckCue.busy}
+              cueMessage={deckCue.message}
+              onCueToggle={()=>toggleDeckCue(2)}
               meterMotionPaused={faderInteractionActive}
             />
           </div>
           <div className="crossfader"><div className="crossfader-side crossfader-side-one"><span className="track-playing-badge deck-one-label" aria-hidden="true">1</span><span className="crossfader-percent">{100-crossfade}</span></div><div className="crossfader-control" style={{"--crossfade-position":`${crossfade}%`}}><div className="crossfader-scale" aria-hidden="true">{Array.from({length:17},(_,index)=><i key={index} className={index===8?"center":index%4===0?"major":""}/>)}</div><input aria-label="双曲交叉推子" type="range" min="0" max="100" value={crossfade} onChange={handleCrossfadeChange} {...faderPointerHandlers}/></div><div className="crossfader-side crossfader-side-two"><span className="crossfader-percent">{crossfade}</span><span className="track-playing-badge deck-two-label" aria-hidden="true">2</span></div></div>
           <div className="mixer-channel-strip" aria-label="总输出、耳机与麦克风音量控制">
             <label className="mixer-channel master-channel" title="总声音"><span><SpeakerHigh weight="fill"/><em>{masterVolume}</em></span><div className="mixer-fader-control"><div className="mixer-fader-scale" aria-hidden="true">{Array.from({length:17},(_,index)=><i key={index} className={index===8?"center":index%4===0?"major":""}/>)}</div><input style={{"--mixer-level":`${masterVolume}%`}} aria-label="总声音大小" type="range" min="0" max="100" value={masterVolume} onChange={handleMasterVolumeChange} {...faderPointerHandlers}/></div></label>
-            <label className="mixer-channel headphone-channel" title="耳机监听音量；独立输出设备将在调音台设备设置中绑定"><span><Headphones weight="fill"/><em>{headphoneVolume}</em></span><div className="mixer-fader-control"><div className="mixer-fader-scale" aria-hidden="true">{Array.from({length:17},(_,index)=><i key={index} className={index===8?"center":index%4===0?"major":""}/>)}</div><input style={{"--mixer-level":`${headphoneVolume}%`}} aria-label="耳机音量" type="range" min="0" max="100" value={headphoneVolume} onChange={event=>setHeadphoneVolume(Number(event.target.value))} {...faderPointerHandlers}/></div></label>
-            {[0,1].map(index=>{const volume=microphoneVolumes[index]??80;return <label className={`mixer-channel microphone-channel microphone-channel-${index+1}`} key={`microphone-${index}`} title={`麦克风 ${index+1}；默认保持未监听，防止未配置设备时产生啸叫`}><span><Microphone weight="fill"/><em>{volume}</em></span><div className="mixer-fader-control"><div className="mixer-fader-scale" aria-hidden="true">{Array.from({length:17},(_,tickIndex)=><i key={tickIndex} className={tickIndex===8?"center":tickIndex%4===0?"major":""}/>)}</div><input style={{"--mixer-level":`${volume}%`}} aria-label={`麦克风 ${index+1} 音量`} type="range" min="0" max="100" value={volume} onChange={event=>setMicrophoneVolumes(current=>[0,1].map(itemIndex=>itemIndex===index?Number(event.target.value):(current[itemIndex]??80)))} {...faderPointerHandlers}/></div></label>})}
+            <label className="mixer-channel headphone-channel" title={deckCue.deck?`Deck ${deckCue.deck} CUE 软件监听电平；最终响度再由 Qu-16 Phones 实体旋钮控制`:"先按 Deck 的圆形 CUE，再用这里调软件监听电平"}><span><Headphones weight="fill"/><em>{headphoneVolume}</em></span><div className="mixer-fader-control"><div className="mixer-fader-scale" aria-hidden="true">{Array.from({length:17},(_,index)=><i key={index} className={index===8?"center":index%4===0?"major":""}/>)}</div><input style={{"--mixer-level":`${headphoneVolume}%`}} aria-label="CUE 耳机监听音量" type="range" min="0" max="100" value={headphoneVolume} onChange={event=>setHeadphoneVolume(Number(event.target.value))} {...faderPointerHandlers}/></div></label>
+            {[0,1].map(index=>{const binding=microphoneBindings[index];const readback=microphoneFaderReadback(mixerParameterSnapshot,binding);const volume=microphoneVolumes[index]??readback.value??0;const controlReady=mixerControlStatus.mode==="hardware-live"&&readback.available;const targets=binding?.targets?.map(target=>target.replace("ch-","CH")).join("+")||"未绑定";const title=!binding?`麦克风 ${index+1} 尚未绑定`:!controlReady?`${binding.label} · ${targets}；等待 Qu-16 真机同步后开放控制`:`${binding.label} · ${targets} 真机回读${readback.synchronized?"已同步":"不一致，等待实体台联动回读"}${readback.pending?" · 写入待确认":""}`;return <label className={`mixer-channel microphone-channel microphone-channel-${index+1}`} key={`microphone-${index}`} title={title}><span><Microphone weight="fill"/><em>{readback.available?volume:"--"}</em></span><div className="mixer-fader-control"><div className="mixer-fader-scale" aria-hidden="true">{Array.from({length:17},(_,tickIndex)=><i key={tickIndex} className={tickIndex===8?"center":tickIndex%4===0?"major":""}/>)}</div><input style={{"--mixer-level":`${volume}%`}} aria-label={`麦克风 ${index+1} 音量`} type="range" min="0" max="100" value={volume} disabled={!controlReady} onChange={event=>handleMicrophoneVolumeChange(index,event)} {...faderPointerHandlers}/></div></label>})}
           </div>
         </div>
       </section>
@@ -2777,16 +4059,16 @@ export function App() {
           <div className="media-type-switch" role="tablist" aria-label="大屏素材类型">{mediaTypes.map(type=><button key={type.id} type="button" role="tab" aria-selected={mediaType===type.id} className={mediaType===type.id?"active":""} onClick={()=>{setMediaType(type.id);setMediaCategory("全部");setHoverMedia(null)}}>{type.label}</button>)}</div>
           {activeMediaCategories.length>0&&<div className="media-category-switch" role="radiogroup" aria-label={`${activeMediaType.label}分类`}>{activeMediaCategories.map((category)=><button key={category} type="button" role="radio" aria-checked={mediaCategory===category} className={mediaCategory===category?"active":""} onClick={()=>setMediaCategory(category)}>{category}</button>)}</div>}
           <div className={mediaType==="image"?"video-grid image-grid":mediaType==="text"?"text-workspace":"video-grid"}>
-            {mediaType==="video"?(visibleVideos.length?visibleVideos.map((item)=>{const candidate={...item,id:item.id,type:"video",name:item.name,src:item.src};return <button key={item.id} type="button" className={`${outputMedia.id===candidate.id?"active":""} ${stagedMedia?.id===candidate.id?"staged":""}`} onMouseEnter={()=>setHoverMedia(candidate)} onMouseLeave={()=>setHoverMedia(null)} onFocus={()=>setHoverMedia(candidate)} onBlur={()=>setHoverMedia(null)} onClick={()=>stageMedia(candidate)} aria-label={`预览视频 ${item.name}`}><MediaThumbnail item={item}/>{outputMedia.id===candidate.id&&<i><Play weight="fill"/></i>}</button>}):<div className="media-empty"><b>该分类暂无视频</b><small>将 MP4 放入本地视频目录后自动出现。</small></div>)
-            :mediaType==="image"?visibleImages.map((item)=>{const candidate={id:item.id,type:"image",name:item.name,src:item.src};return <button key={item.id} type="button" className={`${outputMedia.id===candidate.id?"active":""} ${stagedMedia?.id===candidate.id?"staged":""} ${item.locked?"black-screen-tile":""}`} onMouseEnter={()=>setHoverMedia(candidate)} onMouseLeave={()=>setHoverMedia(null)} onFocus={()=>setHoverMedia(candidate)} onBlur={()=>setHoverMedia(null)} onClick={()=>stageMedia(candidate)} aria-label={item.locked?"预览固定黑屏，不可删除":`预览图片 ${item.name}`} title={item.locked?"固定黑屏 · 不可移动 · 不可删除":item.name}>{item.src?<img src={item.src} alt=""/>:<strong>黑屏</strong>}{item.locked&&<em>固定</em>}</button>})
+            {mediaType==="video"?(visibleVideos.length?visibleVideos.map((item)=>{const candidate={...item,id:item.id,type:"video",name:item.name,src:item.src};const programActive=outputBaseMedia?.id===candidate.id;const previewSelected=stagedBaseMedia?.id===candidate.id;return <button key={item.id} type="button" className={`${programActive?"active program-active":""} ${previewSelected?"staged preview-selected":""}`} onClick={()=>stageMedia(candidate)} aria-current={programActive?"true":undefined} aria-pressed={previewSelected} aria-label={`预览视频 ${item.name}${programActive?"，当前上屏":""}${previewSelected?"，PVW 已选":""}`} title={`${item.name} · ${programActive?"PGM 当前上屏 · ":""}${previewSelected?"PVW 已选":"点击后进入 PVW"}`}><MediaThumbnail item={item}/>{programActive&&<i><Play weight="fill"/></i>}</button>}):<div className="media-empty"><b>该分类暂无视频</b><small>将 MP4 放入本地视频目录后自动出现。</small></div>)
+            :mediaType==="image"?visibleImages.map((item)=>{const candidate={id:item.id,type:"image",name:item.name,src:item.src};return <button key={item.id} type="button" className={`${outputBaseMedia?.id===candidate.id?"active":""} ${stagedBaseMedia?.id===candidate.id?"staged":""} ${item.locked?"black-screen-tile":""}`} onMouseEnter={()=>setHoverMedia(candidate)} onMouseLeave={()=>setHoverMedia(null)} onFocus={()=>setHoverMedia(candidate)} onBlur={()=>setHoverMedia(null)} onClick={()=>stageMedia(candidate)} aria-label={item.locked?"预览固定黑屏，不可删除":`预览图片 ${item.name}`} title={item.locked?"固定黑屏 · 不可移动 · 不可删除":item.name}>{item.src?<img src={item.src} alt=""/>:<strong>黑屏</strong>}{item.locked&&<em>固定</em>}</button>})
             :<><section className="text-template-section"><header><b>预设模板</b><small>选择后在 PVW 画面编辑</small></header><div className="text-template-row">{textPrograms.map((item)=>{const candidate={...item,type:"text"};return <button key={item.id} type="button" className={`${stagedMedia?.id===candidate.id?"staged":""}`} onClick={()=>stageMedia(candidate)} aria-label={`选择${item.name}模板`}><TextProgramThumbnail program={item}/></button>})}</div></section><section className="text-draft-section"><header><b>暂存</b><small>4 个可视暂存位</small></header><div className="text-draft-row">{textDrafts.map((draft,index)=><div className={`text-draft-slot ${draft?"filled":"empty"}`} key={index}><button type="button" className="text-draft-main" onClick={()=>openTextDraft(index)} onContextMenu={(event)=>{event.preventDefault();if(draft)setTextDraftClearSlot(index)}} aria-label={draft?`暂存 ${index+1}，点击调取；右键清空`:`暂存 ${index+1}，点击新建图文`}>{draft?<TextProgramThumbnail program={draft} slot={index+1}/>:<span className="empty-draft-preview"><b>{index+1}</b><small>新建</small></span>}</button></div>)}</div></section></>}
           </div>
           {mediaType==="video"&&videoAssets.length===0&&<small className="image-library-hint">{mediaLibraryDirectories.videoDirectory?`将 MP4 放入：${mediaLibraryDirectories.videoDirectory}`:"桌面版启动后自动建立视频目录"}</small>}
           {mediaType==="image"&&imageAssets.length===0&&<small className="image-library-hint">{imageLibraryDirectory?`将图片放入：${imageLibraryDirectory}`:"桌面版启动后自动扫描图片目录"}</small>}
         </section>
         <section ref={lightPanelRef} className={`panel light-panel ${lightingEnabled ? "lighting-on" : "lighting-off"}`}>
-          <div className="panel-title compact"><LightbulbFilament weight="fill"/><div><b>Avolites Tiger Touch Pro</b></div><label className="rhythm-rule-control lighting-rhythm-rule" title="自动模式只跟随当前实际占主导声音的 Deck"><Lightning weight="fill"/><select aria-label="灯光节拍联动规则" value={lightRhythmRule} onChange={(event)=>setLightRhythmRule(event.target.value)}>{rhythmRuleOptions.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label><button type="button" className="lighting-power-toggle" aria-pressed={lightingEnabled} title={lightingEnabled ? "点击关闭全部灯光" : "点击重新开启灯光"} onClick={()=>setLightingEnabled((enabled)=>!enabled)}><span className="live-dot"/>{lightingEnabled ? "灯光开启" : "灯光关闭"}</button></div>
-          <div className="light-grid">{lights.map((lightPreset)=>{const configured=Boolean(lightPreset.label);const isActive=effectiveLight===lightPreset.id;const mode=lightPlaybackModes[lightPreset.id];return <div className={`light-preset ${configured?"configured":"empty"} ${isActive?"active":""} ${light===null&&isActive?"rhythm-active":""}`} key={lightPreset.id}><button type="button" className="light-preset-main" disabled={!configured} onClick={()=>setLight(lightPreset.id)} aria-label={configured?`触发 ${lightPreset.label}`:`${lightPreset.id} 号灯光预设未配置`} title={configured?lightPreset.label:"未配置"}><span className="light-number">{lightPreset.id}</span>{configured&&<span className="light-name">{lightPreset.label}</span>}{configured&&<span className="light-duration">{lightPreset.duration}</span>}</button>{configured&&<button type="button" className="light-mode-toggle" onClick={()=>setLightPlaybackModes((current)=>({...current,[lightPreset.id]:mode==="loop"?"once":"loop"}))} aria-label={`${lightPreset.label}${mode==="loop"?"循环播放":"单次播放"}`} title={mode==="loop"?"循环播放：点击改为单次":"单次播放：点击改为循环"}>{mode==="loop"?<ArrowsClockwise weight="bold"/>:<span className="light-once">1</span>}</button>}</div>})}</div>
+          <div className="panel-title compact"><LightbulbFilament weight="fill"/><div className="titan-panel-identity"><b>{titanStatus.connected?titanStatus.deviceName:"Avolites Titan"}</b><small className={titanStatus.connected?"titan-live":"titan-offline"}>{titanStatus.connected?`Titan ${titanStatus.softwareVersion} · ${titanStatus.showName} · ${titanPlaybacks.length} Cue/Playback`:titanStatus.message||"离线模拟 · 不发送现场灯光命令"}</small></div><label className="rhythm-rule-control lighting-rhythm-rule" title="自动模式只跟随当前实际占主导声音的 Deck"><Lightning weight="fill"/><select aria-label="灯光节拍联动规则" value={lightRhythmRule} onChange={(event)=>setLightRhythmRule(event.target.value)}>{rhythmRuleOptions.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label><button type="button" className="lighting-power-toggle" aria-pressed={lightingEnabled} title={lightingEnabled ? "暂停 KING 灯光联动；不会修改 Titan Show" : "恢复 KING 灯光联动"} onClick={()=>setLightingEnabled((enabled)=>!enabled)}><span className="live-dot"/>{lightingEnabled ? "灯光联动" : "联动暂停"}</button></div>
+          <div className="light-grid">{lights.map((lightPreset)=>{const titanId=Number(titanMappings[lightPreset.id]);const mappedPlayback=titanPlaybacks.find((playback)=>playback.titanId===titanId);const configured=Boolean(lightPreset.label||mappedPlayback);const displayName=lightPreset.label||mappedPlayback?.legend||`Titan 效果 ${lightPreset.id}`;const isActive=effectiveLight===lightPreset.id;const simulatedActive=!titanStatus.connected&&isTitanPresetSimulated(titanSimulation,lightPreset.id);const mode=lightPlaybackModes[lightPreset.id]??"once";return <div className={`light-preset ${configured?"configured":"empty"} ${isActive?"active":""} ${mappedPlayback?.active?"titan-active":""} ${simulatedActive?"titan-simulated":""} ${light===null&&isActive?"rhythm-active":""}`} key={lightPreset.id}><button type="button" className="light-preset-main" disabled={!configured} onClick={()=>{setLight(lightPreset.id);triggerTitanPlayback(lightPreset.id,"manual")}} aria-label={configured?`触发 ${displayName}`:`${lightPreset.id} 号灯光预设未配置`} title={mappedPlayback?`${displayName} · TitanId ${mappedPlayback.titanId}`:displayName}><span className="light-number">{lightPreset.id}</span>{configured&&<span className="light-name">{displayName}</span>}{configured&&<span className="light-duration">{mappedPlayback?.active?"TITAN LIVE":simulatedActive?"SIMULATION":lightPreset.duration||"已绑定"}</span>}</button>{configured&&<button type="button" className="light-mode-toggle" onClick={()=>setLightPlaybackModes((current)=>({...current,[lightPreset.id]:mode==="loop"?"once":"loop"}))} aria-label={`${displayName}${mode==="loop"?"循环播放":"单次播放"}`} title={mode==="loop"?"循环播放：点击改为单次":"单次播放：点击改为循环"}>{mode==="loop"?<ArrowsClockwise weight="bold"/>:<span className="light-once">1</span>}</button>}</div>})}</div>
           <div className="quick-actions">
             <button type="button" className={light===null?"auto active":"auto"} aria-pressed={light===null} onClick={()=>setLight(null)}>自动</button>
             {fixtureControls.map((fixture)=>{const color=fixtureColors[fixture.id];const colorValue=`rgb(${color.r}, ${color.g}, ${color.b})`;return <button type="button" key={fixture.id} className="fixture-control" style={{"--fixture-color":colorValue,"--fixture-text":isLightColor(color)?"#07100e":"#ffffff"}} onDoubleClick={(event)=>openFixtureColorPicker(fixture.id,event)} title="双击打开 RGB 调色板"><span className="fixture-color-dot"/>{fixture.label}</button>})}
@@ -2794,7 +4076,7 @@ export function App() {
           {fixtureColorEditor&&(()=>{const color=fixtureColors[fixtureColorEditor.id];const hsv=rgbToHsv(color);const hue=fixtureColorEditor.hue;return <div className="fixture-color-editor" style={{left:fixtureColorEditor.left}} role="dialog" aria-label="RGB 调色板"><div className="fixture-color-editor-head"><b>{fixtureControls.find((fixture)=>fixture.id===fixtureColorEditor.id)?.label} 调色板</b><button type="button" onClick={()=>setFixtureColorEditor(null)}>关闭</button></div><div className="fixture-picker-body" style={{display:"grid",gridTemplateColumns:"minmax(0, 1fr) 18px 64px",gap:"8px",alignItems:"stretch",justifyItems:"stretch"}}><div className="fixture-sv-field" style={{width:"100%",height:"155px",background:`linear-gradient(to bottom, transparent, #000), linear-gradient(to right, #fff, hsl(${hue}, 100%, 50%))`}} onPointerDown={updatePickerSV} onPointerMove={(event)=>event.buttons&&updatePickerSV(event)}><i className="fixture-sv-cursor" style={{left:`calc(${hsv.s*100}% - 6px)`,top:`calc(${(1-hsv.v)*100}% - 6px)`}}/></div><div className="fixture-hue-field" style={{width:"18px",height:"155px",background:"linear-gradient(to bottom, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)"}} onPointerDown={updatePickerHue} onPointerMove={(event)=>event.buttons&&updatePickerHue(event)}><i className="fixture-hue-cursor" style={{top:`calc(${hue/3.6}% - 4px)`}}/></div><div className="fixture-picker-preview" style={{width:"64px",height:"155px",backgroundColor:`rgb(${color.r}, ${color.g}, ${color.b})`,color:isLightColor(color)?"#07100e":"#ffffff",textShadow:isLightColor(color)?"none":"0 1px 1px #000"}}><span>R {color.r}</span><span>G {color.g}</span><span>B {color.b}</span></div></div></div>})()}
         </section>
       </aside>
-      <MixerWorkspace model={activeMixerModel} meterSnapshot={mixerMeterSnapshot} meterStatus={mixerMeterStatus} parameterSnapshot={mixerParameterSnapshot} controlStatus={mixerControlStatus} onWriteParameters={writeQu16Parameters}/>
+      <MixerWorkspace model={activeMixerModel} meterStatus={mixerMeterStatus} parameterSnapshot={mixerParameterSnapshot} controlStatus={mixerControlStatus} onWriteParameters={writeQu16Parameters}/>
       </>}
     </main>
 

@@ -14,6 +14,21 @@ test("selects the current lyric by real playback time",()=>{
   assert.equal(lyricAtTime(lines,2).current.text,"B");
 });
 
+test("hides a completed short lyric during a long instrumental gap",()=>{
+  const lines=parseLrc("[00:00.00]爱我就好\n[00:24.00]让我怎么放得下");
+  assert.equal(lyricAtTime(lines,2).visible,true);
+  assert.equal(lyricAtTime(lines,6).visible,false);
+  assert.equal(lyricAtTime(lines,13).visible,false);
+  assert.equal(lyricAtTime(lines,24).visible,true);
+  assert.equal(lyricAtTime(lines,24).current.text,"让我怎么放得下");
+});
+
+test("keeps continuous lyrics visible until the next timestamp",()=>{
+  const lines=parseLrc("[00:10.00]连续第一句\n[00:13.00]连续第二句");
+  assert.equal(lyricAtTime(lines,12.99).visible,true);
+  assert.equal(lyricAtTime(lines,13).current.text,"连续第二句");
+});
+
 test("turns a legacy paragraph timestamp into advancing display phrases",()=>{
   const paragraph="第一句应该单独显示，第二句也要跟着音乐。第三句不能挤在同一个画面里！还要继续显示下一句。";
   const lines=parseLrc(`[00:10.00]${paragraph}\n[00:50.00]正常下一句`);

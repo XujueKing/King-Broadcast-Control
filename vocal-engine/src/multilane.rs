@@ -104,7 +104,7 @@ impl ThreeLaneVocalEngine {
     pub fn process_frame(&mut self, input: [f32; VOCAL_LANE_COUNT]) -> MultiLaneFrameResult {
         let mut result = MultiLaneFrameResult::default();
         for (lane, sample) in input.into_iter().enumerate() {
-            let (output, quality, corrected_mix) = self.processors[lane].process_sample(sample);
+            let (output, quality, corrected_mix, _) = self.processors[lane].process_sample(sample);
             result.output[lane] = output;
             result.quality_score[lane] = quality.map(|value| value.quality_score);
             result.corrected_mix[lane] = corrected_mix;

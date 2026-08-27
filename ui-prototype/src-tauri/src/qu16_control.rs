@@ -5,7 +5,7 @@
 //! supply an arbitrary NRPN parameter ID. In particular, the protocol's remote
 //! shutdown parameter (`0x5F`) is not representable by [`Qu16ControlCommand`].
 //!
-//! Protocol source: Qu MIDI Protocol V1.9+ ISS.2, pages 3, 5, 6, 10 and 13.
+//! Protocol source: Qu MIDI Protocol V1.9+ ISS.2, pages 3, 5-8, 10 and 13.
 
 use serde::{Deserialize, Serialize};
 use std::{array, fmt};
@@ -16,9 +16,231 @@ const DATA_ENTRY_MSB_CONTROLLER: u8 = 0x06;
 const DATA_ENTRY_LSB_CONTROLLER: u8 = 0x26;
 
 const FADER_PARAMETER_ID: u8 = 0x17;
+const PAN_PARAMETER_ID: u8 = 0x16;
+const LR_ASSIGN_PARAMETER_ID: u8 = 0x18;
 const SEND_LEVEL_PARAMETER_ID: u8 = 0x20;
+const MIX_PRE_POST_PARAMETER_ID: u8 = 0x50;
 const PAFL_PARAMETER_ID: u8 = 0x51;
+const MIX_ASSIGN_PARAMETER_ID: u8 = 0x55;
 const FIXED_INDEX: u8 = 0x07;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Qu16ParameterValueKind {
+    SevenBit,
+    Binary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Qu16ProcessingParameter {
+    key: &'static str,
+    parameter_id: u8,
+    index: u8,
+    value_kind: Qu16ParameterValueKind,
+}
+
+// Every item is named by UI semantics and maps to one documented Qu NRPN.
+// Keeping this table private prevents callers from reaching Remote Shutdown
+// (0x5F) or any undocumented parameter by supplying a raw ID.
+const QU16_PROCESSING_PARAMETERS: [Qu16ProcessingParameter; 33] = [
+    Qu16ProcessingParameter {
+        key: "usb-source",
+        parameter_id: 0x12,
+        index: 0x00,
+        value_kind: Qu16ParameterValueKind::Binary,
+    },
+    Qu16ProcessingParameter {
+        key: "preamp-source",
+        parameter_id: 0x57,
+        index: 0x00,
+        value_kind: Qu16ParameterValueKind::Binary,
+    },
+    Qu16ProcessingParameter {
+        key: "preamp-gain",
+        parameter_id: 0x19,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "digital-trim",
+        parameter_id: 0x52,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "stereo-trim",
+        parameter_id: 0x54,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "polarity",
+        parameter_id: 0x6A,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::Binary,
+    },
+    Qu16ProcessingParameter {
+        key: "hpf-frequency",
+        parameter_id: 0x13,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "hpf-in",
+        parameter_id: 0x14,
+        index: 0x00,
+        value_kind: Qu16ParameterValueKind::Binary,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-lf-gain",
+        parameter_id: 0x01,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-lf-frequency",
+        parameter_id: 0x02,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-lf-width",
+        parameter_id: 0x03,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-lm-gain",
+        parameter_id: 0x05,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-lm-frequency",
+        parameter_id: 0x06,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-lm-width",
+        parameter_id: 0x07,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-hm-gain",
+        parameter_id: 0x09,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-hm-frequency",
+        parameter_id: 0x0A,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-hm-width",
+        parameter_id: 0x0B,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-hf-gain",
+        parameter_id: 0x0D,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-hf-frequency",
+        parameter_id: 0x0E,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-hf-width",
+        parameter_id: 0x0F,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "peq-in",
+        parameter_id: 0x11,
+        index: 0x00,
+        value_kind: Qu16ParameterValueKind::Binary,
+    },
+    Qu16ProcessingParameter {
+        key: "gate-attack",
+        parameter_id: 0x41,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "gate-release",
+        parameter_id: 0x42,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "gate-hold",
+        parameter_id: 0x43,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "gate-threshold",
+        parameter_id: 0x44,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "gate-depth",
+        parameter_id: 0x45,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "gate-in",
+        parameter_id: 0x46,
+        index: 0x00,
+        value_kind: Qu16ParameterValueKind::Binary,
+    },
+    Qu16ProcessingParameter {
+        key: "comp-attack",
+        parameter_id: 0x62,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "comp-release",
+        parameter_id: 0x63,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "comp-ratio",
+        parameter_id: 0x65,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "comp-threshold",
+        parameter_id: 0x66,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "comp-gain",
+        parameter_id: 0x67,
+        index: FIXED_INDEX,
+        value_kind: Qu16ParameterValueKind::SevenBit,
+    },
+    Qu16ProcessingParameter {
+        key: "comp-in",
+        parameter_id: 0x68,
+        index: 0x00,
+        value_kind: Qu16ParameterValueKind::Binary,
+    },
+];
 
 const NOTE_ON_STATUS: u8 = 0x90;
 const CONTROL_CHANGE_STATUS: u8 = 0xB0;
@@ -274,6 +496,59 @@ fn send_bus_from_index(index: u8) -> Option<&'static Qu16SendBus> {
     QU16_SEND_BUSES.iter().find(|bus| bus.index == index)
 }
 
+fn processing_parameter_from_key(key: &str) -> Option<&'static Qu16ProcessingParameter> {
+    QU16_PROCESSING_PARAMETERS
+        .iter()
+        .find(|parameter| parameter.key == key)
+}
+
+fn processing_parameter_from_wire(
+    parameter_id: u8,
+    index: u8,
+) -> Option<&'static Qu16ProcessingParameter> {
+    QU16_PROCESSING_PARAMETERS
+        .iter()
+        .find(|parameter| parameter.parameter_id == parameter_id && parameter.index == index)
+}
+
+fn pan_bus_from_label(label: &str) -> Option<u8> {
+    match label {
+        "Mix 5-6" => Some(0x04),
+        "Mix 7-8" => Some(0x05),
+        "Mix 9-10" => Some(0x06),
+        "LR" => Some(0x07),
+        _ => None,
+    }
+}
+
+fn pan_bus_from_index(index: u8) -> Option<&'static str> {
+    match index {
+        0x04 => Some("Mix 5-6"),
+        0x05 => Some("Mix 7-8"),
+        0x06 => Some("Mix 9-10"),
+        0x07 => Some("LR"),
+        _ => None,
+    }
+}
+
+fn assign_bus_from_label(label: &str) -> Option<(u8, u8)> {
+    if label == "LR" {
+        Some((LR_ASSIGN_PARAMETER_ID, FIXED_INDEX))
+    } else {
+        send_bus_from_label(label).map(|bus| (MIX_ASSIGN_PARAMETER_ID, bus.index))
+    }
+}
+
+fn assign_bus_from_wire(parameter_id: u8, index: u8) -> Option<&'static str> {
+    if parameter_id == LR_ASSIGN_PARAMETER_ID && index == FIXED_INDEX {
+        Some("LR")
+    } else if parameter_id == MIX_ASSIGN_PARAMETER_ID {
+        send_bus_from_index(index).map(|bus| bus.label)
+    } else {
+        None
+    }
+}
+
 /// Safe semantic operations accepted from the Qu-16 digital-twin UI.
 ///
 /// `value` is the exact 7-bit protocol value (`0..=127`), not a dB value and
@@ -301,6 +576,30 @@ pub enum Qu16ControlCommand {
         #[serde(rename = "targetId")]
         target_id: String,
         enabled: bool,
+    },
+    Pan {
+        #[serde(rename = "targetId")]
+        target_id: String,
+        mix: String,
+        value: u8,
+    },
+    Assign {
+        #[serde(rename = "targetId")]
+        target_id: String,
+        mix: String,
+        assigned: bool,
+    },
+    PreFade {
+        #[serde(rename = "targetId")]
+        target_id: String,
+        mix: String,
+        pre: bool,
+    },
+    Processing {
+        #[serde(rename = "targetId")]
+        target_id: String,
+        parameter: String,
+        value: u8,
     },
 }
 
@@ -339,6 +638,8 @@ pub enum Qu16ControlError {
     NonSevenBitValue(u8),
     UnknownTarget(String),
     UnknownSendBus(String),
+    UnknownPanBus(String),
+    UnknownProcessingParameter(String),
     SendRequiresSource(String),
     InvalidParameterKey(String),
     InvalidBinaryValue { key: String, value: u8 },
@@ -355,6 +656,10 @@ impl fmt::Display for Qu16ControlError {
             }
             Self::UnknownTarget(target) => write!(formatter, "unknown Qu-16 UI target: {target}"),
             Self::UnknownSendBus(bus) => write!(formatter, "unknown Qu-16 send bus: {bus}"),
+            Self::UnknownPanBus(bus) => write!(formatter, "unknown Qu-16 pan bus: {bus}"),
+            Self::UnknownProcessingParameter(parameter) => {
+                write!(formatter, "unknown Qu-16 processing parameter: {parameter}")
+            }
             Self::SendRequiresSource(target) => {
                 write!(
                     formatter,
@@ -442,6 +747,89 @@ pub fn encode_control_command(
                 FIXED_INDEX,
             ))
         }
+        Qu16ControlCommand::Pan {
+            target_id,
+            mix,
+            value,
+        } => {
+            let target = require_target(target_id)?;
+            let index = pan_bus_from_label(mix)
+                .ok_or_else(|| Qu16ControlError::UnknownPanBus(mix.clone()))?;
+            if *value > 0x4A {
+                return Err(Qu16ControlError::NonSevenBitValue(*value));
+            }
+            Ok(encode_whitelisted_nrpn(
+                midi_channel,
+                target.channel_number,
+                PAN_PARAMETER_ID,
+                *value,
+                index,
+            ))
+        }
+        Qu16ControlCommand::Assign {
+            target_id,
+            mix,
+            assigned,
+        } => {
+            let target = require_target(target_id)?;
+            if target.role != Qu16TargetRole::Source {
+                return Err(Qu16ControlError::SendRequiresSource(target_id.clone()));
+            }
+            let (parameter_id, index) = assign_bus_from_label(mix)
+                .ok_or_else(|| Qu16ControlError::UnknownSendBus(mix.clone()))?;
+            Ok(encode_whitelisted_nrpn(
+                midi_channel,
+                target.channel_number,
+                parameter_id,
+                u8::from(*assigned),
+                index,
+            ))
+        }
+        Qu16ControlCommand::PreFade {
+            target_id,
+            mix,
+            pre,
+        } => {
+            let target = require_target(target_id)?;
+            if target.role != Qu16TargetRole::Source {
+                return Err(Qu16ControlError::SendRequiresSource(target_id.clone()));
+            }
+            let bus = send_bus_from_label(mix)
+                .ok_or_else(|| Qu16ControlError::UnknownSendBus(mix.clone()))?;
+            Ok(encode_whitelisted_nrpn(
+                midi_channel,
+                target.channel_number,
+                MIX_PRE_POST_PARAMETER_ID,
+                u8::from(*pre),
+                bus.index,
+            ))
+        }
+        Qu16ControlCommand::Processing {
+            target_id,
+            parameter,
+            value,
+        } => {
+            let target = require_target(target_id)?;
+            let spec = processing_parameter_from_key(parameter)
+                .ok_or_else(|| Qu16ControlError::UnknownProcessingParameter(parameter.clone()))?;
+            match spec.value_kind {
+                Qu16ParameterValueKind::SevenBit => validate_seven_bit(*value)?,
+                Qu16ParameterValueKind::Binary if *value <= 1 => {}
+                Qu16ParameterValueKind::Binary => {
+                    return Err(Qu16ControlError::InvalidBinaryValue {
+                        key: format!("process:{target_id}:{parameter}"),
+                        value: *value,
+                    })
+                }
+            }
+            Ok(encode_whitelisted_nrpn(
+                midi_channel,
+                target.channel_number,
+                spec.parameter_id,
+                *value,
+                spec.index,
+            ))
+        }
     }
 }
 
@@ -467,7 +855,27 @@ pub fn command_from_parameter_write(
             target_id: (*target_id).to_string(),
             enabled: write.value == 1,
         },
-        ["mute" | "pafl", _] => {
+        ["pan", target_id, mix] if write.value <= 0x4A => Qu16ControlCommand::Pan {
+            target_id: (*target_id).to_string(),
+            mix: (*mix).to_string(),
+            value: write.value,
+        },
+        ["assign", target_id, mix] if write.value <= 1 => Qu16ControlCommand::Assign {
+            target_id: (*target_id).to_string(),
+            mix: (*mix).to_string(),
+            assigned: write.value == 1,
+        },
+        ["pre", target_id, mix] if write.value <= 1 => Qu16ControlCommand::PreFade {
+            target_id: (*target_id).to_string(),
+            mix: (*mix).to_string(),
+            pre: write.value == 1,
+        },
+        ["process", target_id, parameter] => Qu16ControlCommand::Processing {
+            target_id: (*target_id).to_string(),
+            parameter: (*parameter).to_string(),
+            value: write.value,
+        },
+        ["mute" | "pafl", _] | ["assign" | "pre", _, _] => {
             return Err(Qu16ControlError::InvalidBinaryValue {
                 key: write.key.clone(),
                 value: write.value,
@@ -526,6 +934,76 @@ fn expected_parameter(
                 value: u8::from(*enabled),
             })
         }
+        Qu16ControlCommand::Pan {
+            target_id,
+            mix,
+            value,
+        } => {
+            require_target(target_id)?;
+            pan_bus_from_label(mix).ok_or_else(|| Qu16ControlError::UnknownPanBus(mix.clone()))?;
+            if *value > 0x4A {
+                return Err(Qu16ControlError::NonSevenBitValue(*value));
+            }
+            Ok(Qu16ExpectedParameter {
+                key: format!("pan:{target_id}:{mix}"),
+                value: *value,
+            })
+        }
+        Qu16ControlCommand::Assign {
+            target_id,
+            mix,
+            assigned,
+        } => {
+            let target = require_target(target_id)?;
+            if target.role != Qu16TargetRole::Source {
+                return Err(Qu16ControlError::SendRequiresSource(target_id.clone()));
+            }
+            assign_bus_from_label(mix)
+                .ok_or_else(|| Qu16ControlError::UnknownSendBus(mix.clone()))?;
+            Ok(Qu16ExpectedParameter {
+                key: format!("assign:{target_id}:{mix}"),
+                value: u8::from(*assigned),
+            })
+        }
+        Qu16ControlCommand::PreFade {
+            target_id,
+            mix,
+            pre,
+        } => {
+            let target = require_target(target_id)?;
+            if target.role != Qu16TargetRole::Source {
+                return Err(Qu16ControlError::SendRequiresSource(target_id.clone()));
+            }
+            send_bus_from_label(mix)
+                .ok_or_else(|| Qu16ControlError::UnknownSendBus(mix.clone()))?;
+            Ok(Qu16ExpectedParameter {
+                key: format!("pre:{target_id}:{mix}"),
+                value: u8::from(*pre),
+            })
+        }
+        Qu16ControlCommand::Processing {
+            target_id,
+            parameter,
+            value,
+        } => {
+            require_target(target_id)?;
+            let spec = processing_parameter_from_key(parameter)
+                .ok_or_else(|| Qu16ControlError::UnknownProcessingParameter(parameter.clone()))?;
+            match spec.value_kind {
+                Qu16ParameterValueKind::SevenBit => validate_seven_bit(*value)?,
+                Qu16ParameterValueKind::Binary if *value <= 1 => {}
+                Qu16ParameterValueKind::Binary => {
+                    return Err(Qu16ControlError::InvalidBinaryValue {
+                        key: format!("process:{target_id}:{parameter}"),
+                        value: *value,
+                    })
+                }
+            }
+            Ok(Qu16ExpectedParameter {
+                key: format!("process:{target_id}:{parameter}"),
+                value: *value,
+            })
+        }
     }
 }
 
@@ -560,10 +1038,7 @@ fn encode_whitelisted_nrpn(
 ) -> Vec<u8> {
     debug_assert!(midi_channel <= 0x0F);
     debug_assert!(channel_number <= 0x7F);
-    debug_assert!(matches!(
-        parameter_id,
-        FADER_PARAMETER_ID | SEND_LEVEL_PARAMETER_ID | PAFL_PARAMETER_ID
-    ));
+    debug_assert!(parameter_id != 0x5F, "remote shutdown is never whitelisted");
     debug_assert!(value <= 0x7F);
     debug_assert!(index <= 0x7F);
     let status = CONTROL_CHANGE_STATUS | midi_channel;
@@ -723,13 +1198,16 @@ impl MidiStreamDecoder {
                         self.sysex = Some(vec![SYSEX_START]);
                     }
                     0x00..=0x7F => {
-                        let message = self.sysex.as_mut().expect("checked above");
-                        if message.len() >= self.maximum_sysex_bytes - 1 {
+                        let too_long = self
+                            .sysex
+                            .as_ref()
+                            .is_some_and(|message| message.len() >= self.maximum_sysex_bytes - 1);
+                        if too_long {
                             self.sysex = None;
                             output.push(Err(MidiDecodeError::SysexTooLong {
                                 maximum: self.maximum_sysex_bytes,
                             }));
-                        } else {
+                        } else if let Some(message) = self.sysex.as_mut() {
                             message.push(byte);
                         }
                     }
@@ -1006,6 +1484,11 @@ pub enum Qu16ObservedControl {
     SendLevel,
     Mute,
     Pafl,
+    Pan,
+    Assign,
+    PreFade,
+    Processing,
+    MuteGroup,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1063,7 +1546,67 @@ pub fn normalize_nrpn_observation(update: &Qu16NrpnUpdate) -> Option<Qu16Control
             mix: None,
             value: Qu16ObservedValue::Boolean(update.value == 1),
         }),
-        _ => None,
+        (PAN_PARAMETER_ID, index) if update.value <= 0x4A => {
+            let mix = pan_bus_from_index(index)?;
+            Some(Qu16ControlObservation {
+                key: format!("pan:{}:{mix}", target.ui_id),
+                target_id: target.ui_id.to_string(),
+                control: Qu16ObservedControl::Pan,
+                mix: Some(mix.to_string()),
+                value: Qu16ObservedValue::SevenBit(update.value),
+            })
+        }
+        (parameter_id, index) if update.value <= 1 => {
+            if let Some(mix) = assign_bus_from_wire(parameter_id, index) {
+                if target.role != Qu16TargetRole::Source {
+                    return None;
+                }
+                return Some(Qu16ControlObservation {
+                    key: format!("assign:{}:{mix}", target.ui_id),
+                    target_id: target.ui_id.to_string(),
+                    control: Qu16ObservedControl::Assign,
+                    mix: Some(mix.to_string()),
+                    value: Qu16ObservedValue::Boolean(update.value == 1),
+                });
+            }
+            if parameter_id == MIX_PRE_POST_PARAMETER_ID {
+                let bus = send_bus_from_index(index)?;
+                if target.role != Qu16TargetRole::Source {
+                    return None;
+                }
+                return Some(Qu16ControlObservation {
+                    key: format!("pre:{}:{}", target.ui_id, bus.label),
+                    target_id: target.ui_id.to_string(),
+                    control: Qu16ObservedControl::PreFade,
+                    mix: Some(bus.label.to_string()),
+                    value: Qu16ObservedValue::Boolean(update.value == 1),
+                });
+            }
+            let spec = processing_parameter_from_wire(parameter_id, index)?;
+            Some(Qu16ControlObservation {
+                key: format!("process:{}:{}", target.ui_id, spec.key),
+                target_id: target.ui_id.to_string(),
+                control: Qu16ObservedControl::Processing,
+                mix: None,
+                value: match spec.value_kind {
+                    Qu16ParameterValueKind::Binary => Qu16ObservedValue::Boolean(update.value == 1),
+                    Qu16ParameterValueKind::SevenBit => Qu16ObservedValue::SevenBit(update.value),
+                },
+            })
+        }
+        (parameter_id, index) => {
+            let spec = processing_parameter_from_wire(parameter_id, index)?;
+            if spec.value_kind != Qu16ParameterValueKind::SevenBit {
+                return None;
+            }
+            Some(Qu16ControlObservation {
+                key: format!("process:{}:{}", target.ui_id, spec.key),
+                target_id: target.ui_id.to_string(),
+                control: Qu16ObservedControl::Processing,
+                mix: None,
+                value: Qu16ObservedValue::SevenBit(update.value),
+            })
+        }
     }
 }
 
@@ -1107,15 +1650,29 @@ impl Qu16ControlObserver {
                     kind: channel_message.kind,
                 });
             };
-            let Some(target) = target_from_channel_number(channel_message.data1) else {
-                return Ok(None);
-            };
             let muted = match velocity {
                 0x7F => true,
                 0x3F => false,
                 // 0x00 is the documented terminating release event. Other
                 // velocities are not Qu mute-state messages either.
                 _ => return Ok(None),
+            };
+            // Mute Groups have dedicated CH bytes 0x50..0x53 but are not
+            // writable surface targets in this application. Observe their
+            // master states separately so SoftKey status can be truthful
+            // without making arbitrary group controls addressable for writes.
+            if (0x50..=0x53).contains(&channel_message.data1) {
+                let group = channel_message.data1 - 0x50 + 1;
+                return Ok(Some(Qu16ControlObservation {
+                    key: format!("mute-group:{group}"),
+                    target_id: format!("mute-group-{group}"),
+                    control: Qu16ObservedControl::MuteGroup,
+                    mix: None,
+                    value: Qu16ObservedValue::Boolean(muted),
+                }));
+            }
+            let Some(target) = target_from_channel_number(channel_message.data1) else {
+                return Ok(None);
             };
             return Ok(Some(Qu16ControlObservation {
                 key: format!("mute:{}", target.ui_id),
@@ -1211,6 +1768,106 @@ mod tests {
             pafl.encode(5).unwrap(),
             vec![0xB5, 0x63, 0x60, 0xB5, 0x62, 0x51, 0xB5, 0x06, 0x01, 0xB5, 0x26, 0x07,]
         );
+    }
+
+    #[test]
+    fn encodes_pan_routing_and_processing_from_semantic_commands() {
+        let cases = [
+            (
+                Qu16ControlCommand::Pan {
+                    target_id: "ch-1".into(),
+                    mix: "LR".into(),
+                    value: 0x25,
+                },
+                PAN_PARAMETER_ID,
+                0x25,
+                FIXED_INDEX,
+            ),
+            (
+                Qu16ControlCommand::Assign {
+                    target_id: "ch-1".into(),
+                    mix: "Mix 1".into(),
+                    assigned: true,
+                },
+                MIX_ASSIGN_PARAMETER_ID,
+                1,
+                0,
+            ),
+            (
+                Qu16ControlCommand::PreFade {
+                    target_id: "ch-1".into(),
+                    mix: "Mix 1".into(),
+                    pre: true,
+                },
+                MIX_PRE_POST_PARAMETER_ID,
+                1,
+                0,
+            ),
+            (
+                Qu16ControlCommand::Processing {
+                    target_id: "ch-1".into(),
+                    parameter: "gate-in".into(),
+                    value: 1,
+                },
+                0x46,
+                1,
+                0,
+            ),
+            (
+                Qu16ControlCommand::Processing {
+                    target_id: "ch-1".into(),
+                    parameter: "peq-lm-frequency".into(),
+                    value: 64,
+                },
+                0x06,
+                64,
+                FIXED_INDEX,
+            ),
+        ];
+
+        for (command, parameter_id, value, index) in cases {
+            let bytes = command.encode(0).unwrap();
+            assert_eq!(bytes[5], parameter_id);
+            assert_eq!(bytes[8], value);
+            assert_eq!(bytes[11], index);
+            assert_ne!(bytes[5], 0x5F);
+        }
+    }
+
+    #[test]
+    fn observer_normalizes_extended_binary_and_zero_seven_bit_values() {
+        let binary = normalize_nrpn_observation(&Qu16NrpnUpdate {
+            midi_channel: 0,
+            channel_number: 0x20,
+            parameter_id: 0x46,
+            value: 1,
+            index: 0,
+        })
+        .unwrap();
+        assert_eq!(binary.key, "process:ch-1:gate-in");
+        assert_eq!(binary.value, Qu16ObservedValue::Boolean(true));
+
+        let zero_numeric = normalize_nrpn_observation(&Qu16NrpnUpdate {
+            midi_channel: 0,
+            channel_number: 0x20,
+            parameter_id: 0x06,
+            value: 0,
+            index: FIXED_INDEX,
+        })
+        .unwrap();
+        assert_eq!(zero_numeric.key, "process:ch-1:peq-lm-frequency");
+        assert_eq!(zero_numeric.value, Qu16ObservedValue::SevenBit(0));
+
+        let assign = normalize_nrpn_observation(&Qu16NrpnUpdate {
+            midi_channel: 0,
+            channel_number: 0x20,
+            parameter_id: MIX_ASSIGN_PARAMETER_ID,
+            value: 1,
+            index: 0,
+        })
+        .unwrap();
+        assert_eq!(assign.key, "assign:ch-1:Mix 1");
+        assert_eq!(assign.value, Qu16ObservedValue::Boolean(true));
     }
 
     #[test]
@@ -1543,6 +2200,32 @@ mod tests {
         assert_eq!(observations[0].value, Qu16ObservedValue::SevenBit(0x62));
         assert_eq!(observations[2].value, Qu16ObservedValue::Boolean(true));
         assert_eq!(observations[3].value, Qu16ObservedValue::Boolean(true));
+    }
+
+    #[test]
+    fn observer_reads_mute_group_master_states_without_exposing_write_targets() {
+        let mut observer = Qu16ControlObserver::new(3).unwrap();
+        let messages = decode_ok(
+            &mut MidiStreamDecoder::default(),
+            &[
+                0x93, 0x50, 0x7F, // Mute Group 1 on.
+                0x93, 0x50, 0x00, // Documented terminating release.
+                0x93, 0x53, 0x3F, // Mute Group 4 off.
+            ],
+        );
+        let observations: Vec<_> = messages
+            .iter()
+            .filter_map(|message| observer.push(message).transpose())
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].key, "mute-group:1");
+        assert_eq!(observations[0].target_id, "mute-group-1");
+        assert_eq!(observations[0].control, Qu16ObservedControl::MuteGroup);
+        assert_eq!(observations[0].value, Qu16ObservedValue::Boolean(true));
+        assert_eq!(observations[1].key, "mute-group:4");
+        assert_eq!(observations[1].value, Qu16ObservedValue::Boolean(false));
     }
 
     #[test]

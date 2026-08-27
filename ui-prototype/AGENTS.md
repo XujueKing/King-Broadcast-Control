@@ -12,6 +12,8 @@ Program-video target architecture is one `libmpv` core with GPU hardware decodin
 
 Deck runtime milestone: when local audio files exist, Deck 1 and Deck 2 use independent real audio elements with their own play/pause/seek state. The Crossfader applies equal-power volume to those two audio instances and must never auto-switch merely because a track is loaded. The hard-coded demo tracks remain only as a no-media visual fallback and must not be presented as real playback.
 
+现场通过 Qu-16 USB-B 播放时，波形拖动和键盘 Seek 禁止在有声状态下直接执行精确跳转。桌面 mpv 必须保存原暂停/音量状态，先软件静音并暂停，执行 Seek 并等待解码状态稳定，再恢复播放并短渐入原音量；任何跳转瞬态都不得直接送入 ST3、DP448、功放或音箱。
+
 Second-screen deployment is plug-and-play: the desktop app retries detection while running, keeps the preloaded output window hidden while only one logical display exists, and reuses it when an independent LED display appears. It must not force Windows display-mode changes. Hot-plug recovery must re-read monitor bounds and resolution, restore the current PGM without operator assistance, hide output immediately on disconnect, and never move visible output onto the main control display.
 
 R1 图片素材使用独立的 8:9 缩略图网格，每行 4 个。第一项永远是固定黑屏，不可移动、不可删除；其余图片由桌面端扫描应用图片库目录生成，不得把视频缩略图混入图片列表。
@@ -21,6 +23,8 @@ R1 视频自身音轨由标题栏右侧的独立开关控制，默认静音。�
 视频音轨与 C2 两个 Deck 是可同时输出的独立音源。视频声音开启时不得自动暂停或压低 Deck；C2 音乐只能由操作员手动暂停，Crossfader 不控制视频音轨。
 
 R1 的视频、图片、文字不得单击后立即上屏。三类素材统一使用悬停预览、单击锁定、C1 明确确认上屏的 Preview/Take 流程；预览状态不得改变现场输出或视频音轨。
+
+播放曲库必须提供按歌曲名、歌手及目录即时过滤的搜索框并显示结果数量。缺失歌手统一显示为 `--`，网址、下载站域名等来源标签不能当作歌手；所有可能被截断的歌曲名、歌手、标签、制作状态、BPM 和时长必须提供悬停完整提示。AI 制作失败不能统一写成模糊的“制作失败”：MOSS 未返回 transcript 显示“歌词识别失败”，内存分配错误显示“资源不足/未制作”，并在悬停提示中保留底层完整错误。同一媒体路径存在多个管线版本记录时，曲库状态必须采用最新任务，禁止让旧版 `queued` 覆盖新版 `skipped/ready/running`。Worker 只能领取与当前 `pipelineVersion` 完全一致的任务，旧管线的待处理任务不得阻塞当前队列。
 
 C1 右侧第一个按钮固定为“预览”开关。开启时中央区域动画扩宽为并列的 PGM/PVW 两个 8:9 屏幕，L/R 同步收窄；PGM 为当前输出，PVW 只显示候选素材。其余右侧 3 个位置保留给可配置监控机位。
 
@@ -36,6 +40,12 @@ PVW 锁定视频或图片后允许直接拖动位置，并提供自由拉伸、�
 
 C2 每个 Deck 的底部控制为两行、每行 5 个等分按钮。第一行第 5 个是独立歌词开关“词”，第二行第 5 个是独立“原唱/伴唱”切换；Deck 1/2 状态互不影响。
 
+C2 的 CUE 固定移动到圆形播放/暂停键左侧，使用与播放键相同尺寸和样式的圆形键帽，并留出清晰间距。原矩形 CUE 槽始终显示“补音”按钮：非伴唱模式可见但禁用；每次进入伴唱默认开启，允许操作员独立关闭；Deck 1/2 状态互不影响。补音按钮是明确的有声操作：歌手参考已绑定时必须启动与 Deck 同步的本地 mpv 参考层；CUE 开启时随整个 Deck 去耳机，CUE 关闭时随整个 Deck 去主输出。该操作不得自动武装 Qu-16 实时输入/返回 Vocal Engine 链路。
+
+CUE 是整个 Deck 最终声音的监听路由，不区分原唱、伴奏、修音或补音。开启 CUE 时把该 Deck 的完整声音从主扩隔离并送往耳机；关闭时撤销 PAFL 并恢复开启前捕获的主扩推子值。缺少开启前真实推子回读时必须拒绝切换，禁止把 ST3 永久留在 `-∞` 或猜测恢复值。
+
+“补音”采用完全自适应规则：关闭时参考女声为零；打开后，在歌曲参考时间轴的演唱区若没有检测到真人声，自动补入完整目标比例的女声参考；一旦检测到真人演唱，立即使用实时评分连续控制参考混合量，唱得越准补得越少、失准越严重补得越多。间奏保持关闭。CUE 不得改变这套内容逻辑，只改变完整 Deck 声音的监听去向。
+
 当前 PGM 素材也能重新进入 PVW 调节。调节期间 PGM 保持原参数；确认后只热更新变换参数，严禁重新加载媒体、重置播放进度、暂停声音或出现黑帧。
 
 When implementing from a selected generated mock, treat that image as the source of truth for layout, component anatomy, density, spacing, color, typography, visible content, and hierarchy.
@@ -45,6 +55,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 Runtime editions are hardware-capability based, not separate source branches. At startup, a detected NVIDIA GPU selects the full production-and-playback mode; no NVIDIA GPU selects the playback-only mode. Playback-only must never start Python, WSL, Demucs, or MOSS and must accept completed `.kingsong` packages.
 
 `.kingsong` is the portable single-song delivery format. It is a versioned `KSG1` binary container carrying the original mix, accompaniment, LRC, native timestamp JSON, model provenance and BLAKE3 integrity records. High-end machines produce and export it; low-end machines verify and unpack it into their local library. Deck playback always reads unpacked local media, never a live package stream.
+
+When LRC data only provides sentence start timestamps, the current lyric must never remain visible indefinitely until the next timestamp. Estimate a natural singing duration from the text: continuous lyrics may remain until the next timestamp, but when the next line is separated by a clear instrumental gap, move the completed line upward, shrink it, and fade it out on the existing 720 ms lyric timeline. Keep the lyric area empty during the gap and introduce the next line only at its own timestamp. The final lyric must expire by the same rule.
 
 Newly produced v6 song assets must also contain a compact 48 kHz/128-frame `reference.json` tied to the source song fingerprint and separator profile. New `.kingsong` exports carry it as `analysis/reference.json`; the field remains optional only so legacy KSG1 packages stay importable. Playback-only machines validate and unpack this file but never regenerate it.
 
@@ -56,7 +68,7 @@ Newly produced v6 song assets must also contain a compact 48 kHz/128-frame `refe
 
 全功能版 AI 制作采用非破坏性三级调度：正在播放歌曲为 0 级、已装入 Deck 的待播歌曲为 1 级、其余曲库为 2 级。播放开始不得杀死 Worker/MOSS 或暂停整队；Worker 始终保持 Windows Idle 优先级、并发 1，当前任务完成后再按级别领取下一首。
 
-Windows 主控窗口默认使用无边框真全屏并覆盖任务栏。C2 Crossfader 下方固定放置一行四等分调音推子：总声音、耳机音量、麦克风 1、麦克风 2；该行与 Crossfader 行等高，不显示通道文字或新增麦克风按钮，每格只显示通道图标、图标旁数值、等距小刻度和统一横向推子。麦克风 1 使用紫色，麦克风 2 使用暖橙色，图标、数值和推子进度同步区分。总声音实际乘入两个 Deck 的输出增益，麦克风在未绑定输入设备前不得自动监听，避免现场啸叫。
+Windows 主控窗口默认使用无边框真全屏并覆盖任务栏。C2 Crossfader 下方固定放置一行四等分调音推子：总声音、耳机音量、麦克风 1、麦克风 2；该行与 Crossfader 行等高，不显示通道文字或新增麦克风按钮，每格只显示通道图标、图标旁数值、等距小刻度和统一横向推子。麦克风 1 使用紫色，作为专业麦克风组一次批量控制 Qu-16 联动的 CH1+CH2；麦克风 2 使用暖橙色，独立控制现场确认的 GS VS-88 / CH6。图标、数值和推子进度同步区分。两个麦克风推子只有在 Qu-16 完成 End Sync 且取得对应 Fader 真值后才允许操作；写入后以真机回读为准，CH1/CH2 回读不一致时不得伪装为已经同步。总声音实际乘入两个 Deck 的输出增益；麦克风控制只改变 Qu-16 Fader，不自动打开 Mute、LR、PAFL、48V 或 Vocal Engine 输入/返回，避免现场啸叫。
 
 点击底部“调音台”后使用 300ms 同步场景动画：L 区向左退出，R 区向右退出，C 区在 L 区收缩时平移至最左侧，右侧展开独立调音台工作区。切换过程不得卸载 Deck、重置播放状态或打断音频；返回首页时执行反向动画。
 
@@ -155,3 +167,15 @@ Deck 电平条的亮色刻度纹理必须始终保持固定像素间距，每根
 现场人声增强必须由独立的 Rust/C++ 实时音频进程承担，禁止让 Tauri UI、Node、Python、离线 AI Worker 或播放器线程承担音频回调。第一阶段严格按 P0→P3 推进：先完成 48kHz float32 Loopback、Qu-16 USB 路由、物理 RTT，再加入实时 F0；在此前不得接入 Pitch Correction 或生成模型并宣称 AI 修音完成。实时回调禁止动态分配、文件/网络/数据库/JSON/日志、互斥锁、模型推理和阻塞操作；控制参数只能经无锁结构或原子快照注入。
 
 音频延迟证据必须区分请求 buffer、驱动实际 buffer、软件估算和物理 RTT。驱动修正或忽略低延迟 buffer 请求时必须记录实际值；只有物理输出→输入回接测量才允许填写 `roundTripMs`，没有 Qu-16/ASIO、2 小时稳定性和异常拔插证据时必须明确标为 `NOT MEASURED`/`NOT EXECUTED`，禁止用合成 benchmark 或回调耗时冒充现场通过。
+
+灯光配置使用可搬运的 `.kinglight` JSON 包，格式标识固定为 `club.king.kinglight`、当前版本 `1`。包内保存 Titan 目标与 Show 身份、KING 0–9 兼容映射、语义效果注册表、自动规则和显示参数；导入必须明确 `executeOnImport=false`，只更新配置并清空本地模拟/调度状态，绝不 Fire/Release Playback。映射绑定到导出时的 Show 名称，当前真机 Show 不一致时必须拒绝触发。未知语义元数据默认 `safeAuto=false`，不得自动猜测 Titan 默认命名 Playback 的用途。
+
+完整 Titan Playback 注册、语义标注、便携包和数字预演放在底部 `Avolites Tiger Touch Pro` 专用栏目；首页灯光区只保留 0–9 快捷位。数字预演默认必须标为离线模拟且不得发送 DMX；未取得 KING CLUB 平面尺寸和真实灯具坐标前只允许示意空间，不得宣称与现场光束覆盖一致。
+
+Qu-16 表计、播放器进度及其他高频运行数据禁止写入最外层 `App` 状态并触发曲库、视频网格和整页重绘。表计必须通过独立外部 store 只刷新调音台子树，并进行最新帧合并；重复的连接状态/心跳必须按值去重。播放器轮询只在播放状态改变或进度达到可见变化阈值时提交 React 状态，确保推子和按钮交互优先于视觉表计刷新。
+
+自动歌曲制作只处理具有有效歌手名称的曲目。媒体标签和 `.kingsong` 元数据都没有有效歌手名，或歌手值为“未知歌手/Unknown Artist”等占位内容时，任务必须标记为 `skipped / missing-artist`，只允许播放，不得进入歌词识别、原唱分离或伴唱制作。文件名明确符合“歌手 - 歌名”时可安全提取歌手，并允许原 `missing-artist` 任务重新排队；仅有歌名时不得猜测歌手。
+
+歌手包采样默认使用耳麦录音输入。音乐管理页必须优先选择真实的耳麦/Realtek 麦克风端点，降低阵列麦克风优先级并排除 Nahimic/VAD 等虚拟输入；操作员选择的录音设备必须持久化，重启后继续使用，除非该设备已经不存在。录制时直接按设备名称打开输入，不能只依赖 Windows 当前默认麦克风。
+
+R1 视频素材卡片的鼠标悬停和键盘聚焦只允许显示普通交互高亮，禁止自动切换 PVW、启动播放或打开新的解码实例；只有明确点击素材才可预选到 PVW。视频卡片禁止直接嵌入 `<video>` 作为缩略图，必须在首次进入可视区域时由后台串行生成低分辨率 JPG 文件并保存到应用数据目录的 `media/cache/video-thumbnails`；源视频未修改时，后续滚动、切页和重启只读取该持久化图片，禁止重新读取原视频或集中解码。

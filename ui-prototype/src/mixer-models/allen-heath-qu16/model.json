@@ -15,6 +15,29 @@
       "source": "physical-fader-calibration",
       "slots": ["ch-1", "ch-2", "ch-3", "ch-4", "ch-5", "ch-6", "ch-7", "fx-1-ret", "fx-2-ret", "ch-10", "ch-11", "ch-12", "ch-13", "ch-14", "ch-15", "ch-16"]
     },
+    "stripLabels": {
+      "ch-1": "专业麦克风 1",
+      "ch-2": "专业麦克风 2",
+      "ch-6": "GS麦克风",
+      "ch-11": "电脑音乐左",
+      "ch-12": "电脑音乐右"
+    },
+    "homeMicrophones": [
+      {
+        "id": "professional-microphone",
+        "label": "专业麦克风",
+        "device": "Shure SLX4",
+        "targets": ["ch-1", "ch-2"],
+        "controlMode": "linked-group"
+      },
+      {
+        "id": "gs-microphone",
+        "label": "GS 麦克风",
+        "device": "GS VS-88",
+        "targets": ["ch-6"],
+        "controlMode": "single-channel"
+      }
+    ],
     "accent": "#28aee8"
   },
   "display": {

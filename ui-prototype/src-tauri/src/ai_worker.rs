@@ -10,15 +10,74 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::os::windows::{io::AsRawHandle, process::CommandExt};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::CloseHandle,
+    System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    },
+};
 
 const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+fn terminate_process_tree(child: &mut Child) {
+    let _ = Command::new("taskkill.exe")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(windows))]
+fn terminate_process_tree(child: &mut Child) {
+    let _ = child.kill();
+}
+
+#[cfg(windows)]
+fn create_worker_job() -> Option<isize> {
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if configured == 0 {
+            let _ = CloseHandle(job);
+            None
+        } else {
+            Some(job as isize)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn assign_to_worker_job(job_handle: Option<isize>, child: &Child) -> bool {
+    let Some(job_handle) = job_handle else {
+        return false;
+    };
+    unsafe { AssignProcessToJobObject(job_handle as _, child.as_raw_handle() as _) != 0 }
+}
 
 #[derive(Default)]
 struct WorkerProcess {
     child: Option<Child>,
     moss_child: Option<Child>,
+    #[cfg(windows)]
+    job_handle: Option<isize>,
     moss_started_by_app: bool,
     python_path: Option<PathBuf>,
     worker_path: Option<PathBuf>,
@@ -29,12 +88,18 @@ struct WorkerProcess {
 
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(job_handle) = self.job_handle.take() {
+            unsafe {
+                let _ = CloseHandle(job_handle as _);
+            }
+        }
         if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
+            terminate_process_tree(child);
             let _ = child.wait();
         }
         if let Some(child) = self.moss_child.as_mut() {
-            let _ = child.kill();
+            terminate_process_tree(child);
             let _ = child.wait();
         }
     }
@@ -126,6 +191,10 @@ pub fn start(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatu
         .0
         .lock()
         .map_err(|_| "无法锁定 AI worker 状态".to_string())?;
+    #[cfg(windows)]
+    if state.job_handle.is_none() {
+        state.job_handle = create_worker_job();
+    }
     let log_directory = app
         .path()
         .app_log_dir()
@@ -142,6 +211,10 @@ pub fn start(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatu
     }
     if state.moss_child.is_none() && !moss_port_is_open() {
         state.moss_child = start_moss_if_needed(&development_project_root(), &log_directory)?;
+        #[cfg(windows)]
+        if let Some(child) = state.moss_child.as_ref() {
+            let _ = assign_to_worker_job(state.job_handle, child);
+        }
         state.moss_started_by_app = state.moss_child.is_some();
     }
     if let Some(child) = state.child.as_mut() {
@@ -179,6 +252,8 @@ pub fn start(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatu
     #[cfg(windows)]
     command.creation_flags(IDLE_PRIORITY_CLASS | CREATE_NO_WINDOW);
     let child = command.spawn().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    let _ = assign_to_worker_job(state.job_handle, &child);
     state.python_path = Some(python);
     state.worker_path = Some(worker);
     state.message = if moss_port_is_open() {

@@ -15,6 +15,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, Webvie
 
 mod ai_analysis;
 mod ai_worker;
+mod kinglight;
 mod kingsong;
 mod libmpv_runtime;
 mod mixer_models;
@@ -22,7 +23,9 @@ mod mpv_runtime;
 mod qu16_control;
 mod qu16_runtime;
 mod runtime_capability;
+mod titan_runtime;
 mod vocal_meter_bridge;
+mod vocal_profiles;
 mod vocal_routing;
 mod vocal_runtime;
 mod waveform;
@@ -35,6 +38,64 @@ fn vocal_runtime_status(
     runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
 ) -> Result<Value, String> {
     runtime.status()
+}
+
+#[tauri::command]
+fn vocal_profile_input_devices(
+) -> Result<Vec<king_vocal_engine::profile_capture::ProfileInputDevice>, String> {
+    vocal_profiles::input_devices()
+}
+
+#[tauri::command]
+fn list_vocal_profiles(app: tauri::AppHandle) -> Result<Vec<vocal_profiles::VocalProfile>, String> {
+    vocal_profiles::list(&app)
+}
+
+#[tauri::command]
+fn create_vocal_profile(
+    app: tauri::AppHandle,
+    display_name: String,
+    consent_confirmed: bool,
+) -> Result<vocal_profiles::VocalProfile, String> {
+    vocal_profiles::create(&app, display_name, consent_confirmed)
+}
+
+#[tauri::command]
+async fn record_vocal_profile_sample(
+    app: tauri::AppHandle,
+    profile_id: String,
+    prompt_id: String,
+    device_name: String,
+    channel: usize,
+) -> Result<vocal_profiles::VocalProfile, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        vocal_profiles::record(&app, profile_id, prompt_id, device_name, channel)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn delete_vocal_profile(app: tauri::AppHandle, profile_id: String) -> Result<(), String> {
+    vocal_profiles::delete(&app, profile_id)
+}
+
+#[tauri::command]
+fn prepare_vocal_profile_song(
+    app: tauri::AppHandle,
+    profile_id: String,
+    media_path: String,
+) -> Result<vocal_profiles::PrepareSingerReferenceReport, String> {
+    vocal_profiles::prepare_song(&app, profile_id, media_path)
+}
+
+#[tauri::command]
+fn resolve_vocal_profile_song_reference(
+    app: tauri::AppHandle,
+    profile_id: String,
+    media_path: String,
+) -> Result<vocal_profiles::SingerReferenceBindingReport, String> {
+    vocal_profiles::resolve_song_reference(&app, profile_id, media_path)
 }
 
 #[tauri::command]
@@ -59,6 +120,61 @@ fn vocal_disarm(
     runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
 ) -> Result<Value, String> {
     runtime.disarm()
+}
+
+#[tauri::command]
+fn vocal_live_status(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+) -> Result<Value, String> {
+    runtime.live_status()
+}
+
+#[tauri::command]
+fn vocal_sync_playback(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+    deck: u8,
+    seconds: f64,
+    playing: bool,
+) -> Result<Value, String> {
+    runtime.sync_playback(deck, seconds, playing)
+}
+
+#[tauri::command]
+fn vocal_set_rescue_enabled(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+    enabled: bool,
+) -> Result<Value, String> {
+    runtime.set_rescue_enabled(enabled)
+}
+
+#[tauri::command]
+fn vocal_bind_reference(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+    request: Value,
+) -> Result<Value, String> {
+    runtime.bind_reference(request)
+}
+
+#[tauri::command]
+fn vocal_unbind_reference(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+) -> Result<Value, String> {
+    runtime.unbind_reference()
+}
+
+#[tauri::command]
+fn vocal_start_live(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+    request: Value,
+) -> Result<Value, String> {
+    runtime.start_live(request)
+}
+
+#[tauri::command]
+fn vocal_stop_live(
+    runtime: tauri::State<'_, vocal_runtime::VocalRuntimeBridge>,
+) -> Result<Value, String> {
+    runtime.stop_live()
 }
 
 #[tauri::command]
@@ -422,6 +538,62 @@ fn open_song_package_directory(app: tauri::AppHandle, kind: String) -> Result<St
 }
 
 #[tauri::command]
+fn lighting_package_directories(
+    app: tauri::AppHandle,
+) -> Result<kinglight::KinglightDirectories, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    kinglight::directories(&app_data)
+}
+
+#[tauri::command]
+fn export_kinglight(
+    app: tauri::AppHandle,
+    payload: String,
+) -> Result<kinglight::KinglightExportResult, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    kinglight::export(&app_data, &payload)
+}
+
+#[tauri::command]
+fn import_kinglight_inbox(
+    app: tauri::AppHandle,
+) -> Result<kinglight::KinglightImportResult, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    kinglight::import_latest(&app_data)
+}
+
+#[tauri::command]
+fn open_lighting_package_directory(app: tauri::AppHandle, kind: String) -> Result<String, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let directories = kinglight::directories(&app_data)?;
+    let directory = match kind.as_str() {
+        "inbox" => directories.inbox_directory,
+        "outbox" => directories.outbox_directory,
+        _ => directories.root_directory,
+    };
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(&directory)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(directory)
+}
+
+#[tauri::command]
 fn mpv_runtime_status(
     state: tauri::State<mpv_runtime::MpvManager>,
 ) -> Result<mpv_runtime::MpvRuntimeStatus, String> {
@@ -487,6 +659,27 @@ fn mpv_deck_shutdown(state: tauri::State<mpv_runtime::MpvManager>, deck: u8) -> 
 }
 
 #[tauri::command]
+fn mpv_rescue_preview_sync(
+    state: tauri::State<mpv_runtime::MpvManager>,
+    deck: u8,
+    path: String,
+    seconds: f64,
+    playing: bool,
+    enabled: bool,
+    volume: f64,
+) -> Result<mpv_runtime::MpvRescuePreviewState, String> {
+    mpv_runtime::sync_rescue_preview(
+        &state,
+        deck,
+        Path::new(&path),
+        seconds,
+        playing,
+        enabled,
+        volume,
+    )
+}
+
+#[tauri::command]
 async fn analyze_audio_waveform(
     app: tauri::AppHandle,
     state: tauri::State<'_, waveform::WaveformCache>,
@@ -518,6 +711,7 @@ async fn queue_audio_ai_analysis(
     app: tauri::AppHandle,
     capabilities: tauri::State<'_, runtime_capability::RuntimeCapabilities>,
     path: String,
+    artist: Option<String>,
 ) -> Result<ai_analysis::AiAnalysisJob, String> {
     if !capabilities.ai_processing_available {
         return Err("当前为播放版；请导入已制作的 .kingsong".to_string());
@@ -532,7 +726,43 @@ async fn queue_audio_ai_analysis(
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("analysis");
-    ai_analysis::queue(PathBuf::from(path), database_path, derived_root).await
+    ai_analysis::queue(PathBuf::from(path), database_path, derived_root, artist).await
+}
+
+#[tauri::command]
+async fn prioritize_audio_ai_analysis(
+    app: tauri::AppHandle,
+    capabilities: tauri::State<'_, runtime_capability::RuntimeCapabilities>,
+    path: String,
+    artist: Option<String>,
+) -> Result<ai_analysis::AiAnalysisJob, String> {
+    if !capabilities.ai_processing_available {
+        return Err("当前为播放版；本机不能制作歌曲".to_string());
+    }
+    let database_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("king-club.sqlite3");
+    let derived_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("analysis");
+    let media_path = PathBuf::from(path);
+    let queued = ai_analysis::queue(
+        media_path.clone(),
+        database_path.clone(),
+        derived_root,
+        artist,
+    )
+    .await?;
+    match (queued.status.as_str(), queued.stage.as_str()) {
+        ("skipped", "missing-artist") => Err("缺少歌手名，不能制作歌词和原唱/伴唱".to_string()),
+        ("skipped", "dj-long-form") => Err("DJ 长音频按规则仅播放，不进行 AI 制作".to_string()),
+        ("ready", _) | ("running", _) | ("paused", _) => Ok(queued),
+        _ => ai_analysis::prioritize_manual(&database_path, &media_path),
+    }
 }
 
 #[tauri::command]
@@ -1028,6 +1258,11 @@ fn close_output_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn exit_application(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
 fn output_window_status(app: tauri::AppHandle) -> Result<OutputWindowStatus, String> {
     let Some(window) = app.get_webview_window("output") else {
         return Ok(OutputWindowStatus {
@@ -1123,7 +1358,7 @@ fn list_system_fonts() -> Result<Vec<String>, String> {
     let mut families = font_kit::source::SystemSource::new()
         .all_families()
         .map_err(|error| error.to_string())?;
-    families.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()));
+    families.sort_by_key(|left| left.to_lowercase());
     families.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
     Ok(families)
 }
@@ -1249,6 +1484,7 @@ struct LocalMediaAsset {
     lyrics_modified_unix_ms: Option<u128>,
     vocals_path: Option<String>,
     accompaniment_path: Option<String>,
+    thumbnail_path: Option<String>,
     size_bytes: u64,
     modified_unix_ms: u128,
 }
@@ -1292,6 +1528,120 @@ struct LocalMediaLibrary {
     audio_directory: String,
     videos: Vec<LocalMediaAsset>,
     audio: Vec<LocalMediaAsset>,
+}
+
+fn stable_path_hash(path: &Path) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in path.to_string_lossy().to_lowercase().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn run_video_thumbnail_ffmpeg(
+    source: &Path,
+    destination: &Path,
+    seek_seconds: &str,
+) -> Result<(), String> {
+    let mut command = std::process::Command::new("ffmpeg.exe");
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-ss",
+            seek_seconds,
+            "-i",
+        ])
+        .arg(source)
+        .args([
+            "-frames:v",
+            "1",
+            "-an",
+            "-sn",
+            "-dn",
+            "-vf",
+            "scale=320:-2:force_original_aspect_ratio=decrease",
+            "-q:v",
+            "4",
+        ])
+        .arg(destination)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let status = command
+        .status()
+        .map_err(|error| format!("无法启动 ffmpeg 生成缩略图：{error}"))?;
+    if status.success() && destination.is_file() {
+        Ok(())
+    } else {
+        Err(format!("ffmpeg 无法读取视频：{}", source.display()))
+    }
+}
+
+fn ensure_video_thumbnail_file(
+    app: &tauri::AppHandle,
+    requested_path: &str,
+) -> Result<String, String> {
+    let source = PathBuf::from(requested_path)
+        .canonicalize()
+        .map_err(|error| format!("视频文件不存在：{error}"))?;
+    let video_root = media_root_directory(app)?
+        .join("videos")
+        .canonicalize()
+        .map_err(|error| format!("无法读取视频目录：{error}"))?;
+    if !source.starts_with(&video_root) {
+        return Err("拒绝为媒体目录之外的文件生成缩略图".to_string());
+    }
+
+    let cache_directory = media_root_directory(app)?
+        .join("cache")
+        .join("video-thumbnails");
+    fs::create_dir_all(&cache_directory).map_err(|error| error.to_string())?;
+    let thumbnail = cache_directory.join(format!("{:016x}.jpg", stable_path_hash(&source)));
+    let source_modified = fs::metadata(&source)
+        .and_then(|value| value.modified())
+        .ok();
+    let thumbnail_is_fresh = thumbnail.is_file()
+        && fs::metadata(&thumbnail)
+            .map(|value| value.len() > 0)
+            .unwrap_or(false)
+        && source_modified.is_some_and(|modified| {
+            fs::metadata(&thumbnail)
+                .and_then(|value| value.modified())
+                .map(|thumbnail_modified| thumbnail_modified >= modified)
+                .unwrap_or(false)
+        });
+    if thumbnail_is_fresh {
+        return Ok(thumbnail.to_string_lossy().into_owned());
+    }
+
+    let temporary = cache_directory.join(format!("{:016x}.tmp.jpg", stable_path_hash(&source)));
+    let _ = fs::remove_file(&temporary);
+    if run_video_thumbnail_ffmpeg(&source, &temporary, "0.5").is_err() {
+        let _ = fs::remove_file(&temporary);
+        run_video_thumbnail_ffmpeg(&source, &temporary, "0")?;
+    }
+    if thumbnail.is_file() {
+        fs::remove_file(&thumbnail).map_err(|error| error.to_string())?;
+    }
+    fs::rename(&temporary, &thumbnail).map_err(|error| error.to_string())?;
+    Ok(thumbnail.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+async fn ensure_video_thumbnail(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || ensure_video_thumbnail_file(&app, &path))
+        .await
+        .map_err(|error| format!("缩略图任务失败：{error}"))?
 }
 
 fn collect_images(
@@ -1340,13 +1690,54 @@ fn collect_images(
     Ok(())
 }
 
+fn infer_artist_from_filename(file_stem: &str) -> Option<String> {
+    let mut remainder = file_stem.trim();
+    loop {
+        let Some((separator_index, separator)) = remainder
+            .char_indices()
+            .find(|(_, character)| matches!(character, '.' | '_' | '-' | '、'))
+        else {
+            break;
+        };
+        let prefix = remainder[..separator_index].trim();
+        if prefix.is_empty()
+            || prefix.len() > 3
+            || !prefix.chars().all(|value| value.is_ascii_digit())
+        {
+            break;
+        }
+        remainder = remainder[separator_index + separator.len_utf8()..].trim_start();
+    }
+
+    let split_index = [" - ", "- ", " – ", " — "]
+        .iter()
+        .filter_map(|separator| remainder.find(separator))
+        .min()?;
+    let candidate = remainder[..split_index]
+        .trim()
+        .trim_matches(['-', '–', '—']);
+    let candidate_length = candidate.chars().count();
+    if !(1..=64).contains(&candidate_length)
+        || !candidate.chars().any(char::is_alphabetic)
+        || !ai_analysis::has_meaningful_artist(candidate)
+    {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+struct MediaArtifactIndex<'a> {
+    ready: &'a HashMap<String, ai_analysis::ReadyAudioArtifacts>,
+    available_stems: &'a HashMap<String, ai_analysis::AvailableStemArtifacts>,
+}
+
 fn collect_media_files(
     directory: &Path,
     root: &Path,
     extensions: &[&str],
     default_category: &str,
     cache: &MediaMetadataCache,
-    ready_artifacts: &HashMap<String, ai_analysis::ReadyAudioArtifacts>,
+    artifacts: &MediaArtifactIndex<'_>,
     media: &mut Vec<LocalMediaAsset>,
 ) -> Result<(), String> {
     let entries = fs::read_dir(directory).map_err(|error| error.to_string())?;
@@ -1360,7 +1751,7 @@ fn collect_media_files(
                 extensions,
                 default_category,
                 cache,
-                ready_artifacts,
+                artifacts,
                 media,
             )?;
             continue;
@@ -1445,7 +1836,8 @@ fn collect_media_files(
             .unwrap_or_else(|_| path.clone())
             .to_string_lossy()
             .into_owned();
-        let derived_artifacts = ready_artifacts.get(&canonical_path);
+        let derived_artifacts = artifacts.ready.get(&canonical_path);
+        let stem_artifacts = artifacts.available_stems.get(&canonical_path);
         let lyrics_path = lyrics_sidecar(&path)
             .or_else(|| derived_artifacts.map(|artifacts| artifacts.lyrics_path.clone()));
         let lyrics_modified_unix_ms = lyrics_path.as_ref().and_then(|value| {
@@ -1460,6 +1852,7 @@ fn collect_media_files(
         let lyrics = lyrics_path
             .as_ref()
             .and_then(|value| decode_lyrics_file(value));
+        let inferred_artist = infer_artist_from_filename(&file_name);
         media.push(LocalMediaAsset {
             name: file_name,
             category,
@@ -1471,26 +1864,34 @@ fn collect_media_files(
                     .and_then(Value::as_str)
                     .map(str::to_string)
             }),
-            artist: media_metadata.artist.or_else(|| {
-                package_metadata
-                    .as_ref()
-                    .and_then(|value| value.get("artist"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            }),
+            artist: media_metadata
+                .artist
+                .or_else(|| {
+                    package_metadata
+                        .as_ref()
+                        .and_then(|value| value.get("artist"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .or(inferred_artist)
+                .filter(|artist| ai_analysis::has_meaningful_artist(artist)),
             album: media_metadata.album,
             duration_ms: media_metadata.duration_ms,
             lyrics,
             lyrics_path: lyrics_path.map(|value| value.to_string_lossy().into_owned()),
             lyrics_modified_unix_ms,
-            vocals_path: derived_artifacts.and_then(|artifacts| {
-                artifacts
-                    .vocals_path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned())
-            }),
-            accompaniment_path: derived_artifacts
-                .map(|artifacts| artifacts.accompaniment_path.to_string_lossy().into_owned()),
+            vocals_path: stem_artifacts
+                .and_then(|artifacts| artifacts.vocals_path.as_ref())
+                .or_else(|| derived_artifacts.and_then(|artifacts| artifacts.vocals_path.as_ref()))
+                .map(|path| path.to_string_lossy().into_owned()),
+            accompaniment_path: stem_artifacts
+                .map(|artifacts| artifacts.accompaniment_path.to_string_lossy().into_owned())
+                .or_else(|| {
+                    derived_artifacts.map(|artifacts| {
+                        artifacts.accompaniment_path.to_string_lossy().into_owned()
+                    })
+                }),
+            thumbnail_path: None,
             size_bytes,
             modified_unix_ms,
         });
@@ -1552,22 +1953,59 @@ fn scan_media_root(
         .map(ai_analysis::ready_artifacts_by_media_path)
         .transpose()?
         .unwrap_or_default();
+    let available_stems = database_path
+        .as_deref()
+        .map(ai_analysis::available_stems_by_media_path)
+        .transpose()?
+        .unwrap_or_default();
+    let empty_ready_artifacts = HashMap::new();
+    let empty_stem_artifacts = HashMap::new();
     collect_media_files(
         &video_directory,
         &video_directory,
         &["mp4", "m4v", "mov", "webm"],
         "舞台",
         cache,
-        &HashMap::new(),
+        &MediaArtifactIndex {
+            ready: &empty_ready_artifacts,
+            available_stems: &empty_stem_artifacts,
+        },
         &mut videos,
     )?;
+    let thumbnail_cache_directory = root_directory.join("cache").join("video-thumbnails");
+    for video in &mut videos {
+        let source = PathBuf::from(&video.path)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&video.path));
+        let thumbnail =
+            thumbnail_cache_directory.join(format!("{:016x}.jpg", stable_path_hash(&source)));
+        let source_modified = fs::metadata(&source)
+            .and_then(|value| value.modified())
+            .ok();
+        let thumbnail_is_fresh = thumbnail.is_file()
+            && fs::metadata(&thumbnail)
+                .map(|value| value.len() > 0)
+                .unwrap_or(false)
+            && source_modified.is_some_and(|modified| {
+                fs::metadata(&thumbnail)
+                    .and_then(|value| value.modified())
+                    .map(|thumbnail_modified| thumbnail_modified >= modified)
+                    .unwrap_or(false)
+            });
+        if thumbnail_is_fresh {
+            video.thumbnail_path = Some(thumbnail.to_string_lossy().into_owned());
+        }
+    }
     collect_media_files(
         &audio_directory,
         &audio_directory,
         &["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus"],
         "本地音乐",
         cache,
-        &ready_artifacts,
+        &MediaArtifactIndex {
+            ready: &ready_artifacts,
+            available_stems: &available_stems,
+        },
         &mut audio,
     )?;
     videos.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
@@ -1598,12 +2036,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_image_library,
             scan_media_library,
+            ensure_video_thumbnail,
             list_system_fonts,
             font_library,
             open_font_directory,
             list_displays,
             open_output_window,
             close_output_window,
+            exit_application,
             output_window_status,
             set_program_state,
             get_program_state,
@@ -1616,9 +2056,11 @@ pub fn run() {
             mpv_deck_set_volume,
             mpv_deck_state,
             mpv_deck_shutdown,
+            mpv_rescue_preview_sync,
             analyze_audio_waveform,
             save_rhythm_correction,
             queue_audio_ai_analysis,
+            prioritize_audio_ai_analysis,
             list_audio_ai_jobs,
             audio_ai_worker_status,
             set_audio_ai_scheduler,
@@ -1633,10 +2075,30 @@ pub fn run() {
             qu16_meter_status,
             qu16_parameter_status,
             qu16_write_parameters,
+            titan_runtime::titan_status,
+            titan_runtime::titan_inventory,
+            titan_runtime::titan_playbacks,
+            titan_runtime::titan_static_playbacks,
+            titan_runtime::titan_fire_playback,
+            titan_runtime::titan_release_playback,
             vocal_runtime_status,
+            vocal_profile_input_devices,
+            list_vocal_profiles,
+            create_vocal_profile,
+            record_vocal_profile_sample,
+            delete_vocal_profile,
+            prepare_vocal_profile_song,
+            resolve_vocal_profile_song_reference,
             vocal_set_preset,
             vocal_evaluate_arm,
             vocal_disarm,
+            vocal_live_status,
+            vocal_sync_playback,
+            vocal_set_rescue_enabled,
+            vocal_bind_reference,
+            vocal_unbind_reference,
+            vocal_start_live,
+            vocal_stop_live,
             vocal_routing_status,
             vocal_discover_routing_virtual,
             vocal_simulate_calibration_wizard,
@@ -1648,7 +2110,11 @@ pub fn run() {
             song_package_directories,
             export_kingsong,
             import_kingsong_inbox,
-            open_song_package_directory
+            open_song_package_directory,
+            lighting_package_directories,
+            export_kinglight,
+            import_kinglight_inbox,
+            open_lighting_package_directory
         ])
         .setup(|app| {
             if let Err(error) = request_extended_desktop() {
@@ -1818,13 +2284,18 @@ mod tests {
 
         let cache = MediaMetadataCache(Mutex::new(HashMap::new()));
         let mut media = Vec::new();
+        let empty_ready_artifacts = HashMap::new();
+        let empty_stem_artifacts = HashMap::new();
         collect_media_files(
             &directory,
             &directory,
             &["wav"],
             "本地音乐",
             &cache,
-            &HashMap::new(),
+            &MediaArtifactIndex {
+                ready: &empty_ready_artifacts,
+                available_stems: &empty_stem_artifacts,
+            },
             &mut media,
         )
         .expect("scan media fixture");
@@ -1838,6 +2309,20 @@ mod tests {
         assert!(media[0].size_bytes > 44);
 
         fs::remove_dir_all(directory).expect("remove test media directory");
+    }
+
+    #[test]
+    fn infers_only_explicit_artist_title_filename_pairs() {
+        assert_eq!(
+            infer_artist_from_filename("11.葛林- 我是不是你最疼爱的人"),
+            Some("葛林".to_string())
+        );
+        assert_eq!(
+            infer_artist_from_filename("001-128- Lorina - Away From Home"),
+            Some("Lorina".to_string())
+        );
+        assert_eq!(infer_artist_from_filename("08.最后说一声我爱你"), None);
+        assert_eq!(infer_artist_from_filename("11.爱是你我"), None);
     }
 
     #[test]

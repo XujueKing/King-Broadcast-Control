@@ -1,4 +1,5 @@
 const endpoint = process.env.KING_WEBVIEW_DEBUG_URL ?? "http://127.0.0.1:9229";
+const includeEntries = process.env.KING_QU16_LIVE_VERBOSE === "1";
 const targets = await fetch(`${endpoint}/json/list`).then((response) => response.json());
 const main = targets.find((target) => !target.url.includes("output.html") && /localhost:1420|tauri\.localhost/.test(target.url));
 if (!main) throw new Error("Main Tauri WebView target not found");
@@ -23,7 +24,12 @@ const result = await new Promise((resolve, reject) => {
     params: {
       expression: `(async () => {
         const status = await window.__TAURI_INTERNALS__.invoke('qu16_parameter_status');
-        const entries = Object.entries(status.parameters ?? {}).filter(([key]) => /^(?:fader|send|mute|pafl):/.test(key));
+        const entries = Object.entries(status.parameters ?? {});
+        const groups = entries.reduce((counts,[key]) => {
+          const kind=key.split(":",1)[0];
+          counts[kind]=(counts[kind]??0)+1;
+          return counts;
+        },{});
         const surface = document.querySelector('.qu-surface');
         const ui = [...document.querySelectorAll('.qu-channel')].slice(7, 9).map((channel, index) => ({
           channel: index + 8,
@@ -32,10 +38,26 @@ const result = await new Promise((resolve, reject) => {
           value: channel.querySelector('.qu-vertical-fader')?.value ?? '',
           selected: channel.classList.contains('selected'),
         }));
+        const processingLamps = [...document.querySelectorAll('.qu-superstrip [data-panel-key]')].map(node => ({
+          key: node.dataset.panelKey,
+          state: node.dataset.lampState,
+          known: node.dataset.parameterKnown,
+        }));
+        const muteGroups = [...document.querySelectorAll('.qu-softkeys [data-softkey]')].map(node => ({
+          key: Number(node.dataset.softkey),
+          state: node.dataset.groupState,
+          origin: node.dataset.syncOrigin,
+          disabled: node.disabled,
+        }));
         return {
-          status: { host: status.host, state: status.state, synced: status.synced, sessionId: status.sessionId, revision: status.revision, lastError: status.lastError, entries, pendingDetails: status.pendingDetails },
-          surface: surface ? { layer: surface.dataset.layer, lastHardwareKey: surface.dataset.lastHardwareKey, lastHardwareValue: surface.dataset.lastHardwareValue, lastHardwareRevision: surface.dataset.lastHardwareRevision } : null,
+          status: { host: status.host, state: status.state, synced: status.synced, sessionId: status.sessionId, revision: status.revision, lastError: status.lastError, parameterCount:entries.length, groups, entries:${includeEntries ? "entries" : "undefined"}, pendingDetails: status.pendingDetails },
+          dom: {
+            qaRootCount: document.querySelectorAll('#qu16-control-qa-root').length,
+            mixerWorkspaceCount: document.querySelectorAll('.mixer-workspace').length,
+          },
+          surface: surface ? { layer: surface.dataset.layer, activeMix: surface.dataset.activeMix, navigationSync: surface.dataset.navigationSync, lastHardwareKey: surface.dataset.lastHardwareKey, lastHardwareValue: surface.dataset.lastHardwareValue, lastHardwareRevision: surface.dataset.lastHardwareRevision } : null,
           ui,
+          indicators: { processingLamps, muteGroups },
         };
       })()`,
       returnByValue: true,

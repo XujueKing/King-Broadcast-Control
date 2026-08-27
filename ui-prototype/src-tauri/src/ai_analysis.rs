@@ -6,11 +6,15 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use lofty::{file::AudioFile, probe::Probe};
+use lofty::{
+    file::{AudioFile, TaggedFileExt},
+    probe::Probe,
+    tag::Accessor,
+};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-pub const PIPELINE_VERSION: &str = "king-audio-ai-moss-v6";
+pub const PIPELINE_VERSION: &str = "king-audio-ai-moss-v7";
 pub const SEPARATOR_MODEL: &str = "model_bs_roformer_ep_317_sdr_12.9755.ckpt";
 pub const ASR_MODEL: &str = "OpenMOSS-Team/MOSS-Music-8B-Thinking";
 pub const ALIGNER_MODEL: &str = "MOSS-Music native timestamps";
@@ -39,6 +43,12 @@ pub struct AiAnalysisJob {
 pub struct ReadyAudioArtifacts {
     pub lyrics_path: PathBuf,
     pub words_path: PathBuf,
+    pub vocals_path: Option<PathBuf>,
+    pub accompaniment_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct AvailableStemArtifacts {
     pub vocals_path: Option<PathBuf>,
     pub accompaniment_path: PathBuf,
 }
@@ -177,6 +187,7 @@ fn queue_blocking(
     media_path: PathBuf,
     database_path: PathBuf,
     derived_root: PathBuf,
+    artist: Option<String>,
 ) -> Result<AiAnalysisJob, String> {
     let canonical_path = media_path
         .canonicalize()
@@ -186,11 +197,25 @@ fn queue_blocking(
     fs::create_dir_all(&derived_directory).map_err(|error| error.to_string())?;
     let media_path_string = canonical_path.to_string_lossy().into_owned();
     let derived_directory_string = derived_directory.to_string_lossy().into_owned();
-    let is_long_form = Probe::open(&canonical_path)
+    let tagged_file = Probe::open(&canonical_path)
         .and_then(|probe| probe.read())
+        .ok();
+    let is_long_form = tagged_file
+        .as_ref()
         .map(|tagged| tagged.properties().duration() >= AUTO_LYRICS_MAX_DURATION)
         .unwrap_or(false);
-    let (initial_status, initial_stage) = if is_long_form {
+    let embedded_artist = tagged_file
+        .as_ref()
+        .and_then(|tagged| tagged.primary_tag().or_else(|| tagged.first_tag()))
+        .and_then(|tag| tag.artist())
+        .map(|value| value.into_owned());
+    let has_artist = artist
+        .as_deref()
+        .or(embedded_artist.as_deref())
+        .is_some_and(has_meaningful_artist);
+    let (initial_status, initial_stage) = if !has_artist {
+        ("skipped", "missing-artist")
+    } else if is_long_form {
         ("skipped", "dj-long-form")
     } else {
         ("queued", "pending")
@@ -213,11 +238,17 @@ fn queue_blocking(
                status=CASE
                  WHEN ai_analysis_jobs.status='ready' THEN ai_analysis_jobs.status
                  WHEN excluded.status='skipped' THEN excluded.status
+                 WHEN ai_analysis_jobs.status='skipped'
+                      AND ai_analysis_jobs.stage='missing-artist'
+                      AND excluded.status='queued' THEN excluded.status
                  ELSE ai_analysis_jobs.status
                END,
                stage=CASE
                  WHEN ai_analysis_jobs.status='ready' THEN ai_analysis_jobs.stage
                  WHEN excluded.status='skipped' THEN excluded.stage
+                 WHEN ai_analysis_jobs.status='skipped'
+                      AND ai_analysis_jobs.stage='missing-artist'
+                      AND excluded.status='queued' THEN excluded.stage
                  ELSE ai_analysis_jobs.stage
                END,
                error_message=CASE
@@ -271,12 +302,82 @@ pub async fn queue(
     media_path: PathBuf,
     database_path: PathBuf,
     derived_root: PathBuf,
+    artist: Option<String>,
 ) -> Result<AiAnalysisJob, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        queue_blocking(media_path, database_path, derived_root)
+        queue_blocking(media_path, database_path, derived_root, artist)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+pub fn prioritize_manual(database_path: &Path, media_path: &Path) -> Result<AiAnalysisJob, String> {
+    let canonical = media_path
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .to_string_lossy()
+        .into_owned();
+    let now = current_unix_ms();
+    let connection = open_database(database_path)?;
+    let changed = connection
+        .execute(
+            "UPDATE ai_analysis_jobs
+             SET priority=-1,
+                 status=CASE WHEN status='failed' THEN 'queued' ELSE status END,
+                 stage=CASE WHEN status='failed' THEN 'manual-retry' ELSE 'manual-priority' END,
+                 error_message=CASE WHEN status='failed' THEN NULL ELSE error_message END,
+                 updated_at_unix_ms=?1
+             WHERE media_path=?2 AND status IN ('queued', 'failed')",
+            params![now, canonical],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return connection
+            .query_row(
+                "SELECT id, media_path, media_fingerprint, pipeline_version, status, stage,
+                        derived_directory, separator_model, asr_model, aligner_model,
+                        attempts, error_message, created_at_unix_ms, updated_at_unix_ms
+                 FROM ai_analysis_jobs WHERE media_path=?1
+                 ORDER BY updated_at_unix_ms DESC LIMIT 1",
+                params![canonical],
+                row_to_job,
+            )
+            .map_err(|_| "歌曲尚未进入 AI 制作队列".to_string());
+    }
+    connection
+        .query_row(
+            "SELECT id, media_path, media_fingerprint, pipeline_version, status, stage,
+                    derived_directory, separator_model, asr_model, aligner_model,
+                    attempts, error_message, created_at_unix_ms, updated_at_unix_ms
+             FROM ai_analysis_jobs WHERE media_path=?1
+             ORDER BY updated_at_unix_ms DESC LIMIT 1",
+            params![canonical],
+            row_to_job,
+        )
+        .map_err(|error| error.to_string())
+}
+
+pub fn has_meaningful_artist(value: &str) -> bool {
+    let normalized = value.trim().to_lowercase();
+    !normalized.is_empty()
+        && !normalized.starts_with("http://")
+        && !normalized.starts_with("https://")
+        && !normalized.starts_with("www.")
+        && !normalized.contains(".com/")
+        && !normalized.ends_with(".com")
+        && !matches!(
+            normalized.as_str(),
+            "未知歌手"
+                | "未知艺术家"
+                | "unknown"
+                | "unknown artist"
+                | "n/a"
+                | "null"
+                | "none"
+                | "-"
+                | "--"
+                | "—"
+        )
 }
 
 pub fn list(database_path: &Path) -> Result<Vec<AiAnalysisJob>, String> {
@@ -309,7 +410,7 @@ pub fn update_scheduler_priorities(
     let mut changed = transaction
         .execute(
             "UPDATE ai_analysis_jobs
-             SET priority=2,
+             SET priority=CASE WHEN priority < 0 THEN priority ELSE 2 END,
                  status=CASE WHEN status='paused' THEN 'queued' ELSE status END,
                  stage=CASE WHEN status='paused' THEN 'resuming-after-playback' ELSE stage END,
                  error_message=CASE WHEN status='paused' THEN NULL ELSE error_message END,
@@ -327,7 +428,8 @@ pub fn update_scheduler_priorities(
         changed += transaction
             .execute(
                 "UPDATE ai_analysis_jobs SET priority=1
-                 WHERE media_path=?1 AND status IN ('queued', 'running', 'failed')",
+                 WHERE media_path=?1 AND priority >= 0
+                   AND status IN ('queued', 'running', 'failed')",
                 params![canonical],
             )
             .map_err(|error| error.to_string())?;
@@ -341,7 +443,8 @@ pub fn update_scheduler_priorities(
         changed += transaction
             .execute(
                 "UPDATE ai_analysis_jobs SET priority=0
-                 WHERE media_path=?1 AND status IN ('queued', 'running', 'failed')",
+                 WHERE media_path=?1 AND priority >= 0
+                   AND status IN ('queued', 'running', 'failed')",
                 params![canonical],
             )
             .map_err(|error| error.to_string())?;
@@ -486,6 +589,53 @@ pub fn ready_artifacts_by_media_path(
     Ok(artifacts)
 }
 
+/// Return completed separation artifacts independently from lyric status.
+///
+/// Stem separation happens before MOSS transcription. A malformed or empty
+/// transcript must not hide an already valid accompaniment from the decks.
+pub fn available_stems_by_media_path(
+    database_path: &Path,
+) -> Result<HashMap<String, AvailableStemArtifacts>, String> {
+    if !database_path.is_file() {
+        return Ok(HashMap::new());
+    }
+    let connection = open_database(database_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT media_path, derived_directory FROM ai_analysis_jobs
+             WHERE status!='skipped'
+             ORDER BY CASE WHEN pipeline_version=?1 THEN 0 ELSE 1 END,
+                      updated_at_unix_ms DESC, id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![PIPELINE_VERSION], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut artifacts = HashMap::new();
+    for row in rows {
+        let (media_path, directory) = row.map_err(|error| error.to_string())?;
+        let accompaniment_path = directory.join("no_vocals.flac");
+        if !accompaniment_path.is_file() {
+            continue;
+        }
+        artifacts
+            .entry(media_path)
+            .or_insert_with(|| AvailableStemArtifacts {
+                vocals_path: directory
+                    .join("vocals.flac")
+                    .is_file()
+                    .then(|| directory.join("vocals.flac")),
+                accompaniment_path,
+            });
+    }
+    Ok(artifacts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +649,10 @@ mod tests {
         ))
     }
 
+    fn named_artist() -> Option<String> {
+        Some("KING Test Artist".to_string())
+    }
+
     #[test]
     fn queues_once_and_persists_the_selected_models() {
         let root = test_root("queue");
@@ -509,8 +663,14 @@ mod tests {
         let database = root.join("king.sqlite3");
         let derived = root.join("analysis");
 
-        let first = queue_blocking(media.clone(), database.clone(), derived.clone()).unwrap();
-        let second = queue_blocking(media, database.clone(), derived).unwrap();
+        let first = queue_blocking(
+            media.clone(),
+            database.clone(),
+            derived.clone(),
+            named_artist(),
+        )
+        .unwrap();
+        let second = queue_blocking(media, database.clone(), derived, named_artist()).unwrap();
         let jobs = list(&database).unwrap();
 
         assert_eq!(first.id, second.id);
@@ -524,6 +684,89 @@ mod tests {
     }
 
     #[test]
+    fn skips_lyric_and_stem_work_when_artist_is_missing() {
+        let root = test_root("missing-artist");
+        fs::create_dir_all(&root).unwrap();
+        let media = root.join("untagged.mp3");
+        fs::write(&media, b"untagged audio payload").unwrap();
+        let database = root.join("king.sqlite3");
+
+        let job = queue_blocking(media, database, root.join("analysis"), None).unwrap();
+
+        assert_eq!(job.status, "skipped");
+        assert_eq!(job.stage, "missing-artist");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn website_metadata_is_not_treated_as_a_singer() {
+        assert!(!has_meaningful_artist("www.djkk.com"));
+        assert!(!has_meaningful_artist("https://example.com/artist"));
+        assert!(has_meaningful_artist("Red Velvet"));
+    }
+
+    #[test]
+    fn newly_discovered_artist_requeues_a_missing_artist_job() {
+        let root = test_root("artist-discovered");
+        fs::create_dir_all(&root).unwrap();
+        let media = root.join("artist - song.mp3");
+        fs::write(&media, b"audio payload").unwrap();
+        let database = root.join("king.sqlite3");
+        let derived = root.join("analysis");
+
+        let skipped =
+            queue_blocking(media.clone(), database.clone(), derived.clone(), None).unwrap();
+        assert_eq!(skipped.status, "skipped");
+        assert_eq!(skipped.stage, "missing-artist");
+
+        let queued = queue_blocking(media, database, derived, named_artist()).unwrap();
+        assert_eq!(queued.id, skipped.id);
+        assert_eq!(queued.status, "queued");
+        assert_eq!(queued.stage, "pending");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_request_promotes_a_queued_job_and_retries_a_failed_job() {
+        let root = test_root("manual-priority");
+        fs::create_dir_all(&root).unwrap();
+        let media = root.join("artist - requested.mp3");
+        fs::write(&media, b"manual production payload").unwrap();
+        let database = root.join("king.sqlite3");
+        let queued = queue_blocking(
+            media.clone(),
+            database.clone(),
+            root.join("analysis"),
+            named_artist(),
+        )
+        .unwrap();
+        open_database(&database)
+            .unwrap()
+            .execute(
+                "UPDATE ai_analysis_jobs SET status='failed', stage='failed', error_message='test' WHERE id=?1",
+                params![queued.id],
+            )
+            .unwrap();
+
+        let promoted = prioritize_manual(&database, &media).unwrap();
+        update_scheduler_priorities(&database, &[], &[]).unwrap();
+        let (priority, error): (i64, Option<String>) = open_database(&database)
+            .unwrap()
+            .query_row(
+                "SELECT priority, error_message FROM ai_analysis_jobs WHERE id=?1",
+                params![queued.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(promoted.status, "queued");
+        assert_eq!(promoted.stage, "manual-retry");
+        assert_eq!(priority, -1);
+        assert!(error.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn renamed_identical_media_reuses_the_existing_job() {
         let root = test_root("rename");
         fs::create_dir_all(&root).unwrap();
@@ -531,10 +774,22 @@ mod tests {
         fs::write(&first_path, b"the same media bytes").unwrap();
         let database = root.join("king.sqlite3");
         let derived = root.join("analysis");
-        let first = queue_blocking(first_path.clone(), database.clone(), derived.clone()).unwrap();
+        let first = queue_blocking(
+            first_path.clone(),
+            database.clone(),
+            derived.clone(),
+            named_artist(),
+        )
+        .unwrap();
         let second_path = root.join("renamed.mp3");
         fs::rename(first_path, &second_path).unwrap();
-        let second = queue_blocking(second_path.clone(), database.clone(), derived).unwrap();
+        let second = queue_blocking(
+            second_path.clone(),
+            database.clone(),
+            derived,
+            named_artist(),
+        )
+        .unwrap();
 
         assert_eq!(first.id, second.id);
         assert_eq!(
@@ -557,10 +812,22 @@ mod tests {
         fs::write(&background, b"background media").unwrap();
         let database = root.join("king.sqlite3");
         let derived = root.join("analysis");
-        let playing_job =
-            queue_blocking(playing.clone(), database.clone(), derived.clone()).unwrap();
-        let loaded_job = queue_blocking(loaded.clone(), database.clone(), derived.clone()).unwrap();
-        let background_job = queue_blocking(background, database.clone(), derived).unwrap();
+        let playing_job = queue_blocking(
+            playing.clone(),
+            database.clone(),
+            derived.clone(),
+            named_artist(),
+        )
+        .unwrap();
+        let loaded_job = queue_blocking(
+            loaded.clone(),
+            database.clone(),
+            derived.clone(),
+            named_artist(),
+        )
+        .unwrap();
+        let background_job =
+            queue_blocking(background, database.clone(), derived, named_artist()).unwrap();
         open_database(&database)
             .unwrap()
             .execute(
@@ -596,7 +863,13 @@ mod tests {
         fs::write(&media, b"completed media bytes").unwrap();
         let database = root.join("king.sqlite3");
         let derived_root = root.join("analysis");
-        let job = queue_blocking(media.clone(), database.clone(), derived_root.clone()).unwrap();
+        let job = queue_blocking(
+            media.clone(),
+            database.clone(),
+            derived_root.clone(),
+            named_artist(),
+        )
+        .unwrap();
         let derived = PathBuf::from(&job.derived_directory);
         for name in ["lyrics.lrc", "lyrics.words.json", "no_vocals.flac"] {
             fs::write(derived.join(name), b"ready").unwrap();
@@ -619,11 +892,47 @@ mod tests {
         );
         assert!(artifacts.get(&key).unwrap().vocals_path.is_none());
 
-        queue_blocking(media, database, derived_root).unwrap();
+        queue_blocking(media, database, derived_root, named_artist()).unwrap();
         assert_eq!(
             fs::read(derived.join("manifest.json")).unwrap(),
             finished_manifest
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exposes_completed_stems_when_lyrics_transcription_failed() {
+        let root = test_root("failed-lyrics-keeps-stems");
+        fs::create_dir_all(&root).unwrap();
+        let media = root.join("song.mp3");
+        fs::write(&media, b"separated media bytes").unwrap();
+        let database = root.join("king.sqlite3");
+        let job = queue_blocking(
+            media.clone(),
+            database.clone(),
+            root.join("analysis"),
+            named_artist(),
+        )
+        .unwrap();
+        let derived = PathBuf::from(&job.derived_directory);
+        fs::write(derived.join("vocals.flac"), b"vocals").unwrap();
+        fs::write(derived.join("no_vocals.flac"), b"accompaniment").unwrap();
+        open_database(&database)
+            .unwrap()
+            .execute(
+                "UPDATE ai_analysis_jobs
+                 SET status='failed', stage='failed', error_message='bad transcript'
+                 WHERE id=?1",
+                params![job.id],
+            )
+            .unwrap();
+
+        assert!(ready_artifacts_by_media_path(&database).unwrap().is_empty());
+        let key = media.canonicalize().unwrap().to_string_lossy().into_owned();
+        let artifacts = available_stems_by_media_path(&database).unwrap();
+        let stems = artifacts.get(&key).unwrap();
+        assert_eq!(stems.accompaniment_path, derived.join("no_vocals.flac"));
+        assert_eq!(stems.vocals_path, Some(derived.join("vocals.flac")));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -638,6 +947,7 @@ mod tests {
             media.clone(),
             database.clone(),
             root.join("current-analysis"),
+            named_artist(),
         )
         .unwrap();
         let previous_directory = root.join("previous-analysis");

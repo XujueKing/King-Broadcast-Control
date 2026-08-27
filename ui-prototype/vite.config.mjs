@@ -24,7 +24,24 @@ export default defineConfig({
       clientFiles: ["./src/main.jsx"],
     },
     watch: {
-      ignored: ["**/src-tauri/target/**", "**/vendor/**", "**/tmp/**", "**/artifacts/**"],
+      // Native Windows file watching becomes unreliable in this project once
+      // model caches, Python environments and media evidence are present.
+      // Poll only the small source tree so the desktop UI cannot turn white
+      // because the Vite watcher stopped unexpectedly.
+      usePolling: true,
+      interval: 350,
+      ignored: [
+        "**/node_modules/**",
+        "**/.venv*/**",
+        "**/.local-tools/**",
+        "**/src-tauri/target/**",
+        "**/vendor/**",
+        "**/tmp/**",
+        "**/artifacts/**",
+        "**/dist/**",
+        "**/models/**",
+        "**/media/**",
+      ],
     },
   },
   plugins: [react()],

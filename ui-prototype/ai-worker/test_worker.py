@@ -43,6 +43,42 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(worker.lease_job(database, None, include_failed=False)["id"], 3)
             self.assertEqual(worker.lease_job(database, None, include_failed=False)["id"], 1)
 
+    def test_leases_only_the_requested_pipeline_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "pipeline.sqlite3"
+            worker.ensure_job_table(database)
+            connection = sqlite3.connect(database)
+            try:
+                for job_id, pipeline in ((1, "old"), (2, "current")):
+                    connection.execute(
+                        """INSERT INTO ai_analysis_jobs (
+                           id, media_path, media_fingerprint, pipeline_version, status, stage,
+                           derived_directory, separator_model, asr_model, aligner_model,
+                           attempts, error_message, created_at_unix_ms, updated_at_unix_ms, priority
+                         ) VALUES (?, ?, ?, ?, 'queued', 'pending', ?, 'separator',
+                                   'asr', 'aligner', 0, NULL, ?, ?, 2)""",
+                        (
+                            job_id,
+                            f"song-{job_id}.wav",
+                            f"fingerprint-{job_id}",
+                            pipeline,
+                            f"derived-{job_id}",
+                            job_id,
+                            job_id,
+                        ),
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+
+            leased = worker.lease_job(
+                database,
+                None,
+                include_failed=False,
+                pipeline_version="current",
+            )
+            self.assertEqual(leased["id"], 2)
+
 
 class MossResponseTests(unittest.TestCase):
     def test_compresses_reference_pitch_and_preserves_song_identity(self):
@@ -254,6 +290,71 @@ class MossResponseTests(unittest.TestCase):
         reconciled = worker.reconcile_overlapping_timestamp_items(items)
         self.assertEqual([item["text"] for item in reconciled], [items[0]["text"]])
         self.assertNotIn("我最怕回\n", worker.build_lrc(items))
+
+    def test_reconciles_real_moss_overlap_without_collapsing_adjacent_lyrics(self):
+        items = [
+            {
+                "text": "让了一圈那短暂快感之后",
+                "startSeconds": 68.293,
+                "endSeconds": 74.5,
+            },
+            {
+                "text": "绕了一圈那短暂快感之后的空荡",
+                "startSeconds": 71.46,
+                "endSeconds": 77.62,
+            },
+            {
+                "text": "痛苦不断不断的交替",
+                "startSeconds": 117.83,
+                "endSeconds": 121.638,
+            },
+            {
+                "text": "不断不断的交替还有什么留情的余地",
+                "startSeconds": 120.0,
+                "endSeconds": 128.8,
+            },
+            {
+                "text": "还有什么留情",
+                "startSeconds": 121.638,
+                "endSeconds": 124.56,
+            },
+        ]
+
+        reconciled = worker.reconcile_overlapping_timestamp_items(items)
+
+        self.assertEqual(
+            [item["text"] for item in reconciled],
+            [
+                "绕了一圈那短暂快感之后的空荡",
+                "痛苦不断不断的交替",
+                "不断不断的交替还有什么留情的余地",
+            ],
+        )
+        self.assertEqual(reconciled[0]["startSeconds"], 68.293)
+        self.assertEqual(reconciled[1]["endSeconds"], 120.0)
+        self.assertTrue(
+            all(
+                float(current["endSeconds"]) <= float(following["startSeconds"])
+                for current, following in zip(reconciled, reconciled[1:])
+            )
+        )
+
+    def test_only_reuses_lyrics_from_the_current_postprocess_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("lyrics.lrc", "lyrics.words.json", "lyrics.txt"):
+                (root / name).write_text("ready", encoding="utf-8")
+            pipeline = {"lyricsPostprocessVersion": "moss-native-monotonic-v2"}
+            (root / "manifest.json").write_text(
+                json.dumps({"lyricsPostprocessVersion": "moss-native-monotonic-v1"}),
+                encoding="utf-8",
+            )
+            self.assertFalse(worker.lyrics_artifacts_are_current(root, pipeline))
+            (root / "manifest.json").write_text(
+                json.dumps({"lyricsPostprocessVersion": "moss-native-monotonic-v2"}),
+                encoding="utf-8",
+            )
+            self.assertTrue(worker.lyrics_artifacts_are_current(root, pipeline))
 
 
 if __name__ == "__main__":

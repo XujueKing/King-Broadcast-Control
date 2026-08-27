@@ -36,9 +36,10 @@ const assertDeepEqual=(actual,expected,label)=>{
   if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error(`${label}: expected ${JSON.stringify(expected)}, observed ${JSON.stringify(actual)}`);
 };
 
+try{
 await evaluate(`(async()=>{
   window.__qu16ControlHarness?.unmount?.();
-  document.querySelector("#qu16-control-qa-root")?.remove();
+  document.querySelectorAll("#qu16-control-qa-root").forEach(node=>node.remove());
   const host=document.createElement("div");
   host.id="qu16-control-qa-root";
   host.className="mixer-workspace-body";
@@ -52,11 +53,20 @@ await evaluate(`(async()=>{
         "fader:ch-1":64,"fader:ch-2":32,
         "mute:ch-1":1,"mute:ch-2":0,
         "pafl:ch-1":1,"pafl:ch-2":1,"pafl:ch-3":0,
-        "send:ch-1:Mix 1":16
+        "send:ch-1:Mix 1":16,
+        "process:ch-1:usb-source":1,
+        "process:ch-1:hpf-in":0,
+        "process:ch-1:peq-in":1,
+        "process:ch-1:gate-in":0,
+        "process:ch-1:comp-in":1,
+        "mute-group:1":1,
+        "mute-group:2":0,
+        "mute-group:3":0,
+        "mute-group:4":1
       }
     }
   });
-  await new Promise(resolve=>setTimeout(resolve,80));
+  await new Promise(resolve=>setTimeout(resolve,160));
   return true;
 })()`);
 
@@ -65,13 +75,28 @@ let state=await evaluate(`(()=>({
   lcdMode:document.querySelector("#qu16-control-qa-root .qu-lcd-panel")?.dataset.syncMode,
   ch1:Number(document.querySelector('#qu16-control-qa-root [data-source-id="ch-1"] .qu-vertical-fader')?.value),
   mute:document.querySelector('#qu16-control-qa-root [data-source-id="ch-1"] .qu-key.mute')?.getAttribute("aria-pressed"),
-  pafl:[...document.querySelectorAll('#qu16-control-qa-root [data-source-id] .qu-pafl[aria-pressed="true"]')].map(node=>node.closest("[data-source-id]")?.dataset.sourceId)
+  pafl:[...document.querySelectorAll('#qu16-control-qa-root [data-source-id] .qu-pafl[aria-pressed="true"]')].map(node=>node.closest("[data-source-id]")?.dataset.sourceId),
+  processing:[...document.querySelectorAll('#qu16-control-qa-root [data-panel-key]')].map(node=>({key:node.dataset.panelKey,state:node.dataset.lampState,known:node.dataset.parameterKnown}))
+  ,softkeys:[...document.querySelectorAll('#qu16-control-qa-root [data-softkey]')].map(node=>({key:node.dataset.softkey,state:node.dataset.groupState,origin:node.dataset.syncOrigin,disabled:node.disabled}))
 }))()`);
 assertEqual(state.surfaceMode,"hardware-live","Surface sync mode");
 assertEqual(state.lcdMode,"local-ui-only","LCD remains local-only");
 assertEqual(state.ch1,50,"Snapshot fader application");
 assertEqual(state.mute,"true","Snapshot mute application");
 assertDeepEqual(state.pafl,["ch-1","ch-2"],"Additive snapshot PAFL targets");
+assertDeepEqual(state.processing,[
+  {key:"hpf-in",state:"off",known:"true"},
+  {key:"peq-in",state:"on",known:"true"},
+  {key:"gate-in",state:"off",known:"true"},
+  {key:"comp-in",state:"on",known:"true"},
+  {key:"geq-fader-flip",state:"off",known:"true"},
+],"Processing lamps use authoritative snapshot state");
+assertDeepEqual(state.softkeys,[
+  {key:"1",state:"muted",origin:"mute-group-readback",disabled:true},
+  {key:"2",state:"open",origin:"mute-group-readback",disabled:true},
+  {key:"3",state:"open",origin:"mute-group-readback",disabled:true},
+  {key:"4",state:"muted",origin:"mute-group-readback",disabled:true},
+],"Mute Group indicators use read-only hardware state");
 
 await evaluate(`(async()=>{
   const qa=window.__qu16ControlHarness;
@@ -113,7 +138,7 @@ await evaluate(`(async()=>{
       "send:ch-1:Mix 1":16
     }
   }});
-  await new Promise(resolve=>setTimeout(resolve,60));
+  await new Promise(resolve=>setTimeout(resolve,200));
   return true;
 })()`);
 state=await evaluate(`Number(document.querySelector('#qu16-control-qa-root [data-source-id="ch-1"] .qu-vertical-fader')?.value)`);
@@ -129,7 +154,7 @@ await evaluate(`(async()=>{
       "send:ch-1:Mix 1":64
     }
   }});
-  await new Promise(resolve=>setTimeout(resolve,60));
+  await new Promise(resolve=>setTimeout(resolve,200));
   return true;
 })()`);
 state=await evaluate(`Number(document.querySelector('#qu16-control-qa-root [data-source-id="ch-1"] .qu-vertical-fader')?.value)`);
@@ -144,7 +169,7 @@ await evaluate(`(async()=>{
   setter.call(fader,"90");
   fader.dispatchEvent(new Event("input",{bubbles:true}));
   fader.dispatchEvent(new Event("change",{bubbles:true}));
-  await new Promise(resolve=>setTimeout(resolve,100));
+  await new Promise(resolve=>setTimeout(resolve,200));
   return true;
 })()`);
 state=await evaluate(`(()=>(
@@ -178,11 +203,16 @@ state=await evaluate(`(()=>({
 assertDeepEqual(state.active,["ch-1","ch-2","ch-3"],"Local PAFL permits multiple simultaneous targets");
 assertDeepEqual(state.writes,[[{key:"pafl:ch-3",value:1}]],"PAFL writes immediately");
 
-await evaluate(`(()=>{
-  window.__qu16ControlHarness.unmount();
-  delete window.__qu16ControlHarness;
-  document.querySelector("#qu16-control-qa-root")?.remove();
-  return true;
-})()`);
-socket.close();
 console.log("Qu-16 frontend control QA passed: snapshot, pending/readback, coalescing, local Mix Select, immediate Mute/PAFL, and additive PAFL.");
+}finally{
+  try{
+    await evaluate(`(()=>{
+      window.__qu16ControlHarness?.unmount?.();
+      delete window.__qu16ControlHarness;
+      document.querySelectorAll("#qu16-control-qa-root").forEach(node=>node.remove());
+      return document.querySelectorAll("#qu16-control-qa-root").length;
+    })()`);
+  }finally{
+    socket.close();
+  }
+}

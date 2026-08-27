@@ -18,10 +18,12 @@ use king_vocal_engine::{
     run_for_duration,
     simulation::{run_simulation, SimulationConfig, SimulationFault},
     site::build_site_readiness,
-    LoopbackConfig,
+    start_loopback, LoopbackConfig,
 };
+use serde_json::{json, Value};
 use std::{
-    env, fs, io,
+    env, fs,
+    io::{self, BufRead, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -67,6 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             Ok(())
         }
+        Some("live-control-stdio") => run_live_control(&arguments[1..]),
         _ => {
             print_help();
             Ok(())
@@ -257,13 +260,36 @@ fn run_loopback(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     {
         return run_shadow_output_gate(arguments);
     }
+    let config = parse_loopback_config(arguments)?;
+    let seconds = number_argument::<u64>(arguments, "--seconds")?.unwrap_or(10);
+    let metrics_path = string_argument(arguments, "--metrics").map(PathBuf::from);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_signal = Arc::clone(&stop);
+    ctrlc::set_handler(move || stop_signal.store(true, Ordering::Relaxed))?;
+    let final_metrics = run_for_duration(&config, Duration::from_secs(seconds), stop, |metrics| {
+        println!("{}", serde_json::to_string(metrics).unwrap_or_default())
+    })?;
+    let encoded = serde_json::to_vec_pretty(&final_metrics)?;
+    if let Some(path) = metrics_path {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &encoded)?;
+    }
+    println!("{}", String::from_utf8(encoded)?);
+    Ok(())
+}
+
+fn parse_loopback_config(
+    arguments: &[String],
+) -> Result<LoopbackConfig, Box<dyn std::error::Error>> {
     let key_tonic = string_argument(arguments, "--key")
         .map(|value| parse_tonic(&value))
         .transpose()?;
     let scale_mode = string_argument(arguments, "--scale")
         .map(|value| value.parse::<ScaleMode>())
         .transpose()?;
-    let config = LoopbackConfig {
+    Ok(LoopbackConfig {
         input_device: string_argument(arguments, "--input"),
         output_device: string_argument(arguments, "--output"),
         input_channel: number_argument(arguments, "--input-channel")?.unwrap_or(0),
@@ -282,6 +308,14 @@ fn run_loopback(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         key_tonic,
         scale_mode,
         reference_map: string_argument(arguments, "--reference").map(PathBuf::from),
+        reference_rescue_enabled: arguments
+            .iter()
+            .any(|argument| argument == "--enable-reference-rescue"),
+        reference_vocal_path: string_argument(arguments, "--reference-vocal").map(PathBuf::from),
+        reference_rescue_gain_db: number_argument(arguments, "--reference-rescue-gain-db")?
+            .unwrap_or(0.0),
+        reference_start_delay_ms: number_argument(arguments, "--reference-start-delay-ms")?
+            .unwrap_or(0.0),
         vocal_dynamics_enabled: arguments
             .iter()
             .any(|argument| argument == "--enable-vocal-dynamics"),
@@ -295,23 +329,91 @@ fn run_loopback(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             .map(|value| value.parse::<VocalPreset>())
             .transpose()?
             .unwrap_or_default(),
-    };
-    let seconds = number_argument::<u64>(arguments, "--seconds")?.unwrap_or(10);
-    let metrics_path = string_argument(arguments, "--metrics").map(PathBuf::from);
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_signal = Arc::clone(&stop);
-    ctrlc::set_handler(move || stop_signal.store(true, Ordering::Relaxed))?;
-    let final_metrics = run_for_duration(&config, Duration::from_secs(seconds), stop, |metrics| {
-        println!("{}", serde_json::to_string(metrics).unwrap_or_default())
-    })?;
-    let encoded = serde_json::to_vec_pretty(&final_metrics)?;
-    if let Some(path) = metrics_path {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, &encoded)?;
+    })
+}
+
+fn run_live_control(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if !arguments.iter().any(|argument| argument == "--arm") {
+        return Err("安全拒绝：live-control-stdio 必须显式提供 --arm".into());
     }
-    println!("{}", String::from_utf8(encoded)?);
+    let loopback = start_loopback(&parse_loopback_config(arguments)?)?;
+    let input = io::stdin();
+    let mut output = io::stdout().lock();
+    for line in input.lock().lines() {
+        let line = line?;
+        let request: Value = match serde_json::from_str(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                writeln!(
+                    output,
+                    "{}",
+                    json!({"id": null, "ok": false, "error": error.to_string()})
+                )?;
+                output.flush()?;
+                continue;
+            }
+        };
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        let command = request
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let response = match command {
+            "status" => json!({
+                "id": id,
+                "ok": true,
+                "physicalAudioStarted": true,
+                "metrics": loopback.metrics(),
+                "playbackClock": loopback.playback_clock_status(),
+            }),
+            "sync_playback" => {
+                let seconds = request.get("seconds").and_then(Value::as_f64);
+                let playing = request.get("playing").and_then(Value::as_bool);
+                match (seconds, playing) {
+                    (Some(seconds), Some(playing)) => json!({
+                        "id": id,
+                        "ok": true,
+                        "playbackClock": loopback.sync_playback(seconds, playing),
+                    }),
+                    _ => {
+                        json!({"id": id, "ok": false, "error": "sync_playback 需要 seconds 与 playing"})
+                    }
+                }
+            }
+            "set_rescue_enabled" => match request.get("enabled").and_then(Value::as_bool) {
+                Some(enabled) => json!({
+                    "id": id,
+                    "ok": true,
+                    "referenceRescueEnabled": loopback.set_reference_rescue_enabled(enabled),
+                }),
+                None => json!({"id": id, "ok": false, "error": "set_rescue_enabled 需要 enabled"}),
+            },
+            "set_preset" => match request
+                .get("preset")
+                .and_then(Value::as_str)
+                .map(str::parse::<VocalPreset>)
+                .transpose()
+            {
+                Ok(Some(preset)) => json!({
+                    "id": id,
+                    "ok": true,
+                    "revision": loopback.set_vocal_preset(preset),
+                    "preset": preset,
+                }),
+                Ok(None) => json!({"id": id, "ok": false, "error": "set_preset 需要 preset"}),
+                Err(error) => json!({"id": id, "ok": false, "error": error.to_string()}),
+            },
+            "stop" => {
+                let response = json!({"id": id, "ok": true, "physicalAudioStarted": false});
+                writeln!(output, "{response}")?;
+                output.flush()?;
+                break;
+            }
+            _ => json!({"id": id, "ok": false, "error": format!("未知 live command：{command}")}),
+        };
+        writeln!(output, "{response}")?;
+        output.flush()?;
+    }
     Ok(())
 }
 
@@ -439,6 +541,10 @@ fn print_help() {
   control-stdio
       P14 NDJSON 控制/遥测桥；启动时固定未武装，不会启动物理音频。
 
+  live-control-stdio --arm [run options]
+      P29 已武装的单路实时音频桥；支持 status、sync_playback、set_rescue_enabled、set_preset、stop。
+      仅供桌面端在现场路由验证通过后启动，不能替代 --arm 安全门。
+
   simulate-failover [--seconds 3] [--block-frames 128] [--output PATH]
       P15 虚拟三路 ASIO 故障矩阵；验证超时、异常输出、控制断线、输入断线和恢复，不启动物理音频。
 
@@ -513,6 +619,14 @@ Options:
   --enable-pitch-correction
                         显式启用实时 Reference/Scale 修音
   --reference PATH      optional reference.json
+  --enable-reference-rescue
+                        显式启用 P28 原唱分轨应急补位；默认关闭，不等同于歌手音色生成
+  --reference-vocal PATH
+                        与 reference.json 同时间轴的 48kHz FLAC 原唱分轨
+  --reference-rescue-gain-db DB
+                        补位分轨增益，默认 0 dB；最终比例由真人音量与评分连续控制
+  --reference-start-delay-ms MS
+                        引擎启动到歌曲 00:00 的时间轴补偿，默认 0 ms
   --key NOTE --scale MODE
                         optional fallback key/scale target
   --correction-strength N

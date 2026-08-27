@@ -8,11 +8,14 @@ import {
   QU16_TARGETS,
   decodeQu16ParameterSnapshot,
   midiToUiValue,
+  panToUiValue,
   qu16ControlCoalesceKey,
+  qu16IntentToWrite,
   qu16MasterTargetId,
   qu16MixLabel,
   qu16TargetId,
   uiToMidiValue,
+  uiToPanValue,
 } from "../src/qu16-control.js";
 import { qu16SurfaceSourceAt } from "../src/qu16-surface-map.js";
 import qu16Model from "../src/mixer-models/allen-heath-qu16/model.json" with { type:"json" };
@@ -32,6 +35,16 @@ test("onsite custom layer maps physical slots 8 and 9 to the calibrated FX retur
   assert.equal(qu16SurfaceSourceAt("custom",8).id,"fx-1-ret");
   assert.equal(qu16SurfaceSourceAt("custom",9).id,"fx-2-ret");
   assert.equal(qu16SurfaceSourceAt("custom",10).id,"ch-10");
+});
+
+test("onsite channel names are shown in Chinese without replacing protocol channel ids",()=>{
+  assert.equal(qu16SurfaceSourceAt("lower",6).label,"CH6");
+  assert.equal(qu16SurfaceSourceAt("lower",6).stripLabel,"GS麦克风");
+  assert.equal(qu16SurfaceSourceAt("lower",11).stripLabel,"电脑音乐左");
+  assert.equal(qu16SurfaceSourceAt("lower",12).stripLabel,"电脑音乐右");
+  assert.equal(qu16SurfaceSourceAt("custom",6).stripLabel,"GS麦克风");
+  assert.equal(qu16SurfaceSourceAt("custom",11).stripLabel,"电脑音乐左");
+  assert.equal(qu16SurfaceSourceAt("custom",12).stripLabel,"电脑音乐右");
 });
 
 const masterCases = [
@@ -78,6 +91,29 @@ test("conversion rejects coercion, non-finite values, fractions in MIDI, and out
   for (const value of [-1,128,1.5,NaN,Infinity,"64",null,undefined]) {
     assert.throws(()=>midiToUiValue(value));
   }
+});
+
+test("pan and extended semantic writes use the documented wire domains",()=>{
+  assert.equal(uiToPanValue(0),0);
+  assert.equal(uiToPanValue(50),37);
+  assert.equal(uiToPanValue(100),74);
+  assert.equal(panToUiValue(37),50);
+
+  assert.deepEqual(qu16IntentToWrite({kind:"pan",target:"ch-1",mix:"LR",value:50}),{
+    key:"pan:ch-1:LR",value:37,
+  });
+  assert.deepEqual(qu16IntentToWrite({kind:"assign",target:"ch-1",mix:"Mix 1",value:true}),{
+    key:"assign:ch-1:Mix 1",value:1,
+  });
+  assert.deepEqual(qu16IntentToWrite({kind:"pre",target:"ch-1",mix:"Mix 1",value:false}),{
+    key:"pre:ch-1:Mix 1",value:0,
+  });
+  assert.deepEqual(qu16IntentToWrite({kind:"process",target:"ch-1",parameter:"gate-in",value:true}),{
+    key:"process:ch-1:gate-in",value:1,
+  });
+  assert.deepEqual(qu16IntentToWrite({kind:"process",target:"ch-1",parameter:"gate-threshold",value:50}),{
+    key:"process:ch-1:gate-threshold",value:64,
+  });
 });
 
 test("all Qu-16 source labels and stable ids resolve without collisions",()=>{
@@ -215,10 +251,32 @@ test("snapshot decoding accepts plain maps and preserves additive PAFL state",()
       { kind:"source",id:"st-1" },
       { kind:"master",id:"lr-master" },
     ],
+    pan:{},assign:{},pre:{},processing:{},muteGroups:[false,false,false,false],
   });
   assert.deepEqual(decodeQu16ParameterSnapshot({ parameters:new Map() }),{
-    levels:{},master:{},mute:{},paflTargets:[],
+    levels:{},master:{},mute:{},paflTargets:[],pan:{},assign:{},pre:{},processing:{},muteGroups:[false,false,false,false],
   });
+});
+
+test("snapshot decoding exposes processing, pan, assign and pre/post state",()=>{
+  const patch=decodeQu16ParameterSnapshot({parameters:{
+    "pan:ch-1:LR":37,
+    "assign:ch-1:Mix 1":1,
+    "pre:ch-1:Mix 1":0,
+    "process:ch-1:hpf-in":1,
+    "process:ch-1:peq-lm-frequency":64,
+    "process:lr-master:comp-in":0,
+    "mute-group:1":1,
+    "mute-group:4":1,
+  }});
+  assert.deepEqual(patch.pan,{LR:{"ch-1":50}});
+  assert.deepEqual(patch.assign,{"Mix 1":{"ch-1":true}});
+  assert.deepEqual(patch.pre,{"Mix 1":{"ch-1":false}});
+  assert.deepEqual(patch.processing,{
+    "ch-1":{"hpf-in":true,"peq-lm-frequency":50},
+    "lr-master":{"comp-in":false},
+  });
+  assert.deepEqual(patch.muteGroups,[true,false,false,true]);
 });
 
 test("unknown target, mix, kind, malformed keys, and invalid values are rejected",()=>{
@@ -252,6 +310,9 @@ test("unknown target, mix, kind, malformed keys, and invalid values are rejected
     { parameters:{ "mute:ch-1":2 } },
     { parameters:{ "mute:ch-1":true } },
     { parameters:{ "pafl:ch-1":127 } },
+    { parameters:{ "mute-group:0":1 } },
+    { parameters:{ "mute-group:5":1 } },
+    { parameters:{ "mute-group:1":2 } },
   ];
   invalidSnapshots.forEach(snapshot=>assert.throws(()=>decodeQu16ParameterSnapshot(snapshot)));
 });

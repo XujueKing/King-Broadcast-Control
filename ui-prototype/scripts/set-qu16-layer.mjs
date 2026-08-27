@@ -1,5 +1,7 @@
 const layer=process.argv[2];
-if(!["lower","upper","custom"].includes(layer))throw new Error("Usage: node scripts/set-qu16-layer.mjs lower|upper|custom");
+const mix=process.argv[3]??null;
+const mixTargets=["LR","FX 1","FX 2","Mix 1","Mix 2","Mix 3","Mix 4","Mix 5-6","Mix 7-8","Mix 9-10"];
+if(!["lower","upper","custom"].includes(layer)||mix!==null&&!mixTargets.includes(mix))throw new Error("Usage: node scripts/set-qu16-layer.mjs lower|upper|custom [LR|FX 1|FX 2|Mix 1|Mix 2|Mix 3|Mix 4|Mix 5-6|Mix 7-8|Mix 9-10]");
 const endpoint=process.env.KING_WEBVIEW_DEBUG_URL??"http://127.0.0.1:9229";
 const targets=await fetch(`${endpoint}/json/list`).then(response=>response.json());
 const main=targets.find(target=>!target.url.includes("output.html")&&/localhost:1420|tauri\.localhost/.test(target.url));
@@ -21,7 +23,20 @@ const result=await new Promise((resolve,reject)=>{
     id:1,
     method:"Runtime.evaluate",
     params:{
-      expression:`(()=>{const button=document.querySelector('[data-layer-select="${layer}"]');if(!button)return {ok:false};button.click();return {ok:true,layer:document.querySelector('.qu-surface')?.dataset?.layer??''};})()`,
+      expression:`(()=>{
+        const surface=document.querySelector('.qu-surface');
+        if(!surface)return {ok:false,reason:"surface-missing"};
+        const layerButton=document.querySelector('[data-layer-select=${JSON.stringify(layer)}]');
+        if(!layerButton)return {ok:false,reason:"layer-button-missing"};
+        if(surface.dataset.layer!==${JSON.stringify(layer)})layerButton.click();
+        const mix=${JSON.stringify(mix)};
+        if(mix!==null&&surface.dataset.activeMix!==mix){
+          const mixButton=document.querySelector('[data-mix-select="'+CSS.escape(mix)+'"]');
+          if(!mixButton)return {ok:false,reason:"mix-button-missing"};
+          mixButton.click();
+        }
+        return {ok:true,layer:surface?.dataset?.layer??'',mix:surface?.dataset?.activeMix??''};
+      })()`,
       returnByValue:true,
     },
   }));

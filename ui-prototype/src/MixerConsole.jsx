@@ -1,15 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Headphones, SlidersHorizontal, Usb } from "@phosphor-icons/react";
 import {
   QU16_MASTER_TARGETS,
   decodeQu16ParameterSnapshot,
   midiToUiValue,
-  qu16ControlCoalesceKey,
+  qu16IntentToWrite,
   qu16MasterTargetId,
-  uiToMidiValue,
 } from "./qu16-control.js";
 import { qu16SurfaceInputSources, qu16SurfaceLayerDefinitions } from "./qu16-surface-map.js";
 import qu16Brandbar from "./assets/hardware/allen-heath-qu16/qu16-brandbar-clean.png";
+import { getQu16MeterSnapshot, subscribeQu16MeterSnapshot } from "./qu16-meter-store.js";
 
 const levelSeed = [62, 48, 72, 55, 66, 44, 58, 70, 51, 64, 46, 60, 57, 68, 42, 54];
 const peqBands = ["LF", "LM", "HM", "HF"];
@@ -130,6 +130,61 @@ const createRoutingState=(mixes,preFade=false)=>Object.fromEntries(mixes.map(mix
   new Set(preFade&&mix!=="LR"?allInputSources.map(source=>source.id):preFade?[]:allInputSources.map(source=>source.id))
 ]));
 
+const processingWireMap=Object.freeze({
+  // The square key carries the USB icon, so it must follow the documented
+  // channel USB source switch (0x12), not the Local/dSNAKE selector (0x57).
+  "usb-source":["PREAMP","source","boolean-number"],
+  "preamp-gain":["PREAMP","gain","number"],
+  "digital-trim":["PREAMP","gain","number"],
+  "stereo-trim":["PREAMP","gain","number"],
+  polarity:["PREAMP","polarity","boolean-number"],
+  "hpf-frequency":["PREAMP","hpf","number"],
+  "hpf-in":["PREAMP","hpfIn","boolean"],
+  "peq-in":["PEQ","in","boolean"],
+  "gate-in":["GATE","in","boolean"],
+  "comp-in":["COMP","in","boolean"],
+  "comp-gain":["COMP","makeup","number"],
+  ...Object.fromEntries(["lf","lm","hm","hf"].flatMap(band=>[
+    [`peq-${band}-frequency`,["PEQ",band,"number"]],
+    [`peq-${band}-width`,["PEQ",`${band}Width`,"number"]],
+    [`peq-${band}-gain`,["PEQ",`${band}Gain`,"number"]],
+  ])),
+  ...Object.fromEntries(["attack","release","hold","threshold","depth"].map(parameter=>[
+    `gate-${parameter}`,["GATE",parameter,"number"],
+  ])),
+  ...Object.fromEntries(["attack","release","ratio","threshold"].map(parameter=>[
+    `comp-${parameter}`,["COMP",parameter,"number"],
+  ])),
+});
+
+const processingUiMap=Object.freeze(Object.fromEntries(
+  Object.entries(processingWireMap).map(([wire,[block,key,type]])=>[`${block}:${key}`,{wire,type}]),
+));
+
+function applyProcessingWirePatch(current,wirePatch){
+  let next=current??createChannelProcessingState();
+  let blocks=next.blocks;
+  for(const [wire,value] of Object.entries(wirePatch??{})){
+    const mapping=processingWireMap[wire];
+    if(!mapping)continue;
+    const [block,key,type]=mapping;
+    const blockValue=type==="boolean-number"?(value?100:0):value;
+    blocks={...blocks,[block]:{...blocks[block],[key]:blockValue}};
+    if(wire==="hpf-frequency")blocks={...blocks,PEQ:{...blocks.PEQ,hpf:blockValue}};
+  }
+  return {...next,blocks};
+}
+
+function applyRoutingPatch(current,patch,reset){
+  const next=reset?{}:{...current};
+  for(const [targetMix,states] of Object.entries(patch??{})){
+    const set=reset?new Set():new Set(next[targetMix]??[]);
+    for(const [sourceId,active] of Object.entries(states))active?set.add(sourceId):set.delete(sourceId);
+    next[targetMix]=set;
+  }
+  return next;
+}
+
 function formatScreenFrequency(value) {
   const hz=20*Math.pow(1000,value/100);
   return hz>=1000?`${(hz/1000).toFixed(2)}kHz`:`${hz.toFixed(hz>=100?1:2)}Hz`;
@@ -246,15 +301,15 @@ function HardwareKnob({ label, caption = label, value = 54, className = "", onCh
   </div>;
 }
 
-function PanelLampKey({ label, controlId, active:controlledActive, defaultActive = false, indicator = false, disabled = false, title = label, onToggle }) {
+function PanelLampKey({ label, controlId, active:controlledActive, defaultActive = false, indicator = false, disabled = false, known = true, title = label, onToggle }) {
   const [internalActive,setInternalActive]=useState(defaultActive);
-  const active=controlledActive??internalActive;
+  const active=known&&(controlledActive??internalActive);
   const toggle=()=>{
     const next=!active;
     if (controlledActive===undefined) setInternalActive(next);
     if(!disabled) onToggle?.(next);
   };
-  return <div className="qu-panel-lamp-key"><span>{label}</span><button type="button" disabled={disabled} className={`qu-oval-key ${active ? "active" : ""} ${indicator ? "has-indicator" : ""}`.trim()} title={title} aria-label={title} aria-pressed={active} aria-disabled={disabled} data-panel-key={controlId} data-lamp-state={active ? "on" : "off"} onClick={toggle}><i aria-hidden="true"/></button></div>;
+  return <div className="qu-panel-lamp-key"><span>{label}</span><button type="button" disabled={disabled} className={`qu-oval-key ${active ? "active" : ""} ${indicator ? "has-indicator" : ""}`.trim()} title={known?title:`${title} · 尚未收到真机状态`} aria-label={title} aria-pressed={active} aria-disabled={disabled} data-panel-key={controlId} data-lamp-state={known?(active ? "on" : "off"):"unknown"} data-parameter-known={known?"true":"false"} onClick={toggle}><i aria-hidden="true"/></button></div>;
 }
 
 function MainMeterColumn({ side, activeSegments }) {
@@ -391,6 +446,10 @@ function QuChannel({ index, value, source, layerMode, selected, muted, pafl, met
       ? `${source.label} RackFX 实际输入（仅在同名 Mix→Return 默认 Patch 下等同 FX Send）`
       : `${source.label} 推子前电平`;
   const upperDetail=geqActive?"RTA":rackFxInput||meter?.meterRole==="rack-fx-input"?"FX IN":upper.detail;
+  const customStripLabel=custom.stripLabel??custom.label;
+  const lowerStripLabel=lower.stripLabel??lower.label;
+  const customStripTitle=customStripLabel===custom.label?custom.label:`${custom.label} · ${customStripLabel}`;
+  const lowerStripTitle=lowerStripLabel===lower.label?lower.label:`${lower.label} · ${lowerStripLabel}`;
   return <div className={`qu-channel ${selected&&!geqActive?"selected":""} ${geqActive?"geq-flip":""} ${geqFlat?"geq-flat":""}`.trim()} data-channel={channel} data-slot={channel} data-source-id={source.id} data-layer={layerMode} data-geq-frequency={geqBand?.frequency??""}>
     <SurfaceKey kind="mute" label="Mute" active={muted} onClick={onMute} title={`${source.label} Mute · 本地数字孪生状态`}/>
     <SurfaceKey kind="select" label="Sel" active={selectState} disabled={selectDisabled} onClick={geqActive?geqBand.onReset:onSelect} title={geqActive?`${geqBand.frequency}Hz GEQ：按 Sel 归零到 0dB`:source.entityKind==="master"?`选择 ${source.masterTarget} Master 处理`:`Sel：选择处理；Assign/Pre Fade 模式下切换当前 Mix 路由`}/>
@@ -398,8 +457,8 @@ function QuChannel({ index, value, source, layerMode, selected, muted, pafl, met
     <ChannelSignalMeter meter={meter} meterRole={rackFxInput?"rack-fx-input":null} rtaMode={geqActive} rtaActive={rtaActive} rtaDbfs={rtaDbfs} label={meterLabel}/>
     <div className="qu-strip-screen" aria-label={`Physical strip ${channel} layer labels`}>
       <span className={`upper ${layerMode==="upper"?"active":""}`}><b>{upper.label}</b><small>{upperDetail}</small></span>
-      <span className={`custom ${layerMode==="custom"?"active":""}`}><b>{layerMode==="custom"?custom.label:""}</b></span>
-      <span className={`lower ${layerMode==="lower"?"active":""}`}><b>{lower.label}</b></span>
+      <span className={`custom ${layerMode==="custom"?"active":""}`} title={customStripTitle}><b>{layerMode==="custom"?customStripLabel:""}</b></span>
+      <span className={`lower ${layerMode==="lower"?"active":""}`} title={lowerStripTitle}><b>{lowerStripLabel}</b></span>
     </div>
     <span className="qu-fader-head"><i className="qu-strip-screw"/>{geqActive?<b>{geqBand.frequency}Hz</b>:null}</span>
     <FaderLane value={faderValue} geq={geqActive} onChange={geqActive?geqBand.onChange:onChange} label={geqActive?`${geqBand.frequency}Hz GEQ 推子`:`${source.label} ${layerMode} 层推子`}/>
@@ -453,6 +512,7 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
   const activeLayerSources=surfaceLayerDefinitions[layerMode];
   const selectedSource=activeLayerSources[selectedChannel]??activeLayerSources[0];
   const selectedTargetLabel=selectedTargetKind==="master"?`${selectedMasterTarget} Master`:selectedSource.label;
+  const selectedTargetId=selectedTargetKind==="master"?qu16MasterTargetId(selectedMasterTarget):selectedSource.id;
   const selectedProcessing=selectedTargetKind==="master"?(masterProcessing[selectedMasterTarget]??createChannelProcessingState()):(sourceProcessing[selectedSource.id]??createChannelProcessingState());
   const screenBlockValues=selectedProcessing.blocks;
   const panEnabled=selectedTargetKind==="source"&&(mix==="LR"||mix==="Mix 5-6"||mix==="Mix 7-8"||mix==="Mix 9-10");
@@ -465,6 +525,19 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
   const sourceMeters=meterLive?(meterSnapshot?.channels??{}):{};
   const masterMeters=meterLive?(meterSnapshot?.masters??{}):{};
   const masterMeter=masterMeters[mix]??disconnectedMeter;
+  const selectedMeter=selectedTargetKind==="master"?(masterMeters[selectedMasterTarget]??disconnectedMeter):(sourceMeters[selectedSource.id]??disconnectedMeter);
+  const selectedPeakActive=meterLive&&Math.max(selectedMeter.peakDbfs??-120,selectedMeter.levelDbfs??-120)>=qu16MeterThresholdsDbfs.peak;
+  const masterPeakActive=meterLive&&Math.max(masterMeter.peakDbfs??-120,masterMeter.levelDbfs??-120)>=qu16MeterThresholdsDbfs.peak;
+  const observedParameterMap=parameterSnapshot?.parameters&&typeof parameterSnapshot.parameters==="object"
+    ? parameterSnapshot.parameters
+    : {};
+  const pendingParameterMap=parameterSnapshot?.pendingDetails&&typeof parameterSnapshot.pendingDetails==="object"
+    ? parameterSnapshot.pendingDetails
+    : {};
+  const hardwareParameterKnown=(key)=>controlMode!=="hardware-live"
+    ||Object.hasOwn(observedParameterMap,key)
+    ||Object.hasOwn(pendingParameterMap,key);
+  const selectedProcessingKnown=(wire)=>hardwareParameterKnown(`process:${selectedTargetId}:${wire}`);
 
   const activeRoutingSet=surfaceMode==="preFade"?(preFadeByMix[mix]??new Set()):(assignedByMix[mix]??new Set());
   const masterSelectActive=surfaceMode==="select"?selectedTargetKind==="master"&&selectedMasterTarget===mix:allInputSources.every(source=>activeRoutingSet.has(source.id));
@@ -597,6 +670,30 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
       return next;
     });
     setPaflTargets(new Set(patch.paflTargets.map(target=>target.id)));
+    setMuteGroupStates(patch.muteGroups);
+    setAssignedByMix(current=>applyRoutingPatch(current,patch.assign,!sameSession));
+    setPreFadeByMix(current=>applyRoutingPatch(current,patch.pre,!sameSession));
+    setSourceProcessing(current=>{
+      const next={...current};
+      for(const [targetId,wirePatch] of Object.entries(patch.processing)){
+        if(!targetId.endsWith("-master")&&!targetId.endsWith("-send"))next[targetId]=applyProcessingWirePatch(next[targetId],wirePatch);
+      }
+      for(const [targetMix,states] of Object.entries(patch.pan)){
+        for(const [targetId,value] of Object.entries(states)){
+          const processing=next[targetId]??createChannelProcessingState();
+          next[targetId]={...processing,pan:{...processing.pan,[targetMix]:value}};
+        }
+      }
+      return next;
+    });
+    setMasterProcessing(current=>{
+      const next={...current};
+      for(const [targetId,wirePatch] of Object.entries(patch.processing)){
+        const target=QU16_MASTER_TARGETS.find(item=>item.id===targetId);
+        if(target)next[target.label]=applyProcessingWirePatch(next[target.label],wirePatch);
+      }
+      return next;
+    });
   },[parameterSnapshot,writeFailureTick]);
 
   const dispatchHardwareWrites=(writes)=>{
@@ -611,7 +708,12 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
           changed=true;
         }
       }
-      if(changed)setWriteFailureTick(current=>current+1);
+      if(changed){
+        // React can batch the pointer/input state update with a synchronously
+        // rejected transport promise. Re-apply the authoritative snapshot in
+        // the next task so the optimistic UI value cannot win that batch.
+        window.setTimeout(()=>setWriteFailureTick(current=>current+1),0);
+      }
       if(error)console.warn("Qu-16 参数写入失败",error);
     };
     Promise.resolve(writer(writes)).then(result=>{
@@ -630,16 +732,14 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
   };
   const queueFaderWrite=(intent)=>{
     if(controlModeRef.current!=="hardware-live"||typeof writeParametersRef.current!=="function")return;
-    const key=qu16ControlCoalesceKey(intent);
-    const value=uiToMidiValue(intent.value);
+    const {key,value}=qu16IntentToWrite(intent);
     pendingFaderWritesRef.current.set(key,{key,value});
     optimisticParametersRef.current.set(key,{value,afterRevision:lastParameterFrameRef.current.revision,acknowledged:false});
     if(faderFlushTimerRef.current===null)faderFlushTimerRef.current=window.setTimeout(flushFaderWrites,38);
   };
   const writeBinaryControl=(intent)=>{
     if(controlModeRef.current!=="hardware-live"||typeof writeParametersRef.current!=="function")return;
-    const key=qu16ControlCoalesceKey(intent);
-    const value=intent.value?1:0;
+    const {key,value}=qu16IntentToWrite(intent);
     optimisticParametersRef.current.set(key,{value,afterRevision:lastParameterFrameRef.current.revision,acknowledged:false});
     dispatchHardwareWrites([{key,value}]);
   };
@@ -661,7 +761,10 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
     }
     return {...processing,blocks};
   });
-  const updatePan=(next)=>updateSelectedProcessing(processing=>({...processing,pan:{...processing.pan,[mix]:next}}));
+  const updatePan=(next)=>{
+    updateSelectedProcessing(processing=>({...processing,pan:{...processing.pan,[mix]:next}}));
+    if(panEnabled)queueFaderWrite({kind:"pan",target:selectedTargetId,mix,value:next});
+  };
   const updateSurfaceFader=(source,next)=>{
     if(source.entityKind==="master"){
       setMasterStates(current=>({...current,[source.masterTarget]:{...current[source.masterTarget],level:next}}));
@@ -696,14 +799,18 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
   const handleStripSelect=(index,source)=>{
     if(surfaceMode==="assign"){
       if(source.entityKind!=="input") return;
+      const nextAssigned=!assignedByMix[mix]?.has(source.id);
       toggleSetMember(setAssignedByMix,mix,source.id);
-      setScreenStatus(`${mix} · ${source.label} ${assignedByMix[mix]?.has(source.id)?"Unassigned":"Assigned"} · Local`);
+      writeBinaryControl({kind:"assign",target:source.id,mix,value:nextAssigned});
+      setScreenStatus(`${mix} · ${source.label} ${nextAssigned?"Assigned":"Unassigned"} · ${controlModeRef.current==="hardware-live"?"LIVE":"Local"}`);
       return;
     }
     if(surfaceMode==="preFade"){
       if(source.entityKind!=="input"||mix==="LR") return;
+      const nextPre=!preFadeByMix[mix]?.has(source.id);
       toggleSetMember(setPreFadeByMix,mix,source.id);
-      setScreenStatus(`${mix} · ${source.label} ${preFadeByMix[mix]?.has(source.id)?"Post Fade":"Pre Fade"} · Local`);
+      writeBinaryControl({kind:"pre",target:source.id,mix,value:nextPre});
+      setScreenStatus(`${mix} · ${source.label} ${nextPre?"Pre Fade":"Post Fade"} · ${controlModeRef.current==="hardware-live"?"LIVE":"Local"}`);
       return;
     }
     setSelectedChannel(index);
@@ -763,7 +870,23 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
   };
   const updateHardwareParameter=(block,key,next,status)=>{
     updateBlockValues(block,current=>({...current,[key]:next}));
-    if (status) setScreenStatus(`${selectedTargetLabel} · ${status} · Local`);
+    let mapping=processingUiMap[`${block}:${key}`];
+    if(block==="PREAMP"&&key==="gain"){
+      mapping=selectedTargetKind==="source"&&selectedSource.id.startsWith("ch-")
+        ? {wire:"preamp-gain",type:"number"}
+        : selectedTargetKind==="source"&&selectedSource.id.startsWith("st-")
+          ? {wire:"stereo-trim",type:"number"}
+          : null;
+    }
+    // Source switching on Qu combines Local/dSNAKE and USB patching. Keep the
+    // simplified square key read-only until that routing UI is modelled fully.
+    if(block==="PREAMP"&&key==="source")mapping=null;
+    if(mapping){
+      const value=mapping.type==="boolean"?Boolean(next):mapping.type==="boolean-number"?Number(next)>=50:next;
+      const intent={kind:"process",target:selectedTargetId,parameter:mapping.wire,value};
+      mapping.type==="number"?queueFaderWrite(intent):writeBinaryControl(intent);
+    }
+    if (status) setScreenStatus(`${selectedTargetLabel} · ${status} · ${mapping&&controlModeRef.current==="hardware-live"?"LIVE":"Local"}`);
   };
   const peqParameterPresentation=(parameter)=>{
     if (screenBlock!=="PEQ"||!peqBands.map(band=>band.toLowerCase()).includes(parameter.key)) return {meta:parameter.meta,note:parameter.note};
@@ -780,8 +903,12 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
   };
   const selectScreenParameter=(parameter)=>setScreenParameterSelections(current=>({...current,[screenBlock]:parameter}));
   const updateScreenParameter=(next)=>{
-    updateBlockValues(screenBlock,current=>({...current,[screenParameter]:next}));
-    setScreenStatus(`${selectedTargetLabel} · ${screenBlock} ${screenParameter.toUpperCase()} ${formatScreenParameter(screenParameters.find(parameter=>parameter.key===screenParameter),next)} · Local`);
+    updateHardwareParameter(
+      screenBlock,
+      screenParameter,
+      next,
+      `${screenBlock} ${screenParameter.toUpperCase()} ${formatScreenParameter(screenParameters.find(parameter=>parameter.key===screenParameter),next)}`,
+    );
   };
   const copyScreenBlock=()=>{
     setScreenClipboard(current=>({...current,[screenBlock]:{...screenParameterValues}}));
@@ -832,22 +959,22 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
     <section className="qu-superstrip" aria-label="SuperStrip 通道处理">
       <div className="qu-knob-bank">
         <div className="qu-super-column narrow">
-          <section className="qu-hardware-block preamp" data-applicable={selectedTargetKind==="source"?"true":"false"}><h3>Preamp</h3><div className="qu-preamp-body"><button type="button" disabled={selectedTargetKind==="master"} className={`qu-square-key ${screenBlockValues.PREAMP.source>=50?"active":""}`.trim()} title="USB Select：在当前前级源与 USB 源之间切换（仅本地状态）" aria-label="USB Select" aria-pressed={screenBlockValues.PREAMP.source>=50} onClick={()=>updateHardwareParameter("PREAMP","source",screenBlockValues.PREAMP.source>=50?0:100,screenBlockValues.PREAMP.source>=50?"Source Local":"Source USB")}><Usb weight="bold"/></button><span>Gain</span><HardwareKnob label="Preamp Gain" caption="" disabled={selectedTargetKind==="master"} value={screenBlockValues.PREAMP.gain} onChange={next=>updateHardwareParameter("PREAMP","gain",next,`Preamp Gain ${formatScreenParameter(screenBlockDefinitions.PREAMP.parameters[0],next)}`)}/><i className="qu-pk-led">Pk</i></div></section>
-          <section className="qu-hardware-block hpf" data-applicable={selectedTargetKind==="source"?"true":"false"}><h3>HPF</h3><div className="qu-hpf-body"><HardwareKnob label="HPF Frequency" caption="" disabled={selectedTargetKind==="master"} value={screenBlockValues.PREAMP.hpf} onChange={next=>updateHardwareParameter("PREAMP","hpf",next,`HPF ${formatHpfFrequency(next)}`)}/><PanelLampKey label="In" controlId="hpf-in" disabled={selectedTargetKind==="master"} active={screenBlockValues.PREAMP.hpfIn} title="HPF In（仅本地状态）" onToggle={next=>updateHardwareParameter("PREAMP","hpfIn",next,`HPF ${next?"In":"Out"}`)}/></div></section>
+          <section className="qu-hardware-block preamp" data-applicable={selectedTargetKind==="source"?"true":"false"}><h3>Preamp</h3><div className="qu-preamp-body"><button type="button" disabled className={`qu-square-key ${selectedProcessingKnown("usb-source")&&screenBlockValues.PREAMP.source>=50?"active":""}`.trim()} data-parameter-known={selectedProcessingKnown("usb-source")?"true":"false"} data-lamp-state={selectedProcessingKnown("usb-source")?(screenBlockValues.PREAMP.source>=50?"on":"off"):"unknown"} title="USB Source 真机状态；完整 Local/dSNAKE/USB 路由界面完成前禁止从简化按钮写入" aria-label="USB source status" aria-pressed={selectedProcessingKnown("usb-source")&&screenBlockValues.PREAMP.source>=50}><Usb weight="bold"/></button><span>Gain</span><HardwareKnob label="Preamp Gain" caption="" disabled={selectedTargetKind==="master"} value={screenBlockValues.PREAMP.gain} onChange={next=>updateHardwareParameter("PREAMP","gain",next,`Preamp Gain ${formatScreenParameter(screenBlockDefinitions.PREAMP.parameters[0],next)}`)}/><i className={`qu-pk-led ${selectedPeakActive?"active":""}`.trim()}>Pk</i></div></section>
+          <section className="qu-hardware-block hpf" data-applicable={selectedTargetKind==="source"?"true":"false"}><h3>HPF</h3><div className="qu-hpf-body"><HardwareKnob label="HPF Frequency" caption="" disabled={selectedTargetKind==="master"} value={screenBlockValues.PREAMP.hpf} onChange={next=>updateHardwareParameter("PREAMP","hpf",next,`HPF ${formatHpfFrequency(next)}`)}/><PanelLampKey label="In" controlId="hpf-in" disabled={selectedTargetKind==="master"||!selectedProcessingKnown("hpf-in")} known={selectedProcessingKnown("hpf-in")} active={screenBlockValues.PREAMP.hpfIn} title={`HPF In（${controlMode==="hardware-live"?"真机同步":"本地"}）`} onToggle={next=>updateHardwareParameter("PREAMP","hpfIn",next,`HPF ${next?"In":"Out"}`)}/></div></section>
         </div>
         <section className="qu-hardware-block parametric-eq"><h3>Parametric EQ</h3><div className="qu-peq-grid"><i className="qu-peq-pk">Pk</i>{peqBands.map(band=>{
           const bandKey=band.toLowerCase();
           const widthKey=`${bandKey}Width`;
           const gainKey=`${bandKey}Gain`;
           return <div className="qu-peq-band" key={band}><HardwareKnob label={`${band} Width`} caption="" value={screenBlockValues.PEQ[widthKey]} onChange={next=>updateHardwareParameter("PEQ",widthKey,next,`${band} Width ${formatPeqWidth(next)}`)}/><span>Width</span><HardwareKnob label={`${band} Frequency`} caption="" value={screenBlockValues.PEQ[bandKey]} onChange={next=>updateHardwareParameter("PEQ",bandKey,next,`${band} Freq ${formatScreenFrequency(next)}`)}/><span>Freq</span><HardwareKnob label={`${band} Gain`} caption="" value={screenBlockValues.PEQ[gainKey]} onChange={next=>updateHardwareParameter("PEQ",gainKey,next,`${band} Gain ${formatPeqGain(next)}`)}/><span>Gain</span><b>{band}</b></div>;
-        })}<div className="qu-peq-in"><PanelLampKey label="In" controlId="peq-in" active={screenBlockValues.PEQ.in} title="Parametric EQ In（仅本地状态）" onToggle={next=>updateHardwareParameter("PEQ","in",next,`PEQ ${next?"In":"Out"}`)}/></div></div></section>
+        })}<div className="qu-peq-in"><PanelLampKey label="In" controlId="peq-in" disabled={!selectedProcessingKnown("peq-in")} known={selectedProcessingKnown("peq-in")} active={screenBlockValues.PEQ.in} title={`Parametric EQ In（${controlMode==="hardware-live"?"真机同步":"本地"}）`} onToggle={next=>updateHardwareParameter("PEQ","in",next,`PEQ ${next?"In":"Out"}`)}/></div></div></section>
         <div className="qu-dynamics-bank">
           <div className="qu-dynamics-top">
-            <section className="qu-hardware-block gate" data-applicable={selectedTargetKind==="source"?"true":"false"}><h3>Gate</h3><div className="qu-dynamics-body"><div className="qu-threshold-knob"><span>Thresh</span><HardwareKnob label="Gate Threshold" caption="" disabled={selectedTargetKind==="master"} value={screenBlockValues.GATE.threshold} className="large" onChange={next=>updateHardwareParameter("GATE","threshold",next,`Gate Threshold ${formatScreenParameter(screenBlockDefinitions.GATE.parameters[0],next)}`)}/><i>GR</i></div><PanelLampKey label="In" controlId="gate-in" disabled={selectedTargetKind==="master"} active={screenBlockValues.GATE.in} indicator title="Gate In：切换噪声门本地状态" onToggle={next=>updateHardwareParameter("GATE","in",next,`Gate ${next?"In":"Out"}`)}/></div></section>
-            <section className="qu-hardware-block comp"><h3>Comp</h3><div className="qu-dynamics-body"><i className="qu-pk-led">Pk</i><div className={`qu-threshold-knob ${screenBlockValues.COMP.in ? "gr-active" : ""}`}><span>Thresh</span><HardwareKnob label="Comp Threshold" caption="" value={screenBlockValues.COMP.threshold} className="large" onChange={next=>updateHardwareParameter("COMP","threshold",next,`Comp Threshold ${formatScreenParameter(screenBlockDefinitions.COMP.parameters[0],next)}`)}/><i className="qu-comp-gr" data-comp-gr={screenBlockValues.COMP.in ? "on" : "off"}>GR</i></div><PanelLampKey label="In" controlId="comp-in" active={screenBlockValues.COMP.in} title="Comp In：切换压缩器本地状态；GR 仅为本地演示" onToggle={next=>updateHardwareParameter("COMP","in",next,`Comp ${next?"In":"Out"}`)}/></div></section>
+            <section className="qu-hardware-block gate" data-applicable={selectedTargetKind==="source"?"true":"false"}><h3>Gate</h3><div className="qu-dynamics-body"><div className="qu-threshold-knob"><span>Thresh</span><HardwareKnob label="Gate Threshold" caption="" disabled={selectedTargetKind==="master"} value={screenBlockValues.GATE.threshold} className="large" onChange={next=>updateHardwareParameter("GATE","threshold",next,`Gate Threshold ${formatScreenParameter(screenBlockDefinitions.GATE.parameters[0],next)}`)}/><i className="qu-gr-led" title="Qu 控制协议不回传实时 Gate GR，保持熄灭">GR</i></div><PanelLampKey label="In" controlId="gate-in" disabled={selectedTargetKind==="master"||!selectedProcessingKnown("gate-in")} known={selectedProcessingKnown("gate-in")} active={screenBlockValues.GATE.in} indicator title={`Gate In（${controlMode==="hardware-live"?"真机同步":"本地"}）`} onToggle={next=>updateHardwareParameter("GATE","in",next,`Gate ${next?"In":"Out"}`)}/></div></section>
+            <section className="qu-hardware-block comp"><h3>Comp</h3><div className="qu-dynamics-body"><i className={`qu-pk-led ${selectedPeakActive?"active":""}`.trim()}>Pk</i><div className="qu-threshold-knob"><span>Thresh</span><HardwareKnob label="Comp Threshold" caption="" value={screenBlockValues.COMP.threshold} className="large" onChange={next=>updateHardwareParameter("COMP","threshold",next,`Comp Threshold ${formatScreenParameter(screenBlockDefinitions.COMP.parameters[0],next)}`)}/><i className="qu-comp-gr" data-comp-gr="off" title="Qu 控制协议不回传实时 Compressor GR，保持熄灭">GR</i></div><PanelLampKey label="In" controlId="comp-in" disabled={!selectedProcessingKnown("comp-in")} known={selectedProcessingKnown("comp-in")} active={screenBlockValues.COMP.in} title={`Comp In（${controlMode==="hardware-live"?"真机同步":"本地"}）；GR 仅在取得真实衰减电平后点亮`} onToggle={next=>updateHardwareParameter("COMP","in",next,`Comp ${next?"In":"Out"}`)}/></div></section>
           </div>
           <div className="qu-dynamics-bottom">
-            <section className="qu-hardware-block geq" data-geq-range={geqFaderMode} data-applicable={geqAvailable?"true":"false"}><h3>GEQ</h3><div className="qu-switch-body"><i className="qu-pk-led">Pk</i><PanelLampKey label="Fader Flip" controlId="geq-fader-flip" active={geqFaderMode!=="off"} disabled={!geqAvailable} indicator title={geqAvailable?`GEQ Fader Flip：${geqFaderMode==="off"?"正常 Mix 模式":geqFaderMode==="low"?"低频段 31.5Hz–1kHz":"高频段 500Hz–16kHz"}；再次点击切换范围`:`${mix} 不提供 GEQ Fader Flip`} onToggle={cycleGeqFaderMode}/></div></section>
+            <section className="qu-hardware-block geq" data-geq-range={geqFaderMode} data-applicable={geqAvailable?"true":"false"}><h3>GEQ</h3><div className="qu-switch-body"><i className={`qu-pk-led ${masterPeakActive?"active":""}`.trim()}>Pk</i><PanelLampKey label="Fader Flip" controlId="geq-fader-flip" active={geqFaderMode!=="off"} disabled={!geqAvailable} indicator title={geqAvailable?`GEQ Fader Flip：本地导航；${geqFaderMode==="off"?"正常 Mix 模式":geqFaderMode==="low"?"低频段 31.5Hz–1kHz":"高频段 500Hz–16kHz"}；再次点击切换范围`:`${mix} 不提供 GEQ Fader Flip`} onToggle={cycleGeqFaderMode}/></div></section>
             <section className="qu-hardware-block pan" data-pan-enabled={panEnabled?"true":"false"}><h3>Pan</h3><div className="qu-pan-body"><div className="qu-pan-leds" aria-hidden="true" data-pan-tick={panTick}>{Array.from({length:7},(_,index)=><i className={index===panTick?"active":""} data-pan-index={index} key={index}/>)}</div><span className="qu-pan-sides"><i>L</i><i>R</i></span><HardwareKnob label={`Pan：${mix==="LR"?"LR 主声像":panEnabled?`${mix} 发送声像`:`${mix} 为单声道 Mix，Pan 禁用`}`} caption="" value={panValue} className="large" disabled={!panEnabled} onChange={next=>{updatePan(next);setScreenStatus(`${selectedTargetLabel} · ${mix} Pan ${next} · Local`)}}/></div></section>
           </div>
         </div>
@@ -924,7 +1051,7 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
       </div>
     </section>
 
-    <section className="qu-surface" aria-label="Qu-16 Layers、16 路电动推子、Master 与 Mix Select" data-sync-mode={controlMode} data-meter-transport={meterTransport} data-layer={layerMode} data-surface-mode={surfaceMode} data-active-mix={mix} data-last-hardware-key={lastHardwareChange?.key??""} data-last-hardware-value={lastHardwareChange?.value??""} data-last-hardware-revision={lastHardwareChange?.revision??""}>
+    <section className="qu-surface" aria-label="Qu-16 Layers、16 路电动推子、Master 与 Mix Select" data-sync-mode={controlMode} data-navigation-sync="local-ui-only" data-layer={layerMode} data-surface-mode={surfaceMode} data-active-mix={mix} data-last-hardware-key={lastHardwareChange?.key??""} data-last-hardware-value={lastHardwareChange?.value??""} data-last-hardware-revision={lastHardwareChange?.revision??""}>
       <div className="qu-channel-bank">
        <aside className="qu-layer-rail" aria-label="Mix Assign 与 Layers">
         <div className="qu-mix-assign">
@@ -974,7 +1101,10 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
         <span className="qu-strip-index"><i className="qu-strip-screw"/><b>M</b><small>{mix}</small></span>
        </aside>
        <aside className="qu-mix-select" aria-label="SoftKeys 与 Mix Select">
-        <div className="qu-softkeys">{[1,2,3,4].map(key=><button type="button" key={key} data-softkey={key} data-assignment={`mute-group-${key}`} data-group-state={muteGroupStates[key-1]?"muted":"open"} className={muteGroupStates[key-1]?"active":""} aria-pressed={muteGroupStates[key-1]} onClick={()=>setMuteGroupStates(current=>current.map((state,index)=>index===key-1?!state:state))} title={`Soft ${key} · 工厂默认绑定 Mute Group ${key}；成员由调音台配置`}><span>Soft {key}</span><i><b/></i></button>)}</div>
+        <div className="qu-softkeys">{[1,2,3,4].map(key=>{
+          const hardwareLive=controlMode==="hardware-live";
+          return <button type="button" key={key} data-softkey={key} data-assignment={`mute-group-${key}`} data-sync-origin={hardwareLive?"mute-group-readback":"local-ui"} data-group-state={muteGroupStates[key-1]?"muted":"open"} className={muteGroupStates[key-1]?"active":""} aria-pressed={muteGroupStates[key-1]} disabled={hardwareLive} onClick={()=>setMuteGroupStates(current=>current.map((state,index)=>index===key-1?!state:state))} title={hardwareLive?`Mute Group ${key} 真机状态；Qu 协议不回传实体 Soft ${key} 的分配，只有真机将该 SoftKey 配成 MG${key} 时两者才对应`:`Soft ${key} · 本地演示 Mute Group ${key}`}><span>Soft {key}</span><i><b/></i></button>;
+        })}</div>
         <strong><span>Mix</span><span>Select</span></strong>
         <div className="qu-mix-groups">
           {qu16MixSelectGroups.map(group=><div className={`qu-mix-group ${group.id}`} data-mix-group={group.id} key={group.id}>{group.targets.filter(item=>mixTargets.includes(item)).map(item=><button type="button" key={item} data-mix-select={item} data-mix-family={group.id} className={`qu-mix-key ${mix===item?"active":""}`} aria-pressed={mix===item} onClick={()=>chooseMix(item)} title={`选择 ${item}：Master 跟随，16 路电动推子切换为对应发送；再次点击返回 LR`}><span>{formatMixSurfaceLabel(item)}</span><i><b/></i></button>)}</div>)}
@@ -986,25 +1116,22 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
   </div>;
 }
 
-export function MixerWorkspace({ model, meterSnapshot = null, meterStatus = null, parameterSnapshot = null, controlStatus = null, onWriteParameters = null }) {
-  const [meterClock,setMeterClock]=useState(()=>Date.now());
-  useEffect(()=>{
-    const timer=window.setInterval(()=>setMeterClock(Date.now()),500);
-    return ()=>window.clearInterval(timer);
-  },[]);
-  const meterAgeMs=Math.max(0,meterClock-(Number(meterSnapshot?.updatedAtMs)||0));
-  const live=Boolean(meterSnapshot?.connected)&&meterAgeMs<1500;
+export const MixerWorkspace = memo(function MixerWorkspace({ model, meterSnapshot = null, meterStatus = null, parameterSnapshot = null, controlStatus = null, onWriteParameters = null }) {
+  const streamedMeterSnapshot=useSyncExternalStore(subscribeQu16MeterSnapshot,getQu16MeterSnapshot,getQu16MeterSnapshot);
+  const effectiveMeterSnapshot=streamedMeterSnapshot??meterSnapshot;
+  const meterAgeMs=Math.max(0,Date.now()-(Number(effectiveMeterSnapshot?.updatedAtMs)||0));
+  const live=Boolean(effectiveMeterSnapshot?.connected)&&meterAgeMs<1500;
   const controlMode=controlStatus?.mode??"local-ui-only";
   const badgeLabel=controlMode==="hardware-live"
-    ? live?"表计 + 控制 LIVE":"控制 LIVE · 表计超时"
+    ? live?"表计 + 参数 LIVE · 导航本地":"参数 LIVE · 表计超时 · 导航本地"
     : controlMode==="hardware-syncing"
       ? "控制同步中"
       : live
         ? "表计 LIVE · 控制本地"
-        : meterSnapshot?.connected?"表计超时 · 控制本地":controlStatus?.title??meterStatus?.title??"控制本地";
+        : effectiveMeterSnapshot?.connected?"表计超时 · 控制本地":controlStatus?.title??meterStatus?.title??"控制本地";
   const badgeTitle=[meterStatus?.message,controlStatus?.message].filter(Boolean).join(" · ");
   return <section className="mixer-workspace" aria-label={`${model.displayName} 调音台工作区`} data-control-mode={controlMode}>
     <header><SlidersHorizontal weight="fill"/><div><b>{model.displayName}</b><small>音频 USB-B {model.audio.usbOutputs}×{model.audio.usbReturns} · 控制 Ethernet TCP {model.control.tcpPort}</small></div><span className={`mixer-model-badge ${live||controlMode==="hardware-live"?"live":""}`} title={badgeTitle}>{badgeLabel}</span></header>
-    <div className="mixer-workspace-body"><MixerConsole model={model} meterSnapshot={meterSnapshot} parameterSnapshot={parameterSnapshot} controlMode={controlMode} onWriteParameters={onWriteParameters}/></div>
+    <div className="mixer-workspace-body"><MixerConsole model={model} meterSnapshot={effectiveMeterSnapshot} parameterSnapshot={parameterSnapshot} controlMode={controlMode} onWriteParameters={onWriteParameters}/></div>
   </section>;
-}
+});

@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +209,7 @@ def lease_job(
     job_id: int | None,
     *,
     include_failed: bool = True,
+    pipeline_version: str | None = None,
 ) -> dict[str, Any] | None:
     connection = sqlite3.connect(database_path, timeout=5)
     try:
@@ -215,16 +217,31 @@ def lease_job(
         connection.execute("BEGIN IMMEDIATE")
         if job_id is None:
             statuses = "('queued', 'failed')" if include_failed else "('queued')"
-            row = connection.execute(
-                f"""SELECT * FROM ai_analysis_jobs
-                    WHERE status IN {statuses}
-                    ORDER BY priority, created_at_unix_ms, id LIMIT 1"""
-            ).fetchone()
+            if pipeline_version is None:
+                row = connection.execute(
+                    f"""SELECT * FROM ai_analysis_jobs
+                        WHERE status IN {statuses}
+                        ORDER BY priority, created_at_unix_ms, id LIMIT 1"""
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    f"""SELECT * FROM ai_analysis_jobs
+                        WHERE status IN {statuses} AND pipeline_version=?
+                        ORDER BY priority, created_at_unix_ms, id LIMIT 1""",
+                    (pipeline_version,),
+                ).fetchone()
         else:
-            row = connection.execute(
-                "SELECT * FROM ai_analysis_jobs WHERE id=? AND status IN ('queued', 'failed')",
-                (job_id,),
-            ).fetchone()
+            if pipeline_version is None:
+                row = connection.execute(
+                    "SELECT * FROM ai_analysis_jobs WHERE id=? AND status IN ('queued', 'failed')",
+                    (job_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """SELECT * FROM ai_analysis_jobs
+                       WHERE id=? AND status IN ('queued', 'failed') AND pipeline_version=?""",
+                    (job_id, pipeline_version),
+                ).fetchone()
         if row is None:
             return None
         now = int(time.time() * 1000)
@@ -730,7 +747,12 @@ def extract_json_object(source: str) -> dict[str, Any]:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start < 0 or end <= start:
-        raise RuntimeError("MOSS-Music did not return the requested JSON transcript")
+        excerpt = cleaned[:1200] or source[:1200]
+        excerpt = excerpt.replace("\r", " ").replace("\n", " ")
+        raise RuntimeError(
+            "MOSS-Music did not return the requested JSON transcript; "
+            f"response excerpt: {excerpt}"
+        )
     return loads_candidate(cleaned[start : end + 1])
 
 
@@ -751,7 +773,7 @@ def transcribe_vocals(
     import requests
 
     endpoint = str(os.environ.get("KING_MOSS_ENDPOINT", configuration["endpoint"])).rstrip("/")
-    prompt = (
+    base_prompt = (
         "Transcribe all sung lyrics in this audio with native timestamps. "
         "Each item must contain exactly one short singable lyric phrase, normally no longer than "
         "8 seconds. For Chinese lyrics, start a new item after every comma or sentence-ending "
@@ -761,29 +783,50 @@ def transcribe_vocals(
         '"startSeconds":0.0,"endSeconds":1.0}]}. '
         "Keep chronological order, omit instrumental-only spans, and do not use markdown."
     )
-    response = requests.post(
-        f"{endpoint}/generate",
-        json={
-            "text": prompt,
-            "audio_data": windows_to_wsl_path(vocals_path),
-            "sampling_params": {
-                "max_new_tokens": int(configuration.get("maxTokens", 4096)),
-                "temperature": float(configuration.get("temperature", 0.0)),
+    last_error: Exception | None = None
+    for attempt in range(2):
+        prompt = base_prompt
+        if attempt:
+            prompt += (
+                " Your previous answer did not contain the requested JSON. "
+                "Do not explain or think aloud. Begin the response with { and end it with }. "
+                'If there are no sung words, return {"language":"Unknown","items":[]}.'
+            )
+        response = requests.post(
+            f"{endpoint}/generate",
+            json={
+                "text": prompt,
+                "audio_data": windows_to_wsl_path(vocals_path),
+                "sampling_params": {
+                    "max_new_tokens": int(configuration.get("maxTokens", 8192)),
+                    "temperature": float(configuration.get("temperature", 0.0)),
+                },
             },
-        },
-        timeout=(10, 3600),
-    )
-    if not response.ok:
-        detail = response.text.strip().replace("\n", " ")[:2000]
-        raise RuntimeError(f"MOSS-Music HTTP {response.status_code}: {detail}")
-    result = response.json()
-    raw_text = result.get("text")
-    if isinstance(raw_text, list):
-        raw_text = "".join(str(item) for item in raw_text)
-    transcript = extract_json_object(str(raw_text or ""))
-    items = normalize_timestamp_items(transcript)
-    plain_text = "\n".join(item["text"] for item in items)
-    return plain_text, transcript.get("language"), items
+            timeout=(10, 3600),
+        )
+        if not response.ok:
+            detail = response.text.strip().replace("\n", " ")[:2000]
+            raise RuntimeError(f"MOSS-Music HTTP {response.status_code}: {detail}")
+        result = response.json()
+        raw_text = result.get("text")
+        if isinstance(raw_text, list):
+            raw_text = "".join(str(item) for item in raw_text)
+        try:
+            transcript = extract_json_object(str(raw_text or ""))
+        except RuntimeError as error:
+            last_error = error
+            if attempt == 0:
+                print(
+                    f"MOSS transcript JSON missing; retrying once: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            raise
+        items = normalize_timestamp_items(transcript)
+        plain_text = "\n".join(item["text"] for item in items)
+        return plain_text, transcript.get("language"), items
+    raise RuntimeError(str(last_error or "MOSS-Music transcript retry failed"))
 
 
 def timestamp_item_is_coarse(item: dict[str, Any]) -> bool:
@@ -876,17 +919,87 @@ def reconcile_overlapping_timestamp_items(
                 )
                 proper_fragment = (
                     len(candidate_text) < len(other_text)
-                    and (
-                        other_text.startswith(candidate_text)
-                        or other_text.endswith(candidate_text)
-                    )
+                    and candidate_text in other_text
                 )
                 if contained_in_time and proper_fragment:
                     is_truncated_duplicate = True
                     break
         if not is_truncated_duplicate:
-            reconciled.append(candidate)
-    return reconciled
+            reconciled.append(dict(candidate))
+
+    # Consecutive overlapping MOSS windows sometimes describe the same sung
+    # phrase with a one-character disagreement and a longer continuation.
+    # Keep the more complete text, but retain the full acoustic time span.
+    alternatives_merged: list[dict[str, Any]] = []
+    for candidate in reconciled:
+        if alternatives_merged:
+            previous = alternatives_merged[-1]
+            previous_text = comparable_text(str(previous["text"]))
+            candidate_text = comparable_text(str(candidate["text"]))
+            overlap = min(
+                float(previous["endSeconds"]), float(candidate["endSeconds"])
+            ) - max(
+                float(previous["startSeconds"]), float(candidate["startSeconds"])
+            )
+            matcher = SequenceMatcher(None, previous_text, candidate_text)
+            longest_match = matcher.find_longest_match().size
+            if (
+                overlap > 0
+                and min(len(previous_text), len(candidate_text)) >= 6
+                and matcher.ratio() >= 0.72
+                and longest_match >= 6
+            ):
+                preferred = candidate if len(candidate_text) > len(previous_text) else previous
+                alternatives_merged[-1] = {
+                    "text": preferred["text"],
+                    "startSeconds": min(
+                        float(previous["startSeconds"]),
+                        float(candidate["startSeconds"]),
+                    ),
+                    "endSeconds": max(
+                        float(previous["endSeconds"]),
+                        float(candidate["endSeconds"]),
+                    ),
+                }
+                continue
+        alternatives_merged.append(candidate)
+
+    # The operator display has one lyric timeline. Even when the model emits
+    # backing-vocal overlap, published rows must be monotonic so two phrases do
+    # not occupy the current-line slot at the same time.
+    monotonic: list[dict[str, Any]] = []
+    for candidate in alternatives_merged:
+        start = float(candidate["startSeconds"])
+        end = float(candidate["endSeconds"])
+        if monotonic and start < float(monotonic[-1]["endSeconds"]):
+            previous = monotonic[-1]
+            if start <= float(previous["startSeconds"]) + 0.08:
+                previous_text = comparable_text(str(previous["text"]))
+                candidate_text = comparable_text(str(candidate["text"]))
+                if len(candidate_text) > len(previous_text):
+                    candidate = dict(candidate)
+                    candidate["startSeconds"] = float(previous["startSeconds"])
+                    monotonic[-1] = candidate
+                continue
+            previous["endSeconds"] = round(start, 3)
+        if end - start >= 0.08:
+            monotonic.append(candidate)
+    return monotonic
+
+
+def lyrics_artifacts_are_current(
+    derived_directory: Path, pipeline: dict[str, Any]
+) -> bool:
+    required = ("lyrics.lrc", "lyrics.words.json", "lyrics.txt", "manifest.json")
+    if not all((derived_directory / name).is_file() for name in required):
+        return False
+    try:
+        manifest = json.loads((derived_directory / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return manifest.get("lyricsPostprocessVersion") == pipeline.get(
+        "lyricsPostprocessVersion"
+    )
 
 
 def split_vocals_for_moss(
@@ -1135,11 +1248,12 @@ def process_job(database_path: Path, job: dict[str, Any], pipeline: dict[str, An
         lyrics_path = derived_directory / "lyrics.lrc"
         words_path = derived_directory / "lyrics.words.json"
         text_path = derived_directory / "lyrics.txt"
-        if lyrics_path.is_file() and words_path.is_file() and text_path.is_file():
+        if lyrics_artifacts_are_current(derived_directory, pipeline):
             update_job(database_path, job_id, status="running", stage="reusing-lyrics")
             lyrics_payload = json.loads(words_path.read_text(encoding="utf-8"))
             language = str(lyrics_payload.get("language", "Unknown"))
             words = normalize_timestamp_items(lyrics_payload)
+            words = reconcile_overlapping_timestamp_items(words)
             if not words:
                 raise RuntimeError("existing native timestamp items are empty")
             temporary_lrc = derived_directory / "lyrics.lrc.tmp"
@@ -1171,6 +1285,7 @@ def process_job(database_path: Path, job: dict[str, Any], pipeline: dict[str, An
             "separatorProfile": separator_profile(pipeline["separator"]),
             "asrModel": pipeline["moss"]["model"],
             "alignerModel": "MOSS-Music native timestamps",
+            "lyricsPostprocessVersion": pipeline["lyricsPostprocessVersion"],
             "referenceMapFile": "reference.json",
             "referenceMapVersion": 1,
             "language": language,
@@ -1254,13 +1369,18 @@ def main() -> int:
         if not report["ok"]:
             print(json.dumps(report, ensure_ascii=False, indent=2), file=sys.stderr)
             return 2
-        job = lease_job(args.database, args.job_id)
+        pipeline = load_pipeline()
+        job = lease_job(
+            args.database,
+            args.job_id,
+            pipeline_version=pipeline["pipelineVersion"],
+        )
         if job is None:
             print("No queued AI analysis job.")
             return 0
         print(f"Processing AI job {job['id']}: {job['media_path']}", flush=True)
         try:
-            process_job(args.database, job, load_pipeline())
+            process_job(args.database, job, pipeline)
         except KeyboardInterrupt:
             update_job(
                 args.database,
@@ -1275,6 +1395,7 @@ def main() -> int:
     if args.run:
         ensure_job_table(args.database)
         recover_running_jobs(args.database)
+        pipeline = load_pipeline()
         last_wait_reason = None
         while True:
             report = preflight(args.database)
@@ -1291,7 +1412,12 @@ def main() -> int:
                 return 130
         print("KING CLUB AI worker ready.", flush=True)
         while True:
-            job = lease_job(args.database, None, include_failed=False)
+            job = lease_job(
+                args.database,
+                None,
+                include_failed=False,
+                pipeline_version=pipeline["pipelineVersion"],
+            )
             if job is None:
                 try:
                     time.sleep(max(0.5, args.poll_seconds))
@@ -1300,7 +1426,7 @@ def main() -> int:
                 continue
             print(f"Processing AI job {job['id']}: {job['media_path']}", flush=True)
             try:
-                process_job(args.database, job, load_pipeline())
+                process_job(args.database, job, pipeline)
                 print(f"AI job {job['id']} completed.", flush=True)
             except KeyboardInterrupt:
                 update_job(

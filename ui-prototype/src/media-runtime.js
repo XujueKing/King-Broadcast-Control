@@ -29,12 +29,28 @@ export const mediaAssetFingerprint = (items) => items.map((item)=>[
   item.lyricsModifiedUnixMs,
   item.vocalsPath,
   item.accompanimentPath,
+  item.thumbnailPath,
 ].join(":")).join("|");
 
 export const equalPowerGains = (crossfade) => {
   const position = Math.min(1,Math.max(0,Number(crossfade)||0)/100)*Math.PI/2;
   return { deck1:Math.cos(position), deck2:Math.sin(position) };
 };
+
+export const ACCOMPANIMENT_GAIN_DB = 4;
+
+export const deckOutputVolumePercent = (deckGain,masterVolume,vocalMode="original") => {
+  const safeDeckGain = Math.min(1,Math.max(0,Number(deckGain)||0));
+  const safeMasterVolume = Math.min(100,Math.max(0,Number(masterVolume)||0));
+  const vocalGain = vocalMode === "accompaniment"
+    ? 10 ** (ACCOMPANIMENT_GAIN_DB / 20)
+    : 1;
+  return Math.min(100,safeDeckGain*safeMasterVolume*vocalGain);
+};
+
+export const deckOutputVolumeScalar = (deckGain,masterVolume,vocalMode="original") => (
+  deckOutputVolumePercent(deckGain,masterVolume,vocalMode)/100
+);
 
 export const getNextPlayableTrack = (trackCount,currentIndex,excludedIndex,shuffle=false,random=Math.random) => {
   const count = Math.max(0,Number(trackCount)||0);

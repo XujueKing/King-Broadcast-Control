@@ -25,8 +25,12 @@ coverage/
 .local-tools/
 ui-prototype/.local-tools/
 ui-prototype/.venv-audio-ai/
+ui-prototype/.venv-*/
 __pycache__/
 *.pyc
+
+# Downloaded AI model checkpoints and caches
+/checkpoints/
 
 # Local UI design-QA captures
 ui-prototype/implementation-*.png

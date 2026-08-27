@@ -1,4 +1,4 @@
-# KING Vocal Engine — P13
+# KING Vocal Engine — P28
 
 这是与 Tauri/React UI、播放器和离线 AI Worker 分离的实时音频进程。当前范围严格限定为：
 
@@ -10,7 +10,8 @@
 - 支持固定状态的 HPF/Presence EQ、De-esser、Compressor 和 Limiter；
 - 输出可解释的 Pitch/Timing/Stability/Voicing/Energy/Confidence 与总质量分；
 - 根据质量分平滑混合延迟对齐的真人原声与修音分支；
-- 生成式重建、真实 Qu-16/SLX4 驱动闭环和物理 RTT 仍不在已验证范围内。
+- P28 可显式加载与歌曲时间轴对齐的原唱分轨，在严重失准或停声时平滑应急补位；
+- 歌手本人音色生成、真实 Qu-16/SLX4 驱动闭环和物理 RTT 仍不在已验证范围内。
 
 ## 命令
 
@@ -94,6 +95,22 @@ cargo run --release -- run --arm --enable-pitch-correction `
 只监测演唱质量而不打开修音时可加 `--enable-vocal-quality`。打开实时修音时评分自动启用，最新总分与等级通过实时指标发布；详细逐 hop 分项只在模拟/录制证据中写入 JSON，不在音频线程写文件。
 
 P10 只有显式提供 `--enable-adaptive-blend` 才启用。原声分支会先延迟 192 帧，与修音器固定 4 ms 延迟对齐，再做线性等增益交叉混合：质量分高于 85 时保持真人原声；下降到 65、40 和 0 分时，目标修音占比分别连续增加到 35%、75% 和 100%。修音占比使用 45 ms 上升、180 ms 下降，避免等级边界抖动、突变和爆音。P10 只混合真人与 DSP 修音，不包含生成式重建。
+
+P28 只有同时提供 `--enable-reference-rescue`、`--reference reference.json` 与 `--reference-vocal vocals.flac` 才启用。它在歌曲参考图预计有人声时同时根据真人包络和质量分连续决定补位比例：小声或失准都会提高补位，只有足够响且评分高才退出；无人演唱时补满，间奏始终关闭。参考层以 32 ms 淡入、180 ms 淡出；默认参考增益为 0 dB，但现场首次武装仍建议显式从 -12 dB 低电平开始。分轨在启动实时流之前一次性解码，音频回调内不读文件、不分配内存。示例：
+
+```powershell
+cargo run --release -- run --arm `
+  --enable-pitch-correction --enable-vocal-quality --enable-adaptive-blend `
+  --enable-reference-rescue `
+  --reference "C:\path\reference.json" `
+  --reference-vocal "C:\path\vocals.flac" `
+  --reference-rescue-gain-db -12 `
+  --reference-start-delay-ms 0 `
+  --input "输入设备完整名称" --output "输出设备完整名称" `
+  --gain-db -24
+```
+
+这条 P28 路径是“原唱应急补位”，不是歌手本人音色生成：男歌的 `vocals.flac` 仍然是男声，女歌手演唱时若触发会听出男原唱。正式产品默认只对歌手本人实时做 DSP 修音；只有取得本人同意、建立 Vocal Profile 并离线生成同时间轴的理想女声/男声参考后，才允许选择“本人音色补位”。简单升调或 Formant 变换不能可靠地把男原唱变成该女歌手。
 
 P8 默认参数为 80 Hz 高通、3.2 kHz 轻微存在感、5.8 kHz 齿音检测、-18 dBFS/3:1 压缩、2 dB makeup 和 -1 dBFS limiter。实时路径只有显式提供 `--enable-vocal-dynamics` 才启用；未启用时不经过这条处理链。参数预设和无爆音实时切换留到 P11。
 

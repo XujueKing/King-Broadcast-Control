@@ -1,11 +1,18 @@
 import qu16Model from "./mixer-models/allen-heath-qu16/model.json" with { type:"json" };
 
-const lowerSurfaceSources=Array.from({length:16},(_,index)=>({
-  id:`ch-${index+1}`,
-  label:`CH${index+1}`,
-  detail:"Input",
-  entityKind:"input",
-}));
+const configuredStripLabels=qu16Model.ui?.stripLabels??{};
+
+const lowerSurfaceSources=Array.from({length:16},(_,index)=>{
+  const id=`ch-${index+1}`;
+  const label=`CH${index+1}`;
+  return {
+    id,
+    label,
+    stripLabel:configuredStripLabels[id]??label,
+    detail:"Input",
+    entityKind:"input",
+  };
+});
 
 const upperSurfaceSources=[
   ["st-1","ST1","Stereo","input"],

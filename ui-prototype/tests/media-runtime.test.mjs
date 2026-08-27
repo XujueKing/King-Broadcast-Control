@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  ACCOMPANIMENT_GAIN_DB,
+  deckOutputVolumePercent,
+  deckOutputVolumeScalar,
   equalPowerGains,
   formatDuration,
   getAdjacentPlayableTrack,
@@ -29,6 +32,14 @@ test("crossfader uses equal-power gains",()=>{
   assert.ok(Math.abs(middle.deck1-Math.SQRT1_2)<1e-12);
   assert.ok(Math.abs(middle.deck2-Math.SQRT1_2)<1e-12);
   assert.ok(Math.abs(equalPowerGains(100).deck2-1)<1e-12);
+});
+
+test("accompaniment mode applies a capped per-deck gain without changing original mode",()=>{
+  assert.equal(ACCOMPANIMENT_GAIN_DB,4);
+  assert.equal(deckOutputVolumePercent(0.5,80,"original"),40);
+  assert.ok(Math.abs(deckOutputVolumePercent(0.5,80,"accompaniment")-63.39572769844454)<1e-9);
+  assert.equal(deckOutputVolumePercent(1,100,"accompaniment"),100);
+  assert.equal(deckOutputVolumeScalar(1,100,"accompaniment"),1);
 });
 
 test("sequence and shuffle never select the other loaded Deck",()=>{

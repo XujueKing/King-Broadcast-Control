@@ -5,6 +5,17 @@ const fractionToSeconds = (value = "") => {
   return Number(value) / (10 ** value.length);
 };
 
+const estimatedLyricDuration = (text) => {
+  const normalized=String(text??"").replace(/\s+/g," ").trim();
+  const vocalCharacters=[...normalized.replace(/[^\p{L}\p{N}]/gu,"")].length;
+  const wordCount=normalized ? normalized.split(/\s+/).length : 0;
+  const hasCjk=/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(normalized);
+  const estimated=hasCjk
+    ? 1.2+vocalCharacters*.38
+    : 1.4+Math.max(wordCount,vocalCharacters/5)*.42;
+  return Math.max(2.2,Math.min(7.2,estimated));
+};
+
 const splitLongLyric = (text, maxCharacters = 28) => {
   const chunks=[];
   let current="";
@@ -75,7 +86,11 @@ export const lyricAtTime = (lines, seconds) => {
     }
   }
   if (index < 0) return null;
-  return { index, current:lines[index], next:lines[index+1] ?? null };
+  const current=lines[index];
+  const next=lines[index+1] ?? null;
+  const naturalEnd=current.atSeconds+estimatedLyricDuration(current.text);
+  const endSeconds=next&&next.atSeconds<=naturalEnd+1.5 ? next.atSeconds : naturalEnd;
+  return { index, current, next, endSeconds, visible:time<endSeconds };
 };
 
 export const selectLyricsDeck = ({ playingDecks, enabledDecks, availableDecks, crossfade }) => {
