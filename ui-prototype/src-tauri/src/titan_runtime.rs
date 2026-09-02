@@ -88,6 +88,11 @@ const KINGCLUB_GATLING_SPEED_FUNCTION_ID: u64 = 1;
 const KINGCLUB_GATLING_PALETTES: [u64; 8] = [
     33_187, 33_207, 33_214, 33_219, 33_227, 33_234, 33_240, 33_249,
 ];
+const KINGCLUB_BEAM_GROUP_TITAN_ID: u64 = 15_735;
+const KINGCLUB_BEAM_FIXTURE_TITAN_IDS: [u64; 25] = [
+    3_511, 3_512, 3_513, 3_514, 3_515, 3_516, 3_517, 3_518, 3_519, 3_520, 3_521, 3_522, 3_523,
+    3_524, 3_525, 3_526, 3_527, 3_528, 3_529, 3_530, 3_703, 3_704, 3_705, 3_706, 15_676,
+];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +102,16 @@ struct TitanGatlingAction {
     palette_titan_id: Option<u64>,
     dimmer_percent: Option<f64>,
     speed_value: Option<f64>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TitanBeamAction {
+    ok: bool,
+    fixture_count: usize,
+    dimmer_percent: Option<f64>,
+    shutter_open: Option<bool>,
     message: String,
 }
 
@@ -567,6 +582,92 @@ fn update_gatling(
     })
 }
 
+fn validate_beam_level(dimmer_percent: Option<f64>) -> Result<(), String> {
+    if dimmer_percent.is_some_and(|level| !level.is_finite() || !(0.0..=100.0).contains(&level)) {
+        return Err("光束自动亮度超出灯具 0%-100% 范围".to_string());
+    }
+    Ok(())
+}
+
+fn update_beam(
+    host: &str,
+    expected_show_name: &str,
+    dimmer_percent: Option<f64>,
+    shutter_open: Option<bool>,
+) -> Result<TitanBeamAction, String> {
+    validate_beam_level(dimmer_percent)?;
+    if expected_show_name.trim() != KINGCLUB_GATLING_SHOW {
+        return Err("光束现场配置只绑定 Show 2024.12.28".to_string());
+    }
+    let status = read_status(host)?;
+    if status.show_name != expected_show_name {
+        return Err(format!(
+            "Titan Show 身份不匹配：需要 {expected_show_name}，当前为 {}",
+            status.show_name
+        ));
+    }
+    verified_site_handle(
+        host,
+        "/titan/handles/Groups",
+        KINGCLUB_BEAM_GROUP_TITAN_ID,
+        "groupHandle",
+    )?;
+    let fixtures = read_handle_summaries(host, "/titan/handles/Fixtures")?;
+    let fixture_ids = fixtures
+        .iter()
+        .filter(|handle| handle.handle_type == "fixtureHandle")
+        .filter_map(|handle| handle.titan_id)
+        .collect::<std::collections::HashSet<_>>();
+    if KINGCLUB_BEAM_FIXTURE_TITAN_IDS
+        .iter()
+        .any(|fixture_id| !fixture_ids.contains(fixture_id))
+    {
+        return Err("光束白名单与当前 Show Fixture 不一致；已拒绝输出".to_string());
+    }
+
+    http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear")?;
+    let select_path =
+        format!("/titan/script/2/Group/RecallGroup?handle_titanId={KINGCLUB_BEAM_GROUP_TITAN_ID}");
+    http_get(host, &select_path)?;
+    let mut selected = selected_fixture_ids(host)?;
+    selected.sort_unstable();
+    let mut expected = KINGCLUB_BEAM_FIXTURE_TITAN_IDS.to_vec();
+    expected.sort_unstable();
+    if selected != expected {
+        let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
+        return Err(format!(
+            "光束 Group 57 当前选择与 25 台白名单不一致 {:?}；已拒绝输出",
+            selected
+        ));
+    }
+
+    let operation = (|| {
+        if let Some(level) = dimmer_percent {
+            let path = format!(
+                "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level={level:.3}"
+            );
+            http_get(host, &path)?;
+        }
+        if shutter_open == Some(true) {
+            http_get(
+                host,
+                "/titan/script/2/Programmer/Editor/Fixtures/SetControlValueByName?controlName=Shutter&functionName=Open&value=1.000&programmer=true&createRestorePoint=false",
+            )?;
+        }
+        Ok::<(), String>(())
+    })();
+    let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
+    operation?;
+
+    Ok(TitanBeamAction {
+        ok: true,
+        fixture_count: KINGCLUB_BEAM_FIXTURE_TITAN_IDS.len(),
+        dimmer_percent,
+        shutter_open,
+        message: "25 台蓝花光束已更新".to_string(),
+    })
+}
+
 #[tauri::command]
 pub async fn titan_status(host: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -679,6 +780,26 @@ pub async fn titan_update_gatling(
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn titan_update_beam(
+    host: String,
+    expected_show_name: String,
+    dimmer_percent: Option<f64>,
+    shutter_open: Option<bool>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        serde_json::to_value(update_beam(
+            &host,
+            &expected_show_name,
+            dimmer_percent,
+            shutter_open,
+        )?)
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,5 +883,14 @@ mod tests {
         assert!(validate_gatling_levels(Some(1), Some(10.0), Some(0.361)).is_err());
         assert!(validate_gatling_levels(Some(33_207), Some(100.1), Some(0.361)).is_err());
         assert!(validate_gatling_levels(Some(33_207), Some(10.0), Some(1.01)).is_err());
+    }
+
+    #[test]
+    fn beam_automation_uses_verified_fixture_protocol_ranges() {
+        assert_eq!(KINGCLUB_BEAM_GROUP_TITAN_ID, 15_735);
+        assert_eq!(KINGCLUB_BEAM_FIXTURE_TITAN_IDS.len(), 25);
+        assert!(validate_beam_level(Some(0.0)).is_ok());
+        assert!(validate_beam_level(Some(100.0)).is_ok());
+        assert!(validate_beam_level(Some(100.1)).is_err());
     }
 }

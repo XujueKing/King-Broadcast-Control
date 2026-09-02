@@ -2215,6 +2215,7 @@ pub fn run() {
             titan_runtime::titan_fire_playback,
             titan_runtime::titan_release_playback,
             titan_runtime::titan_update_gatling,
+            titan_runtime::titan_update_beam,
             vocal_runtime_status,
             vocal_profile_input_devices,
             list_vocal_profiles,

@@ -82,6 +82,7 @@ import {
   gatlingPulseForRhythm,
   kingclubGatlingProfile,
 } from "./gatling-runtime.js";
+import { beamPulseForRhythm, kingclubBeamProfile } from "./beam-runtime.js";
 import { createLightingPackage, normalizeLightingPackage } from "./lighting-package.js";
 import {
   clearTitanSimulator,
@@ -2054,6 +2055,7 @@ export function App() {
   const titanSimulationRef=useRef(titanSimulation);
   const titanCommandQueueRef=useRef(Promise.resolve());
   const gatlingBaselineKeyRef=useRef("");
+  const beamBaselineKeyRef=useRef("");
   const titanAutomationRef=useRef(createLightingAutomationState());
   const titanDiscoveryRef=useRef({busy:false,lastAttempt:0});
   const qu16DiscoveryRef=useRef({busy:false,lastAttempt:0});
@@ -2512,6 +2514,37 @@ export function App() {
     titanCommandQueueRef.current=command;
     return command;
   },[desktopRuntime,lightingEnabled,titanStatus.connected,titanStatus.deviceName,titanStatus.host,titanStatus.showName]);
+  const updateBeam=useCallback(({dimmerPercent=null,shutterOpen=null,source="manual"}={})=>{
+    if(!lightingEnabled){
+      setTitanActionStatus({state:"paused",message:"KING 灯光联动已暂停；光束保持当前状态"});
+      return Promise.resolve(false);
+    }
+    const liveConnection=Boolean(desktopRuntime&&titanStatus.connected&&titanStatus.host);
+    if(!liveConnection){
+      setTitanActionStatus({state:"simulation",message:"离线预演：光束未向 Titan 发送命令"});
+      return Promise.resolve(false);
+    }
+    if(titanStatus.deviceName!==SITE_TITAN_IDENTITY.deviceName||titanStatus.showName!==kingclubBeamProfile.showName){
+      setTitanActionStatus({state:"blocked",message:`光束联动仅绑定 ${SITE_TITAN_IDENTITY.deviceName} / Show ${kingclubBeamProfile.showName}`});
+      return Promise.resolve(false);
+    }
+    const sourceLabel=source==="rhythm"?"音乐节拍":"蓝花常规";
+    const command=titanCommandQueueRef.current.catch(()=>undefined).then(async()=>{
+      const result=await invoke("titan_update_beam",{
+        host:titanStatus.host,
+        expectedShowName:kingclubBeamProfile.showName,
+        dimmerPercent,
+        shutterOpen,
+      });
+      setTitanActionStatus({state:"live",message:`${result?.message||"光束已更新"} · ${sourceLabel}`});
+      return true;
+    }).catch((error)=>{
+      setTitanActionStatus({state:"error",message:`光束控制失败：${String(error)}`});
+      return false;
+    });
+    titanCommandQueueRef.current=command;
+    return command;
+  },[desktopRuntime,lightingEnabled,titanStatus.connected,titanStatus.deviceName,titanStatus.host,titanStatus.showName]);
   useEffect(()=>{
     if(!lightingEnabled||light!==null||!desktopRuntime||!titanStatus.connected||!titanStatus.host){
       gatlingBaselineKeyRef.current="";
@@ -2527,6 +2560,20 @@ export function App() {
       source:"baseline",
     });
   },[desktopRuntime,light,lightingEnabled,titanStatus.connected,titanStatus.host,titanStatus.showName,updateGatling]);
+  useEffect(()=>{
+    if(!lightingEnabled||light!==null||!desktopRuntime||!titanStatus.connected||!titanStatus.host){
+      beamBaselineKeyRef.current="";
+      return;
+    }
+    const key=`${titanStatus.host}|${titanStatus.showName}`;
+    if(beamBaselineKeyRef.current===key)return;
+    beamBaselineKeyRef.current=key;
+    updateBeam({
+      dimmerPercent:kingclubBeamProfile.baseDimmerPercent,
+      shutterOpen:true,
+      source:"baseline",
+    });
+  },[desktopRuntime,light,lightingEnabled,titanStatus.connected,titanStatus.host,titanStatus.showName,updateBeam]);
   useEffect(()=>{
     if(lightingEnabled)return;
     const clearedSimulation=clearTitanSimulator(titanSimulationRef.current);
@@ -4136,6 +4183,20 @@ export function App() {
             } }));
           });
         }
+        const beamPulse=beamPulseForRhythm(rhythmEvent);
+        updateBeam({
+          dimmerPercent:beamPulse.dimmerPercent,
+          source:"rhythm",
+        }).then((triggered)=>{
+          if(!triggered)return;
+          window.dispatchEvent(new CustomEvent("king:beam-cue", { detail:{
+            source:"rhythm",
+            rule:lightRhythmRule,
+            rhythm:rhythmEvent,
+            look:beamPulse.look,
+            dimmerPercent:beamPulse.dimmerPercent,
+          } }));
+        });
       }
 
       if (rhythmEventMatchesRule(videoRhythmRule, rhythmEvent) && availableVideos.length) {
@@ -4163,7 +4224,7 @@ export function App() {
     };
     window.addEventListener("king:rhythm", handleRhythmAutomation);
     return () => window.removeEventListener("king:rhythm", handleRhythmAutomation);
-  }, [availableVideos, crossfade, light, lightingEnabled, lightRhythmRule, mediaTransforms, outputMedia, playingDecks, stagedMedia, updateGatling, videoRhythmRule]);
+  }, [availableVideos, crossfade, light, lightingEnabled, lightRhythmRule, mediaTransforms, outputMedia, playingDecks, stagedMedia, updateBeam, updateGatling, videoRhythmRule]);
   useEffect(()=>{
     if(!lightingEnabled||light!==null||outputBaseMedia?.type!=="video")return undefined;
     videoColorSamplingErrorRef.current=null;

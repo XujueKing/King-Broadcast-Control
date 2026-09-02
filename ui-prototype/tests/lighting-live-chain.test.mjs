@@ -24,6 +24,9 @@ test("desktop startup always restores automatic PGM colour and beat lighting", (
     appSource,
     /const \[lightingEnabled, setLightingEnabled\] = useState\(true\)/,
   );
+  assert.match(appSource, /invoke\("titan_update_beam"/);
+  assert.match(appSource, /shutterOpen:true/);
+  assert.match(appSource, /new CustomEvent\("king:beam-cue"/);
 });
 
 test("PGM colour sampling reacts quickly without accepting one-frame colour noise", () => {
