@@ -1,88 +1,45 @@
-# KING CLUB 控制台设计 QA
+# Design QA - A1-A25 beam floor map
 
-## 对比证据
+- Source visual truth: `C:\Users\leadb\Downloads\_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=1625640261098080533&skey=@crypt_c8087f27_325bd37307729b3670359ab785106299&mmweb_appid=wx_webfilehelper.jpg`
+- Source pixels: 1330 x 1650
+- Implementation screenshot: pending native desktop restart
+- Intended viewport: 2559 x 1596 desktop window
+- CSS size / density: pending native capture
+- State: Avolites Tiger Touch Pro page, live Patch loaded
 
-- 源视觉真值：`conversation://current-turn/c2-waveform-reference`、`conversation://current-turn/c2-controls-reference` 与 `conversation://current-turn/deck-state-request`（用户提供的波形、C2 控制区和播放状态要求）
-- 实现截图：[Deck 1 暂停、Deck 2 播放的状态色对照](docs/ui/qa/c2-deck-controls-state-colors.jpg)
-- 检查状态：首页；Deck 1 暂停显示橙黄色圆形播放键，Deck 2 播放显示蓝色圆形暂停键；反向状态也完成计算样式复核
-- CSS 视口：`1180 × 720`
-- 实现截图像素：`1311 × 800`；浏览器缩放产生 `devicePixelRatio = 0.9`，判断使用 CSS 几何尺寸，不把密度差异计为视觉偏差
-- 源图为局部裁图，分别以 C2 控制区和单个选中按钮为聚焦区域；未用全屏比例做错误的像素级比较
+## Full-view comparison evidence
 
-## 完整视图检查
+The source plan was opened at original resolution. The 25 red marker centres were measured from the source and converted to normalized percentages. The updated native desktop build has not been installed or restarted, so a rendered full-view comparison is not yet available.
 
-- C1/C2 比例为 `60/40`；C2、Crossfader 与 B 区无覆盖
-- 页面 `scrollWidth === clientWidth` 且 `scrollHeight === clientHeight`，无横向或纵向页面溢出
-- C1 LED 舞台与 8:9 画面四边差值均为 `0px`；实测比例 `0.888736`，目标 `8/9 = 0.888889`
+## Focused region comparison evidence
 
-## 聚焦区域检查
-
-- 两行各 4 个按钮，列宽一致
-- 8 个按钮实测高度约 `31px`，圆角均为 `5px`
-- 控制区左、右、下留白分别约 `12.0px / 12.6px / 12.0px`
-- Deck 1 选中态：绿色四边描边与绿色低透明背景
-- Deck 2 选中态：蓝色四边描边与蓝色低透明背景
-- Deck 2 悬停态：蓝色描边与蓝色背景，不再继承全局绿色
-- 模式按钮保留 `aria-label`、`aria-pressed` 和原生悬浮提示；无文字后仍可被辅助技术识别
-- 波形与上方音量刻度在最小高度视口保持 `6px` 间距，比上一版增加 `5px`
-- 固定白色播放中线不随 seek 移动；波形按实际播放进度在中线下左右位移
-- 波形始终与真实歌曲进度绑定：使用 `24×` DJ 时间窗口和 `1920` 个峰值柱，只显示当前位置附近约十秒片段，因此视觉滚动更快；歌曲真实播放进度、时长和音频速度不变
-- `DECK 1 / DECK 2` 在 `1180 × 720` 视口为 `12px`（常规高度为 `13px`），比旧版 `9px` 明显增大
-- 播放/暂停键在该视口约 `34 × 34px`（常规高度为 `36 × 36px`），`border-radius: 50%`
-- 播放中 Deck 1 为绿色、Deck 2 为蓝色；暂停时两侧均切换为橙黄色，主题播放色不残留
-- 自然播放结束已纳入状态机：单曲播放会停止并移除列表 `ON AIR`，顺序播放实测从 `Neon Nights` 自动跳过另一 Deck 占用曲目并切换到 `Glow Up`，进度归零且继续播放
-- 双 Deck 同时结束时按固定顺序完成下一曲决策；Deck 2 会额外排除 Deck 1 已解析的新曲，避免并发切换后重复装载同一首歌
-- Tauri 桌面实测 Deck 2 按住向右拖动后，当前时间从 `04:18` 定位到 `03:10`；浏览器键盘测试 `ArrowRight` 精确前进 `2s`
-- Pointer Capture 丢失或取消时会清理拖动预览，避免界面卡在抓取状态
-
-## 必查视觉面
-
-- 字体与排版：CUE 文案保持单行居中，纯图标模式无挤压或截断
-- 间距与布局：4×2 网格、按钮高度和三边留白一致；波形下移后仍无横向或纵向溢出
-- 颜色与视觉语义：Deck 1/2 播放中分别为绿色/蓝色；暂停主按钮统一橙黄色；其余 Deck 2 控件维持蓝色主题
-- 图像与素材：LED 舞台图及既有素材未被替换或拉伸；异形遮罩保持 8:9
-- 文案与内容：第一行为上一首、重放、CUE、下一首；第二行为单曲播放、单曲循环、顺序播放、随机播放
-
-## 对比迭代记录
-
-1. P2：原模式按钮含文字且第一行只有 3 个非等宽按钮。修复为两行各 4 个纯图标/紧凑控制。
-2. P2：连体切割线不符合目标，C2 偏高且 C1 画面左右留白。修复为独立圆角按钮、C1/C2 `60/40`，并根据 C1 实际高度反算 8:9 宽度。
-3. P2：按钮偏矮、底部留白小于左右、Deck 2 状态仍受绿色规则影响。修复为约 31px 高、三边约 12px 等距，并补齐 Deck 2 蓝色状态覆盖。
-4. P2：选中态仅底边高亮。修复为完整四边同色描边和低透明度同色背景。
-5. 复查：以上 P2 均已消除；生产构建通过，浏览器控制台无警告或错误。
-6. P2：波形与音量刻度距离过近，波形仅有循环展示动画，无法定位播放进度。修复为增加顶部间距、固定中央播放线、两 Deck 独立进度状态，并支持按住拖动预览、松开提交 seek。
-7. 复查：桌面真实拖动与浏览器键盘定位均通过；`1180 × 720` 页面溢出为 `0 × 0`，C1 四边贴合差值仍全部为 `0px`。
-8. P2：Deck 标题和播放键偏小，暂停仍沿用 Deck 主题色，长歌曲波形移动感偏弱。修复为放大标题、圆形主按钮、暂停橙黄色，并改为真实进度驱动的高倍率 DJ 时间窗口。
-9. 复查：绿色播放/蓝色播放/橙黄色暂停三种状态均通过计算样式检查；波形始终按真实时间定位，页面溢出仍为 `0 × 0`。
-10. P1：自然播放到结尾后进度虽停止，但 Deck 仍保留播放色和列表 `ON AIR`。修复为按各 Deck 独立模式执行停止、循环、顺序换曲或随机换曲；单曲结束时正确切换为橙黄色暂停。
-11. P2：两个 Deck 同时结束时可能各自依据旧索引选到同一首下一曲。修复为顺序解析两个 Deck，并把 Deck 1 的最终索引纳入 Deck 2 排除集合。
+Blocked with the same native-capture dependency. Source rows and code coordinates were checked for A1-A25 continuity, uniqueness, and row order; this is structural verification, not visual QA.
 
 ## Findings
 
-- 无剩余 P0、P1 或 P2 视觉问题。
+- [P1] Native rendering has not yet been visually compared.
+  - Location: Avolites page, left venue-plan panel.
+  - Evidence: source is available, but the running installed desktop executable is still the previous build.
+  - Impact: label size, overlap, and alignment against the floor outline remain unverified.
+  - Fix: restart into the newly built desktop executable, capture the Avolites page at 2559 x 1596, compare it with the source, and correct any visible drift.
 
-## Open Questions
+## Required fidelity surfaces
 
-- 上一首、重放、CUE、下一首目前仍属于 UI 原型控件；真实播放行为将在播放器功能开发阶段接入。
+- Fonts and typography: blocked pending native capture.
+- Spacing and layout rhythm: blocked pending native capture.
+- Colors and visual tokens: existing dark application tokens retained; rendered result pending capture.
+- Image quality and asset fidelity: existing vector floor outline retained; marker coordinates derive from the supplied raster source.
+- Copy and content: A1-A25 labels and the unbound-TitanId warning are present in source and covered by tests.
 
-## Implementation Checklist
+## Comparison history
 
-- [x] 两行各 4 个独立圆角按钮
-- [x] 三边留白一致
-- [x] Deck 1/2 绿色与蓝色语义分离
-- [x] 四边选中高亮
-- [x] C1 8:9 四边贴合
-- [x] 双 Deck 波形独立拖动 seek
-- [x] 真实进度绑定的高倍率 DJ 波形与拖动定位
-- [x] 圆形播放/暂停键及播放/暂停状态色
-- [x] 放大 `DECK 1 / DECK 2` 标题
-- [x] 自然播完后状态色、`ON AIR` 与独立播放模式一致
-- [x] 拖动中实时更新时间与波形位置
-- [x] 键盘方向键、Home、End 可定位进度
-- [x] `1180 × 720` 无页面溢出
+- Pass 1: source inspected and marker centres measured; native implementation capture unavailable before restart.
 
-## Follow-up Polish
+## Implementation checklist
 
-- P3：接入 mpv 后，把当前原型 seek 提交替换为播放器 IPC，并用播放器返回的实际时间校正 UI。
+- Restart the native desktop application into the new build.
+- Open the Avolites page with the same Patch-loaded state.
+- Capture and compare the full venue-plan panel.
+- Fix any P1/P2 marker overlap or alignment drift.
 
-final result: passed
+final result: blocked

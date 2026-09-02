@@ -3,20 +3,16 @@ import {
   ArrowsClockwise,
   CheckCircle,
   DownloadSimple,
-  DotsNine,
   Eye,
   FolderOpen,
   LightbulbFilament,
   Lightning,
   MapPin,
   MagnifyingGlass,
-  Pulse,
   SlidersHorizontal,
-  Sparkle,
-  SquaresFour,
-  Sun,
   UploadSimple,
 } from "@phosphor-icons/react";
+import { venueBeamPoints } from "./venue-beam-layout.js";
 
 const layerLabels = {
   "": "未分类",
@@ -56,41 +52,10 @@ const staticPlaybackObservations = [
 ];
 
 const fixtureReferenceTypes = {
-  beam: { label:"260W 光束摇头灯", count:54, Icon:LightbulbFilament },
-  wash: { label:"摇头染色灯", count:59, Icon:Sun },
-  strobe: { label:"LED 屏闪灯", count:28, Icon:Pulse },
-  eye: { label:"两眼灯 200W", count:29, Icon:DotsNine },
-  matrix: { label:"50×50 矩阵灯", count:4, Icon:SquaresFour },
-  laser: { label:"5W 全彩激光", count:4, Icon:Sparkle },
+  beam: { label:"现场光束灯", count:25, Icon:LightbulbFilament },
 };
 
-const railPoints = (zone, x, ys, offset = 0) => ys.map((y, index) => ({
-  id:`${zone}-${x}-${y}`,
-  zone,
-  x,
-  y,
-  type:["beam", "wash", "eye", "strobe"][(index + offset) % 4],
-}));
-
-const fixtureReferencePoints = [
-  ...railPoints("舞池西侧", 25, [15,20,25,30,35,40], 0),
-  ...railPoints("舞池中西", 39, [11,16,21,26,31,36,41], 1),
-  ...railPoints("舞池中轴", 54, [11,16,21,26,31,36,41,46,51,56], 2),
-  ...railPoints("舞池东侧", 68, [16,21,26,31,36,41,46,51,56], 3),
-  ...railPoints("东侧卡座", 82, [28,34,40,46,52,58], 0),
-  ...railPoints("VIP 西侧", 25, [66,72,78,84,90], 1),
-  ...railPoints("VIP 中西", 39, [65,71,77,83,89], 2),
-  ...railPoints("VIP 中轴", 54, [65,71,77,83,89], 3),
-  ...railPoints("VIP 东侧", 68, [72,78,84,90], 0),
-  { id:"matrix-nw", zone:"舞池北侧", x:33, y:8, type:"matrix" },
-  { id:"matrix-ne", zone:"舞池北侧", x:69, y:8, type:"matrix" },
-  { id:"matrix-nw-2", zone:"舞池北侧", x:33, y:13, type:"matrix" },
-  { id:"matrix-ne-2", zone:"舞池北侧", x:69, y:13, type:"matrix" },
-  { id:"laser-nw", zone:"舞池北侧", x:39, y:6, type:"laser" },
-  { id:"laser-ne", zone:"舞池北侧", x:63, y:6, type:"laser" },
-  { id:"laser-cross-west", zone:"舞池横梁", x:47, y:34, type:"laser" },
-  { id:"laser-cross-east", zone:"舞池横梁", x:61, y:34, type:"laser" },
-];
+const fixtureReferencePoints = venueBeamPoints;
 
 export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
   titanHost,
@@ -226,23 +191,23 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
     </section>
 
     <section className="titan-stage-simulator" style={{ "--titan-preview-color": previewColor }}>
-      <header><span><b>A区 · 酒吧平面与灯位</b><small>SVG 建筑轮廓 · 灯位来自 P-11 参考图</small></span><em>{previewPlayback ? `${previewEffect.kingName || previewPlayback.legend || `Playback ${previewPlayback.titanId}`} · ${layerLabels[previewEffect.layer || ""]}` : "等待效果配置"}</em></header>
+      <header><span><b>A区 · 酒吧平面与灯位</b><small>现场光束位置图 · A1–A25 指挥编号</small></span><em>{previewPlayback ? `${previewEffect.kingName || previewPlayback.legend || `Playback ${previewPlayback.titanId}`} · ${layerLabels[previewEffect.layer || ""]}` : "等待效果配置"}</em></header>
       <div className={`titan-venue-plan ${inventoryReady ? "inventory-ready" : "inventory-blocked"}`}>
         <div className="titan-plan-canvas">
           <img src="/assets/king-club-floor-outline.svg" alt="KING CLUB 一楼 SVG 平面轮廓"/>
-          <div className="titan-floor-points" aria-label="P-11 参考灯位">
+          <div className="titan-floor-points" aria-label="现场光束灯 A1 到 A25 位置">
             {fixtureReferencePoints.map((point) => {
               const type = fixtureReferenceTypes[point.type];
               const FixtureIcon = type.Icon;
               return <button
                 type="button"
                 key={point.id}
-                className={`titan-floor-point type-${point.type} ${selectedFloorPoint === point.id ? "selected" : ""}`}
+                className={`titan-floor-point type-${point.type} status-${point.status} ${selectedFloorPoint === point.id ? "selected" : ""}`}
                 style={{ left:`${point.x}%`, top:`${point.y}%` }}
-                aria-label={`${point.zone} · ${type.label}`}
-                title={`${point.zone} · ${type.label} · 参考坐标，待 Titan Patch 绑定`}
+                aria-label={`${point.label} · ${point.zone} · ${type.label}`}
+                title={`${point.label} · ${point.zone} · TitanId 待逐台定位绑定`}
                 onClick={() => setSelectedFloorPoint(point.id)}
-              ><FixtureIcon weight="fill"/></button>;
+              ><span>{point.label}</span><FixtureIcon weight="fill"/></button>;
             })}
           </div>
           <div className="titan-plan-zone-labels" aria-hidden="true"><span className="dance">主舞池</span><span className="booth">DJ / 设备区</span><span className="vip">VIP 卡座</span><span className="entry">主入口</span></div>
@@ -252,7 +217,7 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
             <small>{inventoryReady ? `${titanInventory.fixtureCount} 个 Fixture / ${titanInventory.groupCount} 个 Group 已可用于坐标绑定。` : `图中位置只依据设计图，不写入 Titan；缓存 Show：${titanInventory?.cachedShowName || "--"}。`}</small>
           </div>
         </div>
-        <div className="titan-plan-selection"><MapPin weight="fill"/><span><b>{selectedReferencePoint.zone}</b><small>{selectedReferenceType.label} · 设计数量 {selectedReferenceType.count} · 当前为参考位置</small></span></div>
+        <div className="titan-plan-selection"><MapPin weight="fill"/><span><b>{selectedReferencePoint.label} · {selectedReferencePoint.zone}</b><small>{selectedReferenceType.label} · 现场指挥编号 · TitanId 待逐台定位绑定</small></span></div>
         <div className="titan-floor-legend">{Object.entries(fixtureReferenceTypes).map(([id, type]) => { const LegendIcon = type.Icon; return <span key={id} className={`type-${id}`}><LegendIcon weight="fill"/><b>{type.label}</b><small>{type.count}</small></span>; })}</div>
         <div className="titan-stage-scale"><span>平面图 A区</span><small>真机地址以 Titan Fixture Patch 为唯一依据</small></div>
       </div>
