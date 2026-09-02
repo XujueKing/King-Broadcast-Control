@@ -23,24 +23,44 @@ test("BPM tracking preserves the accepted 128 BPM speed and clamps extremes", ()
   assert.equal(gatlingSpeedForBpm(180), 0.47);
 });
 
-test("ordinary beats stay dark but produce a visible pulse", () => {
-  const pulse = gatlingPulseForRhythm({ type:"beat", bpm:128 });
+test("ordinary beats form a dark half-rate star field instead of a short flash", () => {
+  const pulse = gatlingPulseForRhythm({ type:"beat", beatIndex:2, bpm:128 });
 
+  assert.equal(pulse.look, "stars");
+  assert.equal(pulse.skip, false);
   assert.equal(pulse.baseDimmerPercent, kingclubGatlingProfile.baseDimmerPercent);
-  assert.equal(pulse.peakDimmerPercent, 13.5);
-  assert.equal(pulse.releaseAfterMs, 211);
+  assert.equal(pulse.peakDimmerPercent, 10.8);
+  assert.equal(pulse.speedValue, 0.261);
   assert.ok(pulse.peakDimmerPercent > pulse.baseDimmerPercent);
 });
 
-test("strong beats use the venue's 15 percent safety ceiling", () => {
-  const pulse = gatlingPulseForRhythm({ type:"bar", isBar:true, bpm:156 });
+test("odd ordinary beats hold the current look to protect Titan command latency", () => {
+  const pulse = gatlingPulseForRhythm({ type:"beat", beatIndex:3, bpm:128 });
 
-  assert.equal(pulse.peakDimmerPercent, 15);
-  assert.equal(pulse.releaseAfterMs, 173);
-  assert.ok(pulse.speedValue <= 0.47);
+  assert.equal(pulse.look, "hold");
+  assert.equal(pulse.skip, true);
 });
 
-test("release duration remains bounded for unusual tempo metadata", () => {
-  assert.equal(gatlingPulseForRhythm({ type:"beat", bpm:300 }).releaseAfterMs, 140);
-  assert.equal(gatlingPulseForRhythm({ type:"beat", bpm:30 }).releaseAfterMs, 220);
+test("alternating bars create light-speed and meteor looks", () => {
+  const lightSpeed = gatlingPulseForRhythm({ type:"bar", isBar:true, beatIndex:8, bpm:156 });
+  const meteor = gatlingPulseForRhythm({ type:"bar", isBar:true, beatIndex:12, bpm:156 });
+
+  assert.equal(lightSpeed.look, "light-speed");
+  assert.equal(lightSpeed.peakDimmerPercent, 15);
+  assert.equal(lightSpeed.speedValue, 0.47);
+  assert.equal(meteor.look, "meteor");
+  assert.equal(meteor.peakDimmerPercent, 13.2);
+  assert.ok(meteor.speedValue < lightSpeed.speedValue);
+});
+
+test("all rhythmic looks remain inside the现场-confirmed safety envelope", () => {
+  for (const event of [
+    {type:"beat",beatIndex:2,bpm:30},
+    {type:"bar",isBar:true,beatIndex:8,bpm:300},
+    {type:"bar",isBar:true,beatIndex:12,bpm:70},
+  ]) {
+    const look=gatlingPulseForRhythm(event);
+    assert.ok(look.peakDimmerPercent >= 5 && look.peakDimmerPercent <= 15);
+    assert.ok(look.speedValue >= 0.22 && look.speedValue <= 0.47);
+  }
 });

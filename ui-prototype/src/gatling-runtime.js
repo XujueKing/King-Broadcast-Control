@@ -45,22 +45,49 @@ export const gatlingPulseForRhythm = (
   profile = kingclubGatlingProfile,
 ) => {
   const bpm = Number(event?.bpm);
-  const beatMs = Number.isFinite(bpm) && bpm > 0 ? 60_000 / bpm : 500;
-  const strong = Boolean(
-    event?.isBar ||
-    event?.isDownbeat ||
-    event?.type === "bar" ||
-    event?.type === "downbeat",
-  );
+  const beatIndex = Math.max(0, Math.floor(Number(event?.beatIndex) || 0));
+  const isBar = Boolean(event?.isBar || event?.type === "bar");
+  const baseSpeed = gatlingSpeedForBpm(bpm, profile);
+
+  // Do not use the ceiling fixture as a one-shot strobe.  The fixture's own
+  // animation keeps moving between updates; KING changes its speed/energy on
+  // the musical grid to form longer looks.  Ordinary beats are deliberately
+  // reduced to half-rate commands so Titan's programmer queue remains ahead
+  // of the music and video-colour commands are not starved.
+  if (!isBar && beatIndex % 2 === 1) {
+    return {
+      skip:true,
+      look:"hold",
+      baseDimmerPercent:profile.baseDimmerPercent,
+      peakDimmerPercent:profile.baseDimmerPercent,
+      speedValue:baseSpeed,
+    };
+  }
+
+  if (isBar) {
+    const alternateBar = Math.floor(beatIndex / 4) % 2 === 1;
+    return alternateBar
+      ? {
+          skip:false,
+          look:"meteor",
+          baseDimmerPercent:profile.baseDimmerPercent,
+          peakDimmerPercent:13.2,
+          speedValue:Number(clamp(baseSpeed + 0.035, 0.22, 0.47).toFixed(3)),
+        }
+      : {
+          skip:false,
+          look:"light-speed",
+          baseDimmerPercent:profile.baseDimmerPercent,
+          peakDimmerPercent:15,
+          speedValue:Number(clamp(baseSpeed + 0.09, 0.22, 0.47).toFixed(3)),
+        };
+  }
+
   return {
-    // A live Titan update takes roughly one tenth of a second on the venue
-    // console.  The previous 1.5%-2.5% pulse often returned to the 10% base
-    // level before the ceiling wash was perceptible.  Keep the ambience dark
-    // and within the backend's 15% safety ceiling, but give each beat enough
-    // contrast and dwell time to remain visible in the room.
-    peakDimmerPercent: strong ? 15 : 13.5,
-    baseDimmerPercent: profile.baseDimmerPercent,
-    releaseAfterMs: Math.round(clamp(beatMs * 0.45, 140, 220)),
-    speedValue: gatlingSpeedForBpm(bpm, profile),
+    skip:false,
+    look:"stars",
+    baseDimmerPercent:profile.baseDimmerPercent,
+    peakDimmerPercent:beatIndex % 4 === 0 ? 11.6 : 10.8,
+    speedValue:Number(clamp(baseSpeed - 0.1, 0.22, 0.47).toFixed(3)),
   };
 };

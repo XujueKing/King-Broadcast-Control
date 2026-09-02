@@ -2053,7 +2053,6 @@ export function App() {
   const titanActiveHandleRef=useRef({scene:null,accent:null});
   const titanSimulationRef=useRef(titanSimulation);
   const titanCommandQueueRef=useRef(Promise.resolve());
-  const gatlingPulseTimerRef=useRef(null);
   const gatlingBaselineKeyRef=useRef("");
   const titanAutomationRef=useRef(createLightingAutomationState());
   const titanDiscoveryRef=useRef({busy:false,lastAttempt:0});
@@ -2530,10 +2529,6 @@ export function App() {
   },[desktopRuntime,light,lightingEnabled,titanStatus.connected,titanStatus.host,titanStatus.showName,updateGatling]);
   useEffect(()=>{
     if(lightingEnabled)return;
-    if(gatlingPulseTimerRef.current){
-      window.clearTimeout(gatlingPulseTimerRef.current);
-      gatlingPulseTimerRef.current=null;
-    }
     const clearedSimulation=clearTitanSimulator(titanSimulationRef.current);
     titanSimulationRef.current=clearedSimulation;
     setTitanSimulation(clearedSimulation);
@@ -4121,27 +4116,25 @@ export function App() {
 
       if (lightingEnabled && light === null && rhythmEventMatchesRule(lightRhythmRule, rhythmEvent)) {
         const pulse=gatlingPulseForRhythm(rhythmEvent);
-        if(gatlingPulseTimerRef.current)window.clearTimeout(gatlingPulseTimerRef.current);
-        updateGatling({
-          dimmerPercent:pulse.peakDimmerPercent,
-          speedValue:pulse.speedValue,
-          source:"rhythm",
-        }).then((triggered)=>{
-          if(!triggered)return;
-          setAutoLightPreset(0);
-          gatlingPulseTimerRef.current=window.setTimeout(()=>{
-            gatlingPulseTimerRef.current=null;
-            updateGatling({dimmerPercent:pulse.baseDimmerPercent,source:"rhythm-release"});
-          },pulse.releaseAfterMs);
-          window.dispatchEvent(new CustomEvent("king:lighting-cue", { detail:{
-            presetId:0,
-            source:"rhythm",
-            rule:lightRhythmRule,
-            rhythm:rhythmEvent,
+        if(!pulse.skip){
+          updateGatling({
+            dimmerPercent:pulse.peakDimmerPercent,
             speedValue:pulse.speedValue,
-            peakDimmerPercent:pulse.peakDimmerPercent,
-          } }));
-        });
+            source:"rhythm",
+          }).then((triggered)=>{
+            if(!triggered)return;
+            setAutoLightPreset(0);
+            window.dispatchEvent(new CustomEvent("king:lighting-cue", { detail:{
+              presetId:0,
+              source:"rhythm",
+              rule:lightRhythmRule,
+              rhythm:rhythmEvent,
+              look:pulse.look,
+              speedValue:pulse.speedValue,
+              peakDimmerPercent:pulse.peakDimmerPercent,
+            } }));
+          });
+        }
       }
 
       if (rhythmEventMatchesRule(videoRhythmRule, rhythmEvent) && availableVideos.length) {
@@ -4186,7 +4179,7 @@ export function App() {
         console.warn("视频主色取样不可用",error);
       }
     };
-    const timer=window.setInterval(sample,1500);
+    const timer=window.setInterval(sample,400);
     sample();
     return()=>window.clearInterval(timer);
   },[light,lightingEnabled,outputBaseMedia]);
@@ -4197,7 +4190,8 @@ export function App() {
       if(tracker.family===event.detail.family)tracker={...tracker,stableSamples:tracker.stableSamples+1};
       else tracker={family:event.detail.family,stableSamples:1,lastAppliedFamily:tracker.lastAppliedFamily};
       videoColorAutomationRef.current=tracker;
-      if(tracker.stableSamples<2||tracker.lastAppliedFamily===event.detail.family)return;
+      const stableSamplesRequired=tracker.lastAppliedFamily===null?1:2;
+      if(tracker.stableSamples<stableSamplesRequired||tracker.lastAppliedFamily===event.detail.family)return;
       videoColorAutomationRef.current={...tracker,lastAppliedFamily:event.detail.family};
       const paletteTitanId=gatlingPaletteForVideoFamily(event.detail.family);
       updateGatling({
