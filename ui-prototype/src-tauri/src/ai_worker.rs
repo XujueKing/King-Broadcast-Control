@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     net::{SocketAddr, TcpStream},
@@ -72,7 +72,6 @@ fn assign_to_worker_job(job_handle: Option<isize>, child: &Child) -> bool {
     unsafe { AssignProcessToJobObject(job_handle as _, child.as_raw_handle() as _) != 0 }
 }
 
-#[derive(Default)]
 struct WorkerProcess {
     child: Option<Child>,
     moss_child: Option<Child>,
@@ -84,6 +83,27 @@ struct WorkerProcess {
     message: String,
     playing_jobs: usize,
     deck_jobs: usize,
+    runtime_enabled: bool,
+    runtime_preference_loaded: bool,
+}
+
+impl Default for WorkerProcess {
+    fn default() -> Self {
+        Self {
+            child: None,
+            moss_child: None,
+            #[cfg(windows)]
+            job_handle: None,
+            moss_started_by_app: false,
+            python_path: None,
+            worker_path: None,
+            message: String::new(),
+            playing_jobs: 0,
+            deck_jobs: 0,
+            runtime_enabled: true,
+            runtime_preference_loaded: false,
+        }
+    }
 }
 
 impl Drop for WorkerProcess {
@@ -112,6 +132,7 @@ pub struct AiWorkerManager(Mutex<WorkerProcess>);
 #[serde(rename_all = "camelCase")]
 pub struct AiWorkerStatus {
     pub available: bool,
+    pub enabled: bool,
     pub running: bool,
     pub process_id: Option<u32>,
     pub python_path: Option<String>,
@@ -120,6 +141,60 @@ pub struct AiWorkerStatus {
     pub moss_process_id: Option<u32>,
     pub scheduler_tier: String,
     pub message: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiRuntimeSettings {
+    enabled: bool,
+}
+
+fn runtime_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("runtime")
+        .join("ai-production.json"))
+}
+
+fn load_runtime_preference(app: &AppHandle, state: &mut WorkerProcess) -> Result<(), String> {
+    if state.runtime_preference_loaded {
+        return Ok(());
+    }
+    let path = runtime_settings_path(app)?;
+    state.runtime_enabled = if path.is_file() {
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        serde_json::from_slice::<AiRuntimeSettings>(&bytes)
+            .map_err(|error| format!("AI 制作开关配置损坏：{error}"))?
+            .enabled
+    } else {
+        true
+    };
+    state.runtime_preference_loaded = true;
+    Ok(())
+}
+
+fn save_runtime_preference(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let path = runtime_settings_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(&AiRuntimeSettings { enabled })
+        .map_err(|error| error.to_string())?;
+    fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn stop_locked(state: &mut WorkerProcess) {
+    if let Some(mut child) = state.child.take() {
+        terminate_process_tree(&mut child);
+        let _ = child.wait();
+    }
+    if let Some(mut child) = state.moss_child.take() {
+        terminate_process_tree(&mut child);
+        let _ = child.wait();
+    }
+    state.moss_started_by_app = false;
 }
 
 fn scheduler_tier(state: &WorkerProcess) -> &'static str {
@@ -191,6 +266,12 @@ pub fn start(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatu
         .0
         .lock()
         .map_err(|_| "无法锁定 AI worker 状态".to_string())?;
+    load_runtime_preference(app, &mut state)?;
+    if !state.runtime_enabled {
+        stop_locked(&mut state);
+        state.message = "开业模式：AI 歌曲制作已关闭，MOSS 与 Worker 均未运行".to_string();
+        return status_locked(&mut state);
+    }
     #[cfg(windows)]
     if state.job_handle.is_none() {
         state.job_handle = create_worker_job();
@@ -276,8 +357,35 @@ pub fn set_scheduler_context(
         .map_err(|_| "无法锁定 AI worker 状态".to_string())?;
     state.playing_jobs = playing_jobs;
     state.deck_jobs = deck_jobs;
-    state.message = scheduler_message(&state);
+    state.message = if state.runtime_enabled {
+        scheduler_message(&state)
+    } else {
+        "开业模式：AI 歌曲制作已关闭，MOSS 与 Worker 均未运行".to_string()
+    };
     Ok(())
+}
+
+pub fn set_runtime_enabled(
+    app: &AppHandle,
+    manager: &AiWorkerManager,
+    enabled: bool,
+) -> Result<AiWorkerStatus, String> {
+    {
+        let mut state = manager
+            .0
+            .lock()
+            .map_err(|_| "无法锁定 AI worker 状态".to_string())?;
+        load_runtime_preference(app, &mut state)?;
+        save_runtime_preference(app, enabled)?;
+        state.runtime_enabled = enabled;
+        state.runtime_preference_loaded = true;
+        if !enabled {
+            stop_locked(&mut state);
+            state.message = "开业模式：AI 歌曲制作已关闭，MOSS 与 Worker 均未运行".to_string();
+            return status_locked(&mut state);
+        }
+    }
+    start(app, manager)
 }
 
 fn status_locked(state: &mut WorkerProcess) -> Result<AiWorkerStatus, String> {
@@ -309,6 +417,7 @@ fn status_locked(state: &mut WorkerProcess) -> Result<AiWorkerStatus, String> {
                 .worker_path
                 .as_ref()
                 .is_some_and(|path| path.is_file()),
+        enabled: state.runtime_enabled,
         running,
         process_id: state.child.as_ref().map(Child::id),
         python_path: state
@@ -326,11 +435,12 @@ fn status_locked(state: &mut WorkerProcess) -> Result<AiWorkerStatus, String> {
     })
 }
 
-pub fn status(manager: &AiWorkerManager) -> Result<AiWorkerStatus, String> {
+pub fn status(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatus, String> {
     let mut state = manager
         .0
         .lock()
         .map_err(|_| "无法锁定 AI worker 状态".to_string())?;
+    load_runtime_preference(app, &mut state)?;
     if state.python_path.is_none() || state.worker_path.is_none() {
         if let Some((python, worker)) = discover_runtime() {
             state.python_path = Some(python);

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   createLightingPackage,
   KINGLIGHT_FORMAT,
@@ -61,4 +62,16 @@ test("package retains registry effects beyond the 0-9 shortcut slots", () => {
   const registryEffect = result.effects.find((effect) => effect.effectId === "titan:9001");
   assert.equal(registryEffect.presetId, null);
   assert.equal(registryEffect.safeAuto, false);
+});
+
+test("venue dark-red gatling preset remains manual-only and restart-stable", () => {
+  const path = new URL("../config/lighting/KING-2024.12.28-dark-red-gatling.kinglight", import.meta.url);
+  const normalized = normalizeLightingPackage(JSON.parse(fs.readFileSync(path, "utf8")));
+  const effect = normalized.effects[0];
+  assert.equal(normalized.console.showName, "2024.12.28");
+  assert.equal(normalized.mappings[0], 71835);
+  assert.equal(normalized.presentation.playbackModes[0], "loop");
+  assert.equal(effect.kingName, "暗红加特林·常规");
+  assert.equal(effect.safeAuto, false);
+  assert.equal(normalized.safety.executeOnImport, false);
 });

@@ -42,7 +42,7 @@ C2 每个 Deck 的底部控制为两行、每行 5 个等分按钮。第一行�
 
 C2 的 CUE 固定移动到圆形播放/暂停键左侧，使用与播放键相同尺寸和样式的圆形键帽，并留出清晰间距。原矩形 CUE 槽始终显示“补音”按钮：非伴唱模式可见但禁用；每次进入伴唱默认开启，允许操作员独立关闭；Deck 1/2 状态互不影响。补音按钮是明确的有声操作：歌手参考已绑定时必须启动与 Deck 同步的本地 mpv 参考层；CUE 开启时随整个 Deck 去耳机，CUE 关闭时随整个 Deck 去主输出。该操作不得自动武装 Qu-16 实时输入/返回 Vocal Engine 链路。
 
-CUE 是整个 Deck 最终声音的监听路由，不区分原唱、伴奏、修音或补音。开启 CUE 时把该 Deck 的完整声音从主扩隔离并送往耳机；关闭时撤销 PAFL 并恢复开启前捕获的主扩推子值。缺少开启前真实推子回读时必须拒绝切换，禁止把 ST3 永久留在 `-∞` 或猜测恢复值。
+CUE 是整个 Deck 最终声音的监听路由，不区分原唱、伴奏、修音或补音。开启 CUE 时只撤销 ST3 到 LR 的 Assign 并打开 ST3 PAFL，把完整 Deck 从主扩隔离后送往耳机；关闭时先撤销 PAFL，再恢复开启前捕获的 LR Assign 真值。CUE 永远不得写 ST3 或 LR 主推子。缺少开启前真实 Assign 回读时必须拒绝切换，禁止猜测恢复值。
 
 “补音”采用完全自适应规则：关闭时参考女声为零；打开后，在歌曲参考时间轴的演唱区若没有检测到真人声，自动补入完整目标比例的女声参考；一旦检测到真人演唱，立即使用实时评分连续控制参考混合量，唱得越准补得越少、失准越严重补得越多。间奏保持关闭。CUE 不得改变这套内容逻辑，只改变完整 Deck 声音的监听去向。
 
@@ -56,6 +56,10 @@ Runtime editions are hardware-capability based, not separate source branches. At
 
 `.kingsong` is the portable single-song delivery format. It is a versioned `KSG1` binary container carrying the original mix, accompaniment, LRC, native timestamp JSON, model provenance and BLAKE3 integrity records. High-end machines produce and export it; low-end machines verify and unpack it into their local library. Deck playback always reads unpacked local media, never a live package stream.
 
+KGM/KGMA/VPR 必须由独立 `audio_importer` 在曲库扫描阶段识别和本地解码，默认保留用户原文件，将产物统一写入 `media/audio/.king-imported/<源相对目录>/`，音频使用可读的原歌曲名，不得再创建不可读的版本哈希歌曲目录。成功导入后即使用户手工删除源 KGMA，已转换音频和歌词也必须保留；程序不得自动删除用户源文件。KRC/LRC 可晚于歌曲放入，扫描时必须按完全同名或酷狗哈希尾缀自动配对，并在统一产物目录生成与音频完全同名的 UTF-8 LRC。不得把解码逻辑写进 MPV。产物扩展名必须按文件头重新判断，禁止信任解码器的默认 `.mp3`。解码器固定版本和 SHA-256，安装包离线携带；每次曲库扫描不得联网。
+
+KGMA 解码产物不是永久“仅播放”特例：全功能 NVIDIA 机器必须像普通歌曲一样自动进入人声/伴奏制作队列；无 NVIDIA 播放机不得运行 AI，但必须按音频内容指纹复用高性能机器已完成的 vocals/no_vocals，不能因解码产物移动目录而丢失原唱/伴唱绑定。
+
 When LRC data only provides sentence start timestamps, the current lyric must never remain visible indefinitely until the next timestamp. Estimate a natural singing duration from the text: continuous lyrics may remain until the next timestamp, but when the next line is separated by a clear instrumental gap, move the completed line upward, shrink it, and fade it out on the existing 720 ms lyric timeline. Keep the lyric area empty during the gap and introduce the next line only at its own timestamp. The final lyric must expire by the same rule.
 
 Newly produced v6 song assets must also contain a compact 48 kHz/128-frame `reference.json` tied to the source song fingerprint and separator profile. New `.kingsong` exports carry it as `analysis/reference.json`; the field remains optional only so legacy KSG1 packages stay importable. Playback-only machines validate and unpack this file but never regenerate it.
@@ -67,6 +71,8 @@ Newly produced v6 song assets must also contain a compact 48 kHz/128-frame `refe
 顶部品牌标题固定为“AI Broadcast Control 2027”。NVIDIA 全功能版状态使用 NVIDIA 官方完整横版标志，不使用闪电图标或手写 NVIDIA 文字；状态区域保持透明底色。
 
 全功能版 AI 制作采用非破坏性三级调度：正在播放歌曲为 0 级、已装入 Deck 的待播歌曲为 1 级、其余曲库为 2 级。播放开始不得杀死 Worker/MOSS 或暂停整队；Worker 始终保持 Windows Idle 优先级、并发 1，当前任务完成后再按级别领取下一首。
+
+开业播放期间必须允许操作员在“设置”中手动关闭整个 AI 歌曲制作后台。该开关持久化到桌面应用数据；关闭时立即停止并保持停止 MOSS 8B、分轨/歌词 Worker，释放 GPU/显存，但不得影响 mpv、Deck、Qu-16、歌单、已制作伴唱/歌词或 Vocal Engine 播放能力。重启后继续保持关闭，只有操作员明确重新开启才恢复制作。
 
 Windows 主控窗口默认使用无边框真全屏并覆盖任务栏。C2 Crossfader 下方固定放置一行四等分调音推子：总声音、耳机音量、麦克风 1、麦克风 2；该行与 Crossfader 行等高，不显示通道文字或新增麦克风按钮，每格只显示通道图标、图标旁数值、等距小刻度和统一横向推子。麦克风 1 使用紫色，作为专业麦克风组一次批量控制 Qu-16 联动的 CH1+CH2；麦克风 2 使用暖橙色，独立控制现场确认的 GS VS-88 / CH6。图标、数值和推子进度同步区分。两个麦克风推子只有在 Qu-16 完成 End Sync 且取得对应 Fader 真值后才允许操作；写入后以真机回读为准，CH1/CH2 回读不一致时不得伪装为已经同步。总声音实际乘入两个 Deck 的输出增益；麦克风控制只改变 Qu-16 Fader，不自动打开 Mute、LR、PAFL、48V 或 Vocal Engine 输入/返回，避免现场啸叫。
 
@@ -158,6 +164,28 @@ Deck 顶部横向音量条必须显示随真实声音包络律动的输出电平
 
 首页工作区始终保留 L/C/R/调音台四个显式 Grid 列；单屏与双屏预览状态下第 4 列必须明确为零宽，禁止只声明前三列而让隐藏的调音台工作区生成隐式 `auto` 列、挤压 R 区并在最右侧留下空白。进入调音台模式时才允许第 4 列展开。
 
+音乐管理页必须直接复用首页 `UI-R02 / L` 的同一个真实业务组件及其 Grid 第一列宽度、纵向起点和曲库面板骨架；不是复制或替换成管理版侧栏。点击“音乐管理”后，L 区仍负责真实的 1/2 号 Deck 目标、已发布歌单选择、搜索和装载；从 L 区选取歌单类型时，右侧编辑区同步切换到该歌单。L 区不得被全宽标题下压、不得改成固定像素侧栏，也不得改成纵向歌单管理器。音乐管理标题、功能页签和编辑工作区只占用 L 区右侧的 C+R 区域。
+
+音乐管理的出场和页签切换动画只允许作用于 L 区右侧的 C+R 管理工作区；首页真实 L 区不得参与位移、淡入或闪烁。动画必须短促克制，并在系统启用 `prefers-reduced-motion` 时关闭位移和淡入。
+
+音乐管理右侧不得重复 L 区已有的分类/歌单选择器。右侧前两项固定为“全部歌单”和“分类管理”：“全部歌单”展示完整曲库，并按 `media/audio` 下的真实相对文件夹提供目录分类筛选；歌曲只能明确加入 L 区当前选中的分类，不得自动播放或自动切换分类。“分类管理”必须提供明确的1号/2号曲库管理范围切换，两套数据互不覆盖；星期分类名称固定，节日活动与自定义分类均支持新增、改名、删除和同类型内上下排序。L 区分类按钮右键必须提供上移/下移，并与分类管理共用同一份持久化顺序。
+
+音乐管理状态下，L 区歌曲的排序与移除统一放入歌曲行右键菜单，不得在左键选中后向窄行内继续堆叠按钮。菜单固定提供上移、下移和“从当前列表移除”；边界项禁用无效方向。菜单必须通过窗口根层 Portal 使用真实视口坐标定位，禁止留在带 transform/will-change 的 L 区内部造成鼠标位置偏移。移除只修改当前曲库当前分类的歌曲归属，绝不删除原始音频文件。若移除项正在播放，必须在修改列表前锁定同一分类中的顺位下一首，使用另一 Deck 立即执行约 2.5 秒等功率交叉淡化，完成后暂停被移除歌曲所在 Deck；列表无下一首时只淡出并停止。另一 Deck 已由操作员播放时不得覆盖其歌曲，改为向该 Deck 淡化让位。
+
+L 区歌曲序号表示当前可见列表的顺序，不是歌曲在完整曲库中的全局索引。当前分类和搜索结果都必须从 1 连续编号；右键上移、下移或移除后，序号立即按新的可见顺序重新计算。
+
+Deck 的自动顺播、随机播放以及手动上一首/下一首必须锁定到该 Deck 装载歌曲时的来源分类（曲库号 + 分类 ID），不能读取之后正在浏览的 L 区分类。操作员播放 1号曲库/周一的歌曲后，即使切到周二或2号曲库查看，曲终仍只能进入原周一列表的下一首；只有从另一分类明确装载歌曲，才更新对应 Deck 的来源。搜索只过滤可见行，不改变播放队列；音乐管理右侧“全部歌曲”只允许单曲备歌，禁止成为自动连播队列。来源分类不存在或没有可用下一首时必须停止，绝不回退到完整曲库。
+
+桌面软件冷启动或刷新时两个 Deck 必须按本机当天星期分别备歌：Deck 1 严格读取1号曲库同名星期分类排序第1首，Deck 2 严格读取2号曲库同名星期分类排序第1首，并立即保存各自的来源分类。两个 Deck 必须独立初始化；任一曲库为空、未完成初始化或首个文件仍在媒体扫描中，都不得阻塞另一 Deck。若首行文件尚未进入稳定媒体索引，必须等待后续扫描重试，禁止跳过首行改装第二首。启动和后续媒体扫描均不得再以完整曲库索引 0/1 补位；某一曲库当天分类为空、来源缺失或首行文件不可用时，对应 Deck 保持空且暂停，不得借用另一曲库或完整曲库歌曲。
+
+桌面 mpv 的顺序/随机播放使用双 Deck 自动衔接，禁止等曲终后才在同一 Deck 重新加载造成静音断口。当前歌曲剩余约15秒时把同一来源分类的下一首以暂停、零增益预载到另一 Deck，最后约6秒启动下一首并执行等功率交叉淡化，完成后暂停上一 Deck；顺序播放的分类清单必须形成闭环，末首按相同预载与交叉淡化规则回到首首，不能在末首停播。单曲循环不参与。自动衔接不得改变来源分类、不得进入完整曲库、不得自动变速或变调。只有目标 Deck 未播放且该目标 Deck 未开启 CUE 时，自动系统才可占用它；另一台 Deck 的 CUE 不得错误阻塞目标 Deck。目标 Deck 被手动送主扩后，两台 Deck 转为互不接管的独立播放，原 Deck 曲终仍按自身来源清单在自身继续，不得被自动停止；目标 Deck 正在播放或开启 CUE 时，原 Deck 使用同 Deck 续播兜底。目标 Deck 停止且无 CUE 后，在原 Deck 下一次临近曲终时自动恢复为可接管状态，不要求额外点击交还。手动换歌、上一首、下一首、播放、CUE、播放模式或 Crossfader 操作必须立即取消正在执行的自动衔接；自动交叉淡化中更换目标 Deck 时先在约400ms内平滑恢复原 Deck，再执行人工操作。人工运行状态必须在 Deck 上可见，并明确提示空闲后自动恢复。
+
+应用每次冷启动时，L 区当前分类默认取本机日期对应的周一至周日；启动后仍允许操作员手动选择任意星期、节日或自定义分类，手动选择不得被定时器自动改回。1号曲库与2号曲库切换栏底部必须始终保留贯穿两栏的中性结构分割线，选中曲库可在该线上叠加通道强调色，但不得让未选中一侧看起来缺线。
+
+1号曲库与2号曲库是两套相互独立的完整分类体系，不是同一套分类的两个装载目标。两边分别保存星期、节日、自定义分类、同组排序、歌曲归属、每日计划以及歌曲视频/灯光编辑；切换曲库时恢复该曲库在本次运行中最后手动选择的分类。旧版单曲库持久化数据只迁移进1号曲库，2号曲库初始化为空分类体系，禁止复制或覆盖1号曲库现有歌单数据。
+
+KING Broadcast Control 只作为 Tauri 桌面软件交付和演示，禁止把独立浏览器页面、本地 HTTP 地址或 Sites 部署当成用户可用版本。Vite 浏览器页面仅允许作为内部自动化验收面，验收完成必须关闭，不得主动给用户打开或发送网页预览链接；用户验收应回到 `king-broadcast-control.exe` 桌面窗口。Tauri 内部 WebView 与打包前端资源属于桌面实现细节，不得表述为网页版。
+
 Deck 电平条以 Crossfader 显示百分比作为当前满刻度：Deck 1 上限为 `100-crossfade`，Deck 2 上限为 `crossfade`；歌曲包络必须先独立换算为 0–100，再乘该上限，禁止先把推子当线性增益乘入音频后再做 dB 显示换算。按住 Crossfader 时停止包络动画，两个电平条必须精确停在各自百分比并随推子同步移动；松开后在各自上限内恢复律动。
 
 双屏预览模式的 L/R 侧栏必须各自保留至少 302 CSS px，并在宽屏按约 18vw 扩展、最高 340px；C 区只能使用扣除两侧后的剩余宽度。L 区不得窄于曲库工具栏和“歌曲/歌手/BPM/时长”表格的固有内容宽度，也不得以父级 `overflow:hidden` 裁掉溢出的按钮、时长或 Deck 标识来掩盖列宽错误。
@@ -179,3 +207,7 @@ Qu-16 表计、播放器进度及其他高频运行数据禁止写入最外层 `
 歌手包采样默认使用耳麦录音输入。音乐管理页必须优先选择真实的耳麦/Realtek 麦克风端点，降低阵列麦克风优先级并排除 Nahimic/VAD 等虚拟输入；操作员选择的录音设备必须持久化，重启后继续使用，除非该设备已经不存在。录制时直接按设备名称打开输入，不能只依赖 Windows 当前默认麦克风。
 
 R1 视频素材卡片的鼠标悬停和键盘聚焦只允许显示普通交互高亮，禁止自动切换 PVW、启动播放或打开新的解码实例；只有明确点击素材才可预选到 PVW。视频卡片禁止直接嵌入 `<video>` 作为缩略图，必须在首次进入可视区域时由后台串行生成低分辨率 JPG 文件并保存到应用数据目录的 `media/cache/video-thumbnails`；源视频未修改时，后续滚动、切页和重启只读取该持久化图片，禁止重新读取原视频或集中解码。
+
+底部“视频管理”和“灯光管理”合并为统一的“演出编排”，音乐管理只保留歌曲项目入口和旧版单关联兼容；Avolites Tiger Touch Pro 仍作为独立硬件映射/控制栏目。演出编排采用用户确认的双监看方案：上半区为 PVW/PGM、Deck 预载/播放状态、Crossfader 跟随和唯一灯光主控；下半区为歌曲锁定波形、段落、V1/V2、图片、文字、灯光多轨时间线。进入编辑器、选择素材或试听时间线不得自动播放歌曲、上屏或触发 Titan。
+
+演出编排项目按歌曲稳定身份独立持久化，格式标识为 `club.king.show-project`、当前版本为 `1`。每个轨道和片段必须有稳定 ID；歌曲音轨锁定不可移动/删除；V1/V2 视频片段可跨轨拖动，图片、文字和灯光只能进入对应类型轨道。所有裁切更新必须约束源出点大于源入点、时间线时长大于零且不超过歌曲时长。保存、恢复和编辑只更新项目数据，禁止隐式调用 Deck 播放、PGM Take 或 Titan Fire。

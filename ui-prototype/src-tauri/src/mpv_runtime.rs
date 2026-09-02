@@ -844,6 +844,22 @@ pub fn shutdown_deck(manager: &MpvManager, deck: u8) -> Result<(), String> {
     Ok(())
 }
 
+pub fn shutdown_all(manager: &MpvManager) -> Result<(), String> {
+    let mut manager = manager
+        .0
+        .lock()
+        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let instances = std::mem::take(&mut manager.instances);
+    for (_, mut instance) in instances {
+        let _ = send_command(&instance.pipe_path, json!(["quit"]));
+        if instance.child.try_wait().ok().flatten().is_none() {
+            let _ = instance.child.kill();
+        }
+        let _ = instance.child.wait();
+    }
+    Ok(())
+}
+
 pub fn sync_rescue_preview(
     manager: &MpvManager,
     deck: u8,
@@ -949,6 +965,13 @@ mod tests {
         assert!(validate_deck(11).is_err());
         assert!(validate_instance(11).is_ok());
         assert!(validate_instance(12).is_ok());
+    }
+
+    #[test]
+    fn shutdown_all_is_safe_when_no_deck_is_running() {
+        let manager = MpvManager::default();
+        shutdown_all(&manager).expect("empty mpv manager should shut down cleanly");
+        assert!(manager.0.lock().unwrap().instances.is_empty());
     }
 
     #[test]

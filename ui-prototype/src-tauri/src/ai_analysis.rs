@@ -239,7 +239,7 @@ fn queue_blocking(
                  WHEN ai_analysis_jobs.status='ready' THEN ai_analysis_jobs.status
                  WHEN excluded.status='skipped' THEN excluded.status
                  WHEN ai_analysis_jobs.status='skipped'
-                      AND ai_analysis_jobs.stage='missing-artist'
+                      AND ai_analysis_jobs.stage IN ('missing-artist', 'encrypted-import-playback')
                       AND excluded.status='queued' THEN excluded.status
                  ELSE ai_analysis_jobs.status
                END,
@@ -247,7 +247,7 @@ fn queue_blocking(
                  WHEN ai_analysis_jobs.status='ready' THEN ai_analysis_jobs.stage
                  WHEN excluded.status='skipped' THEN excluded.stage
                  WHEN ai_analysis_jobs.status='skipped'
-                      AND ai_analysis_jobs.stage='missing-artist'
+                      AND ai_analysis_jobs.stage IN ('missing-artist', 'encrypted-import-playback')
                       AND excluded.status='queued' THEN excluded.stage
                  ELSE ai_analysis_jobs.stage
                END,
@@ -589,6 +589,51 @@ pub fn ready_artifacts_by_media_path(
     Ok(artifacts)
 }
 
+pub fn ready_artifacts_by_media_fingerprint(
+    database_path: &Path,
+) -> Result<HashMap<String, ReadyAudioArtifacts>, String> {
+    if !database_path.is_file() {
+        return Ok(HashMap::new());
+    }
+    let connection = open_database(database_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT media_fingerprint, derived_directory FROM ai_analysis_jobs
+             WHERE status='ready'
+             ORDER BY CASE WHEN pipeline_version=?1 THEN 0 ELSE 1 END,
+                      updated_at_unix_ms DESC, id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![PIPELINE_VERSION], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut artifacts = HashMap::new();
+    for row in rows {
+        let (fingerprint, directory) = row.map_err(|error| error.to_string())?;
+        let value = ReadyAudioArtifacts {
+            lyrics_path: directory.join("lyrics.lrc"),
+            words_path: directory.join("lyrics.words.json"),
+            vocals_path: directory
+                .join("vocals.flac")
+                .is_file()
+                .then(|| directory.join("vocals.flac")),
+            accompaniment_path: directory.join("no_vocals.flac"),
+        };
+        if value.lyrics_path.is_file()
+            && value.words_path.is_file()
+            && value.accompaniment_path.is_file()
+        {
+            artifacts.entry(fingerprint).or_insert(value);
+        }
+    }
+    Ok(artifacts)
+}
+
 /// Return completed separation artifacts independently from lyric status.
 ///
 /// Stem separation happens before MOSS transcription. A malformed or empty
@@ -625,6 +670,49 @@ pub fn available_stems_by_media_path(
         }
         artifacts
             .entry(media_path)
+            .or_insert_with(|| AvailableStemArtifacts {
+                vocals_path: directory
+                    .join("vocals.flac")
+                    .is_file()
+                    .then(|| directory.join("vocals.flac")),
+                accompaniment_path,
+            });
+    }
+    Ok(artifacts)
+}
+
+pub fn available_stems_by_media_fingerprint(
+    database_path: &Path,
+) -> Result<HashMap<String, AvailableStemArtifacts>, String> {
+    if !database_path.is_file() {
+        return Ok(HashMap::new());
+    }
+    let connection = open_database(database_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT media_fingerprint, derived_directory FROM ai_analysis_jobs
+             WHERE status!='skipped'
+             ORDER BY CASE WHEN pipeline_version=?1 THEN 0 ELSE 1 END,
+                      updated_at_unix_ms DESC, id DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![PIPELINE_VERSION], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                PathBuf::from(row.get::<_, String>(1)?),
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut artifacts = HashMap::new();
+    for row in rows {
+        let (fingerprint, directory) = row.map_err(|error| error.to_string())?;
+        let accompaniment_path = directory.join("no_vocals.flac");
+        if !accompaniment_path.is_file() {
+            continue;
+        }
+        artifacts
+            .entry(fingerprint)
             .or_insert_with(|| AvailableStemArtifacts {
                 vocals_path: directory
                     .join("vocals.flac")
@@ -695,6 +783,47 @@ mod tests {
 
         assert_eq!(job.status, "skipped");
         assert_eq!(job.stage, "missing-artist");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn encrypted_imports_with_an_artist_join_the_normal_ai_queue() {
+        let root = test_root("encrypted-import-ai");
+        let imported = root.join(".king-imported").join("source-id");
+        fs::create_dir_all(&imported).unwrap();
+        let media = imported.join("song.flac");
+        fs::write(&media, b"decoded local playback bytes").unwrap();
+
+        let job = queue_blocking(
+            media,
+            root.join("king.sqlite3"),
+            root.join("analysis"),
+            named_artist(),
+        )
+        .unwrap();
+
+        assert_eq!(job.status, "queued");
+        assert_eq!(job.stage, "pending");
+        open_database(&root.join("king.sqlite3"))
+            .unwrap()
+            .execute(
+                "UPDATE ai_analysis_jobs
+                 SET status='skipped', stage='encrypted-import-playback'
+                 WHERE id=?1",
+                params![job.id],
+            )
+            .unwrap();
+
+        let migrated = queue_blocking(
+            imported.join("song.flac"),
+            root.join("king.sqlite3"),
+            root.join("analysis"),
+            named_artist(),
+        )
+        .unwrap();
+        assert_eq!(migrated.id, job.id);
+        assert_eq!(migrated.status, "queued");
+        assert_eq!(migrated.stage, "pending");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -891,6 +1020,15 @@ mod tests {
             derived.join("lyrics.lrc")
         );
         assert!(artifacts.get(&key).unwrap().vocals_path.is_none());
+        let fingerprint_artifacts =
+            ready_artifacts_by_media_fingerprint(&database).unwrap();
+        assert_eq!(
+            fingerprint_artifacts
+                .get(&job.media_fingerprint)
+                .unwrap()
+                .lyrics_path,
+            derived.join("lyrics.lrc")
+        );
 
         queue_blocking(media, database, derived_root, named_artist()).unwrap();
         assert_eq!(
@@ -933,6 +1071,19 @@ mod tests {
         let stems = artifacts.get(&key).unwrap();
         assert_eq!(stems.accompaniment_path, derived.join("no_vocals.flac"));
         assert_eq!(stems.vocals_path, Some(derived.join("vocals.flac")));
+        let fingerprint_artifacts =
+            available_stems_by_media_fingerprint(&database).unwrap();
+        let fingerprint_stems = fingerprint_artifacts
+            .get(&job.media_fingerprint)
+            .unwrap();
+        assert_eq!(
+            fingerprint_stems.accompaniment_path,
+            derived.join("no_vocals.flac")
+        );
+        assert_eq!(
+            fingerprint_stems.vocals_path,
+            Some(derived.join("vocals.flac"))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

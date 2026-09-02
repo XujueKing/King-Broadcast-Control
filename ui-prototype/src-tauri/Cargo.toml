@@ -30,6 +30,7 @@ stratum-dsp = "1.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 encoding_rs = "0.8"
 blake3 = "1.8"
+flate2 = "1.1.9"
 libloading = "0.8"
 king-vocal-engine = { path = "../../vocal-engine" }
 

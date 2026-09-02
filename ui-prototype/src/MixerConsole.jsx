@@ -1116,7 +1116,7 @@ export function MixerConsole({ model, meterSnapshot = null, parameterSnapshot = 
   </div>;
 }
 
-export const MixerWorkspace = memo(function MixerWorkspace({ model, meterSnapshot = null, meterStatus = null, parameterSnapshot = null, controlStatus = null, onWriteParameters = null }) {
+export const MixerWorkspace = memo(function MixerWorkspace({ model, meterSnapshot = null, meterStatus = null, parameterSnapshot = null, controlStatus = null, onWriteParameters = null, outputRestoreStatus = null, onRestoreOutputBaseline = null }) {
   const streamedMeterSnapshot=useSyncExternalStore(subscribeQu16MeterSnapshot,getQu16MeterSnapshot,getQu16MeterSnapshot);
   const effectiveMeterSnapshot=streamedMeterSnapshot??meterSnapshot;
   const meterAgeMs=Math.max(0,Date.now()-(Number(effectiveMeterSnapshot?.updatedAtMs)||0));
@@ -1131,7 +1131,7 @@ export const MixerWorkspace = memo(function MixerWorkspace({ model, meterSnapsho
         : effectiveMeterSnapshot?.connected?"表计超时 · 控制本地":controlStatus?.title??meterStatus?.title??"控制本地";
   const badgeTitle=[meterStatus?.message,controlStatus?.message].filter(Boolean).join(" · ");
   return <section className="mixer-workspace" aria-label={`${model.displayName} 调音台工作区`} data-control-mode={controlMode}>
-    <header><SlidersHorizontal weight="fill"/><div><b>{model.displayName}</b><small>音频 USB-B {model.audio.usbOutputs}×{model.audio.usbReturns} · 控制 Ethernet TCP {model.control.tcpPort}</small></div><span className={`mixer-model-badge ${live||controlMode==="hardware-live"?"live":""}`} title={badgeTitle}>{badgeLabel}</span></header>
+    <header><SlidersHorizontal weight="fill"/><div><b>{model.displayName}</b><small>音频 USB-B {model.audio.usbOutputs}×{model.audio.usbReturns} · 控制 Ethernet TCP {model.control.tcpPort}</small></div><span className={`mixer-model-badge ${live||controlMode==="hardware-live"?"live":""}`} title={badgeTitle}>{badgeLabel}</span><button type="button" className={`mixer-output-restore ${outputRestoreStatus?.state??"idle"}`} disabled={controlMode!=="hardware-live"||outputRestoreStatus?.busy} title={outputRestoreStatus?.message??"恢复 8/26 ST3 → LR 主输出基准"} onClick={onRestoreOutputBaseline}>{outputRestoreStatus?.busy?"恢复中…":"恢复 8/26 主输出"}</button></header>
     <div className="mixer-workspace-body"><MixerConsole model={model} meterSnapshot={effectiveMeterSnapshot} parameterSnapshot={parameterSnapshot} controlMode={controlMode} onWriteParameters={onWriteParameters}/></div>
   </section>;
 });

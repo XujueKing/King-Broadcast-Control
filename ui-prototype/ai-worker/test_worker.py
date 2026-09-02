@@ -356,6 +356,35 @@ class MossResponseTests(unittest.TestCase):
             )
             self.assertTrue(worker.lyrics_artifacts_are_current(root, pipeline))
 
+    def test_reuses_utf8_lrc_sidecar_without_moss_transcription(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "歌手 - 歌曲.flac"
+            media.write_bytes(b"audio marker")
+            media.with_suffix(".lrc").write_text(
+                "[ar:歌手]\n[00:01.20]第一句\n[00:04.50][00:08.00]第二句\n",
+                encoding="utf-8",
+            )
+
+            payload = worker.read_lrc_sidecar(media)
+
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["language"], "Chinese")
+            self.assertEqual(
+                [item["startSeconds"] for item in payload["items"]],
+                [1.2, 4.5, 8.0],
+            )
+            self.assertEqual(payload["items"][0]["endSeconds"], 2.4)
+            self.assertIn("[ar:歌手]", payload["lrc"])
+
+    def test_missing_or_untimed_lrc_does_not_bypass_transcription(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory) / "song.flac"
+            media.write_bytes(b"audio marker")
+            self.assertIsNone(worker.read_lrc_sidecar(media))
+            media.with_suffix(".lrc").write_text("[ar:artist]\nplain lyric\n", encoding="utf-8")
+            self.assertIsNone(worker.read_lrc_sidecar(media))
+
 
 if __name__ == "__main__":
     unittest.main()

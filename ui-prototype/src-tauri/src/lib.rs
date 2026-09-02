@@ -15,6 +15,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, Webvie
 
 mod ai_analysis;
 mod ai_worker;
+mod audio_importer;
 mod kinglight;
 mod kingsong;
 mod libmpv_runtime;
@@ -733,11 +734,15 @@ async fn queue_audio_ai_analysis(
 async fn prioritize_audio_ai_analysis(
     app: tauri::AppHandle,
     capabilities: tauri::State<'_, runtime_capability::RuntimeCapabilities>,
+    worker: tauri::State<'_, ai_worker::AiWorkerManager>,
     path: String,
     artist: Option<String>,
 ) -> Result<ai_analysis::AiAnalysisJob, String> {
     if !capabilities.ai_processing_available {
         return Err("当前为播放版；本机不能制作歌曲".to_string());
+    }
+    if !ai_worker::status(&app, &worker)?.enabled {
+        return Err("AI 歌曲制作已手动关闭；请先在设置中开启".to_string());
     }
     let database_path = app
         .path()
@@ -784,8 +789,21 @@ fn audio_ai_worker_status(
     if capabilities.ai_processing_available {
         ai_worker::start(&app, &state)
     } else {
-        ai_worker::status(&state)
+        ai_worker::status(&app, &state)
     }
+}
+
+#[tauri::command]
+fn set_audio_ai_runtime_enabled(
+    app: tauri::AppHandle,
+    capabilities: tauri::State<runtime_capability::RuntimeCapabilities>,
+    state: tauri::State<ai_worker::AiWorkerManager>,
+    enabled: bool,
+) -> Result<ai_worker::AiWorkerStatus, String> {
+    if enabled && !capabilities.ai_processing_available {
+        return Err("当前为播放版；本机不能启动 AI 歌曲制作".to_string());
+    }
+    ai_worker::set_runtime_enabled(&app, &state, enabled)
 }
 
 #[tauri::command]
@@ -797,7 +815,7 @@ fn set_audio_ai_scheduler(
     deck_paths: Vec<String>,
 ) -> Result<ai_worker::AiWorkerStatus, String> {
     if !capabilities.ai_processing_available {
-        return ai_worker::status(&state);
+        return ai_worker::status(&app, &state);
     }
     ai_worker::set_scheduler_context(&state, playing_paths.len(), deck_paths.len())?;
     let database_path = app
@@ -1258,7 +1276,8 @@ fn close_output_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn exit_application(app: tauri::AppHandle) {
+fn exit_application(app: tauri::AppHandle, state: tauri::State<mpv_runtime::MpvManager>) {
+    let _ = mpv_runtime::shutdown_all(&state);
     app.exit(0);
 }
 
@@ -1518,6 +1537,8 @@ struct CachedMediaMetadata {
     artist: Option<String>,
     album: Option<String>,
     duration_ms: Option<u64>,
+    thumbnail_path: Option<String>,
+    ai_fingerprint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1528,6 +1549,7 @@ struct LocalMediaLibrary {
     audio_directory: String,
     videos: Vec<LocalMediaAsset>,
     audio: Vec<LocalMediaAsset>,
+    audio_import: audio_importer::AudioImportStatus,
 }
 
 fn stable_path_hash(path: &Path) -> u64 {
@@ -1537,6 +1559,51 @@ fn stable_path_hash(path: &Path) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn embedded_cover_extension(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("jpg");
+    }
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("png");
+    }
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        return Some("gif");
+    }
+    if data.starts_with(b"BM") {
+        return Some("bmp");
+    }
+    None
+}
+
+fn cache_embedded_audio_cover(
+    source: &Path,
+    cache_directory: &Path,
+    data: &[u8],
+) -> Option<String> {
+    const MAX_COVER_BYTES: usize = 16 * 1024 * 1024;
+    if data.is_empty() || data.len() > MAX_COVER_BYTES {
+        return None;
+    }
+    let extension = embedded_cover_extension(data)?;
+    fs::create_dir_all(cache_directory).ok()?;
+    let identifier = format!("{:016x}", stable_path_hash(source));
+    let destination = cache_directory.join(format!("{identifier}.{extension}"));
+    let temporary = cache_directory.join(format!("{identifier}.tmp.{extension}"));
+    let _ = fs::remove_file(&temporary);
+    fs::write(&temporary, data).ok()?;
+    for stale_extension in ["jpg", "png", "gif", "bmp"] {
+        let stale = cache_directory.join(format!("{identifier}.{stale_extension}"));
+        if stale != destination {
+            let _ = fs::remove_file(stale);
+        }
+    }
+    if destination.is_file() {
+        fs::remove_file(&destination).ok()?;
+    }
+    fs::rename(&temporary, &destination).ok()?;
+    Some(destination.to_string_lossy().into_owned())
 }
 
 fn run_video_thumbnail_ffmpeg(
@@ -1728,7 +1795,9 @@ fn infer_artist_from_filename(file_stem: &str) -> Option<String> {
 
 struct MediaArtifactIndex<'a> {
     ready: &'a HashMap<String, ai_analysis::ReadyAudioArtifacts>,
+    ready_by_fingerprint: &'a HashMap<String, ai_analysis::ReadyAudioArtifacts>,
     available_stems: &'a HashMap<String, ai_analysis::AvailableStemArtifacts>,
+    stems_by_fingerprint: &'a HashMap<String, ai_analysis::AvailableStemArtifacts>,
 }
 
 fn collect_media_files(
@@ -1737,6 +1806,7 @@ fn collect_media_files(
     extensions: &[&str],
     default_category: &str,
     cache: &MediaMetadataCache,
+    audio_cover_cache: Option<&Path>,
     artifacts: &MediaArtifactIndex<'_>,
     media: &mut Vec<LocalMediaAsset>,
 ) -> Result<(), String> {
@@ -1751,6 +1821,7 @@ fn collect_media_files(
                 extensions,
                 default_category,
                 cache,
+                audio_cover_cache,
                 artifacts,
                 media,
             )?;
@@ -1818,6 +1889,18 @@ fn collect_media_files(
                     value.artist = tag.artist().map(|item| item.into_owned());
                     value.album = tag.album().map(|item| item.into_owned());
                 }
+                value.thumbnail_path = audio_cover_cache.and_then(|cache_directory| {
+                    tagged_file
+                        .tags()
+                        .iter()
+                        .find_map(|tag| tag.pictures().first())
+                        .and_then(|picture| {
+                            cache_embedded_audio_cover(&path, cache_directory, picture.data())
+                        })
+                });
+            }
+            if audio_importer::is_encrypted_import_path(&path) {
+                value.ai_fingerprint = ai_analysis::fingerprint(&path).ok();
             }
             if let Ok(mut values) = cache.0.lock() {
                 values.insert(path.clone(), value.clone());
@@ -1836,8 +1919,18 @@ fn collect_media_files(
             .unwrap_or_else(|_| path.clone())
             .to_string_lossy()
             .into_owned();
-        let derived_artifacts = artifacts.ready.get(&canonical_path);
-        let stem_artifacts = artifacts.available_stems.get(&canonical_path);
+        let derived_artifacts = artifacts.ready.get(&canonical_path).or_else(|| {
+            media_metadata
+                .ai_fingerprint
+                .as_ref()
+                .and_then(|fingerprint| artifacts.ready_by_fingerprint.get(fingerprint))
+        });
+        let stem_artifacts = artifacts.available_stems.get(&canonical_path).or_else(|| {
+            media_metadata
+                .ai_fingerprint
+                .as_ref()
+                .and_then(|fingerprint| artifacts.stems_by_fingerprint.get(fingerprint))
+        });
         let lyrics_path = lyrics_sidecar(&path)
             .or_else(|| derived_artifacts.map(|artifacts| artifacts.lyrics_path.clone()));
         let lyrics_modified_unix_ms = lyrics_path.as_ref().and_then(|value| {
@@ -1891,7 +1984,7 @@ fn collect_media_files(
                         artifacts.accompaniment_path.to_string_lossy().into_owned()
                     })
                 }),
-            thumbnail_path: None,
+            thumbnail_path: media_metadata.thumbnail_path,
             size_bytes,
             modified_unix_ms,
         });
@@ -1929,19 +2022,24 @@ fn scan_image_library(app: tauri::AppHandle) -> Result<ImageLibrary, String> {
 fn scan_media_library(
     app: tauri::AppHandle,
     cache: tauri::State<MediaMetadataCache>,
+    importer: tauri::State<audio_importer::AudioImporter>,
 ) -> Result<LocalMediaLibrary, String> {
     let root_directory = media_root_directory(&app)?;
-    scan_media_root(root_directory, &cache)
+    scan_media_root(root_directory, &cache, Some(&importer))
 }
 
 fn scan_media_root(
     root_directory: PathBuf,
     cache: &MediaMetadataCache,
+    importer: Option<&audio_importer::AudioImporter>,
 ) -> Result<LocalMediaLibrary, String> {
     let video_directory = root_directory.join("videos");
     let audio_directory = root_directory.join("audio");
     fs::create_dir_all(&video_directory).map_err(|error| error.to_string())?;
     fs::create_dir_all(&audio_directory).map_err(|error| error.to_string())?;
+    let audio_import = importer
+        .map(|importer| importer.prepare(&audio_directory))
+        .unwrap_or_default();
 
     let mut videos = Vec::new();
     let mut audio = Vec::new();
@@ -1953,9 +2051,19 @@ fn scan_media_root(
         .map(ai_analysis::ready_artifacts_by_media_path)
         .transpose()?
         .unwrap_or_default();
+    let ready_artifacts_by_fingerprint = database_path
+        .as_deref()
+        .map(ai_analysis::ready_artifacts_by_media_fingerprint)
+        .transpose()?
+        .unwrap_or_default();
     let available_stems = database_path
         .as_deref()
         .map(ai_analysis::available_stems_by_media_path)
+        .transpose()?
+        .unwrap_or_default();
+    let available_stems_by_fingerprint = database_path
+        .as_deref()
+        .map(ai_analysis::available_stems_by_media_fingerprint)
         .transpose()?
         .unwrap_or_default();
     let empty_ready_artifacts = HashMap::new();
@@ -1966,9 +2074,12 @@ fn scan_media_root(
         &["mp4", "m4v", "mov", "webm"],
         "舞台",
         cache,
+        None,
         &MediaArtifactIndex {
             ready: &empty_ready_artifacts,
+            ready_by_fingerprint: &empty_ready_artifacts,
             available_stems: &empty_stem_artifacts,
+            stems_by_fingerprint: &empty_stem_artifacts,
         },
         &mut videos,
     )?;
@@ -2002,9 +2113,12 @@ fn scan_media_root(
         &["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus"],
         "本地音乐",
         cache,
+        Some(&root_directory.join("cache").join("audio-covers")),
         &MediaArtifactIndex {
             ready: &ready_artifacts,
+            ready_by_fingerprint: &ready_artifacts_by_fingerprint,
             available_stems: &available_stems,
+            stems_by_fingerprint: &available_stems_by_fingerprint,
         },
         &mut audio,
     )?;
@@ -2017,6 +2131,7 @@ fn scan_media_root(
         audio_directory: audio_directory.to_string_lossy().into_owned(),
         videos,
         audio,
+        audio_import,
     })
 }
 
@@ -2026,6 +2141,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(ProgramState(Mutex::new(Value::Null)))
         .manage(MediaMetadataCache(Mutex::new(HashMap::new())))
+        .manage(audio_importer::AudioImporter::default())
         .manage(waveform::WaveformCache::default())
         .manage(mpv_runtime::MpvManager::default())
         .manage(ai_worker::AiWorkerManager::default())
@@ -2063,6 +2179,7 @@ pub fn run() {
             prioritize_audio_ai_analysis,
             list_audio_ai_jobs,
             audio_ai_worker_status,
+            set_audio_ai_runtime_enabled,
             set_audio_ai_scheduler,
             runtime_capabilities,
             mixer_driver_status,
@@ -2116,6 +2233,13 @@ pub fn run() {
             import_kinglight_inbox,
             open_lighting_package_directory
         ])
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                let state = window.state::<mpv_runtime::MpvManager>();
+                let _ = mpv_runtime::shutdown_all(&state);
+                window.app_handle().exit(0);
+            }
+        })
         .setup(|app| {
             if let Err(error) = request_extended_desktop() {
                 eprintln!("Extended desktop startup unavailable: {error}");
@@ -2292,9 +2416,12 @@ mod tests {
             &["wav"],
             "本地音乐",
             &cache,
+            None,
             &MediaArtifactIndex {
                 ready: &empty_ready_artifacts,
+                ready_by_fingerprint: &empty_ready_artifacts,
                 available_stems: &empty_stem_artifacts,
+                stems_by_fingerprint: &empty_stem_artifacts,
             },
             &mut media,
         )
@@ -2309,6 +2436,52 @@ mod tests {
         assert!(media[0].size_bytes > 44);
 
         fs::remove_dir_all(directory).expect("remove test media directory");
+    }
+
+    #[test]
+    fn caches_embedded_audio_cover_using_its_real_image_type() {
+        let directory =
+            std::env::temp_dir().join(format!("king-audio-cover-test-{}", std::process::id()));
+        let source = directory.join("song.flac");
+        let cover_cache = directory.join("covers");
+        fs::create_dir_all(&directory).expect("create cover test directory");
+        fs::write(&source, b"audio").expect("write source marker");
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46];
+
+        let cover = cache_embedded_audio_cover(&source, &cover_cache, &jpeg)
+            .map(PathBuf::from)
+            .expect("cache embedded cover");
+
+        assert_eq!(
+            cover.extension().and_then(|value| value.to_str()),
+            Some("jpg")
+        );
+        assert_eq!(fs::read(&cover).expect("read cached cover"), jpeg);
+        fs::remove_dir_all(directory).expect("remove cover test directory");
+    }
+
+    #[test]
+    fn extracts_cover_from_configured_real_audio_fixture() {
+        let Some(source) = std::env::var_os("KING_AUDIO_COVER_FIXTURE").map(PathBuf::from) else {
+            return;
+        };
+        let tagged_file = Probe::open(&source)
+            .and_then(|probe| probe.read())
+            .expect("read configured audio fixture");
+        let picture = tagged_file
+            .tags()
+            .iter()
+            .find_map(|tag| tag.pictures().first())
+            .expect("configured audio fixture has no embedded cover");
+        let directory =
+            std::env::temp_dir().join(format!("king-real-audio-cover-test-{}", std::process::id()));
+        let cover = cache_embedded_audio_cover(&source, &directory, picture.data())
+            .map(PathBuf::from)
+            .expect("extract configured embedded cover");
+
+        assert!(cover.is_file());
+        assert!(fs::metadata(&cover).is_ok_and(|metadata| metadata.len() > 0));
+        fs::remove_dir_all(directory).expect("remove real cover test directory");
     }
 
     #[test]
@@ -2350,7 +2523,7 @@ mod tests {
         )
         .expect("copy MP3 fixture");
         let cache = MediaMetadataCache(Mutex::new(HashMap::new()));
-        let library = scan_media_root(directory.clone(), &cache).expect("scan media root");
+        let library = scan_media_root(directory.clone(), &cache, None).expect("scan media root");
 
         assert_eq!(library.videos.len(), 1, "expected one MP4 fixture");
         assert_eq!(library.audio.len(), 1, "expected one MP3 fixture");

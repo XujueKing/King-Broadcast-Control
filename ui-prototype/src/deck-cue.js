@@ -2,12 +2,13 @@ import { deckOutputVolumePercent, equalPowerGains } from "./media-runtime.js";
 
 export const QU16_DECK_CUE_TARGET = "st-3";
 export const DECK_CUE_RECOVERY_STORAGE_KEY = "king.deckCue.recovery.v1";
+export const QU16_DECK_CUE_LR_ASSIGN_KEY = `assign:${QU16_DECK_CUE_TARGET}:LR`;
 
 export function normalizeDeckCueRecovery(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const {deck,mainFader} = value;
-  if (![1,2].includes(deck) || typeof mainFader !== "number" || !Number.isFinite(mainFader)) return null;
-  return { deck, mainFader:Math.min(1,Math.max(0,mainFader)) };
+  const {deck,mainAssigned} = value;
+  if (![1,2].includes(deck) || ![0,1].includes(mainAssigned)) return null;
+  return { deck, mainAssigned };
 }
 
 export function loadDeckCueRecovery(storage = null) {
@@ -41,18 +42,18 @@ export function clearDeckCueRecovery(storage = null) {
   }
 }
 
-export function qu16DeckCueWrites(enabled, mainFaderValue = null) {
+export function qu16DeckCueWrites(enabled, mainAssignedValue = null) {
   if (!enabled) {
-    if (!Number.isFinite(mainFaderValue)) throw new Error("关闭 CUE 前必须提供原主扩推子值");
+    if (![0,1].includes(mainAssignedValue)) throw new Error("关闭 CUE 前必须提供原 LR Assign 真值");
     return [
       { key:`pafl:${QU16_DECK_CUE_TARGET}`, value:0 },
-      { key:`fader:${QU16_DECK_CUE_TARGET}`, value:Math.min(1,Math.max(0,mainFaderValue)) },
+      { key:QU16_DECK_CUE_LR_ASSIGN_KEY, value:mainAssignedValue },
     ];
   }
   return [
-    // CUE routes the complete Deck mix, whatever it currently contains. ST3
-    // leaves LR before PAFL opens; disabling CUE restores the captured LR level.
-    { key:`fader:${QU16_DECK_CUE_TARGET}`, value:0 },
+    // Route the complete ST3 Deck mix away from LR and into PAFL without ever
+    // changing the venue's calibrated ST3 or LR fader levels.
+    { key:QU16_DECK_CUE_LR_ASSIGN_KEY, value:0 },
     { key:`pafl:${QU16_DECK_CUE_TARGET}`, value:1 },
   ];
 }

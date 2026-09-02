@@ -1,5 +1,36 @@
 # KING CLUB 控制台设计验收
 
+## 演出编排双监看方案（2026-09-01）
+
+- Source visual truth: `C:\Users\leadb\.codex\generated_images\01a043c1-e7fa-76d3-9df3-b6012d79ca0e\exec-bd00c78b-5d8e-48b5-bed0-93ff6c069829.png`
+- Implementation screenshot: `D:\WEB3_AI\KINGCLUB-Broadcast-Control\ui-prototype\artifacts\show-editor-option-3-tauri.png`
+- Side-by-side comparison: `D:\WEB3_AI\KINGCLUB-Broadcast-Control\ui-prototype\artifacts\show-editor-option-3-comparison.png`
+- Runtime: real `king-broadcast-control.exe` Tauri control window; no standalone browser preview was opened.
+- Viewport: 1707 × 1067 CSS px at device scale factor 1.5; captured implementation is 2561 × 1601 px. Source is 1600 × 1000 px. The comparison normalizes both sides to 1600 × 1000 px.
+- State: 演出编排 active; two Decks not loaded; PVW and PGM visible; a real cached video asset selected; `重复次数` selected; project saved; live output remains safety-locked.
+- Full-view evidence: the comparison preserves the selected concept's compact header, asset rail, dual PVW/PGM monitors, Deck/crossfader status, property inspector, timeline toolbar, locked song waveform, V1/V2/image/text/light lanes, and professional graphite/cyan/mint KING CLUB styling.
+- Focused evidence: the implementation screenshot keeps both monitor safe frames readable, exposes the mutually exclusive lighting owner, distinguishes source duration from timeline duration, and renders all seven timeline lanes without clipping persistent controls.
+- Fonts and typography: existing Inter / Noto Sans SC / Microsoft YaHei stack preserves the dense bilingual workstation hierarchy; truncation is used for long real media names.
+- Spacing and layout rhythm: final pass fills the timeline region with seven proportional lanes; the persistent bottom navigation remains visible and aligned with the existing desktop application.
+- Colors and visual tokens: graphite surfaces, cool-gray dividers, cyan monitor labels, mint selection/safety states, blue Deck 2 status, and restrained red PGM border match the approved direction.
+- Image quality and asset fidelity: existing full-resolution KING CLUB stage/laser assets and cached local video thumbnails are used. No browser placeholders, emoji, inline SVG stand-ins, or fake media frames were introduced.
+- Copy and content: Chinese labels cover PVW/PGM, Deck state, Crossfader follow, lighting ownership, source in/out, timeline duration, short-video fill modes, track names, preload state, and output lock.
+- Primary interactions tested through the Tauri WebView: bottom-nav entry, V1 clip drag to V2, editable source in/out and timeline duration, short-video repeat mode/count, explicit save, leaving the page, returning, and restoring the moved/trimmed clip from the song-specific project. Entering or editing did not issue playback, PGM Take, or Titan trigger actions.
+- Runtime error evidence: no Vite error overlay was present; production web asset build completed successfully.
+
+### Comparison history
+
+1. First pass found two P2 visual issues: unused blank space below the timeline lanes and bright native scrollbars in the asset/inspector rails.
+2. Fixes: converted the timeline to seven proportional grid rows and applied the app's dark scrollbar tokens to the editor scroll regions.
+3. Post-fix evidence: `artifacts/show-editor-option-3-tauri.png` shows the timeline filling its allotted height and dark scrollbars. No actionable P0/P1/P2 findings remain.
+4. Functional follow-up added the persistent show-project model and real clip drag/drop. The final Tauri capture shows the moved `Neon Stage` clip restored in V2 after navigating away and back; the inspector exposes numeric trim controls and delete without disturbing the approved layout.
+
+### Follow-up polish
+
+- P3: replace the deterministic waveform visualization with cached real song peaks when the show-runtime renderer consumes the project model.
+
+final result: passed
+
 ## 基础控制台验收
 
 - Source visual truth: the approved KING CLUB console reference captured during design review.
@@ -233,6 +264,175 @@
 
 final result: passed
 
+## Deck source-category queue lock
+
+- Reported regression: a track started from the L-region 周一 category advanced into the complete Music Management library instead of the next 周一 item.
+- Corrected state model: each Deck now owns a playback source containing the originating library number and playlist ID. Changing the L-region library/category selection only changes the browsed view and does not mutate either Deck source.
+- Queue behavior: sequence, shuffle, manual previous and manual next all resolve the originating category's current `trackPaths` order. A missing/deleted source or a category without another playable item stops instead of falling back to the complete library.
+- Complete-library safety: loading a song from Music Management “全部歌曲” is single-track preparation and cannot establish an automatic complete-library queue.
+- Automated evidence: the source-resolution test keeps a 1号曲库/周一 source on `monday-1.mp3 → monday-2.mp3` while a separate 周二 list exists. The runtime queue test verifies non-contiguous library indexes `126 → 169 → 729`, including wrap, exclusion and previous/next behavior. The focused test suite passes 19/19 and the production WebView build passes.
+- Desktop safety evidence: no end-of-song playback was forced during verification. Both live mpv IPC endpoints for desktop process 15856 returned `pause=true` after the change.
+- Cold-start correction: the desktop no longer initializes Deck indexes from complete-library positions 0/1. Each Deck now independently resolves the strictly first ordered row of today's named category in its matching library. A missing secondary-library song cannot block Deck 1, and a partial media scan cannot skip an unresolved first row and permanently select the second row. The resolver retries when the stable media index changes; an empty category leaves only that Deck empty and paused.
+- Cold-start automated evidence: a two-library fixture resolves Deck 1 to `library-1-monday.mp3` and Deck 2 to `library-2-monday.mp3`. The focused suite now passes 20/20.
+- Startup race correction: the startup resolver now publishes the selected media paths to the scanner's Deck-preservation ref before committing React state, so a concurrent/resumed scan cannot overwrite the default selection with `null`. The running desktop process then reported Deck 1 path `05.【中文】林薇琪 - 爱已不是你想珍惜的事(DjAlex.x Dance Rmx 2014).mp3`, matching the first visible 周一 row, with `pause=true`. Deck 2 also remained paused; its 2号曲库/周一 category is currently empty.
+
+final result: passed
+
+## Dual-Deck automatic song transition
+
+- Reported experience issue: sequence playback waited for EOF and then loaded the next song into the same Deck, leaving an audible break between playlist items.
+- Desktop mpv behavior: sequence and shuffle modes now reserve the opposite idle Deck, preload the next track from the same locked source category at 15 seconds remaining with zero gain, start it at 6 seconds remaining, and run a six-second equal-power crossfade before pausing the outgoing Deck.
+- Operator precedence: repeat-one is unchanged. Automatic handoff is suppressed while the opposite Deck is already playing or CUE is active, and manual Deck transport or Crossfader input cancels automation immediately. No tempo or pitch matching is applied.
+- Queue safety: the prepared track is resolved from the playing Deck's locked library/category queue; browsing another category and Music Management's complete library cannot affect the handoff.
+- Closed-loop correction: sequence mode treats each source category as a ring. Its last song resolves to the first song early enough for the same opposite-Deck preload and six-second crossfade. The EOF fallback excludes the opposite Deck only while that Deck is actually playing, so a paused first-song preload can no longer make a two-song list stop at its end.
+- Automated evidence: the transition planner covers wait, normal next-song preload/crossfade, last-to-first preload/crossfade, repeat-one suppression and occupied-opposite-Deck suppression. The focused playlist/media suite passes 22/22 and the production WebView build passes.
+- Live safety: verification did not start, seek or alter either Deck. A user-started Deck 1 track reached EOF during the hot-update window and did not hand off; afterward both mpv instances reported paused. Because that run began before the updated scheduler had a full 15-second preload window, a fresh desktop playback pass is still required before calling the audible transition validated.
+
+final result: blocked
+
+## Dual-Deck operator arbitration
+
+- Operator rule: automatic handoff may occupy the opposite Deck only when that target Deck is not playing and has no active CUE. Manual playback or CUE keeps the two Decks independent; once the target stops and its CUE is off, it becomes eligible again at the source Deck's next end-of-track window without an extra release click. The Deck header shows “人工运行 · 空闲后自动” while it is under manual control.
+- Independent-main behavior: manually sending Deck 2 to the main output does not stop or take ownership of Deck 1. Both Decks continue independently. When Deck 1 reaches EOF while Deck 2 remains occupied, Deck 1 advances within its own locked source-category queue on Deck 1, including last-to-first wrap.
+- CUE behavior: a CUE-occupied opposite Deck is never overwritten. The main Deck uses same-Deck continuation because two visible playback engines cannot overlap a third track while the other engine is reserved for headphones.
+- Mid-transition behavior: changing the automatic target during an active crossfade cancels the automation, returns the original source Deck to its full endpoint over approximately 400 ms, pauses the abandoned automatic target and only then applies the manual operation. An in-flight automatic mpv load is awaited before the manual load, preventing stale completion from overwriting the operator's track.
+- Automated evidence: the pure arbitration test covers automatic availability, operator reservation, CUE occupancy and simultaneous independent main playback. Focused media/playlist tests pass 25/25 and the production build passes. Live playback is not started for this safety-sensitive validation.
+
+final result: blocked
+
+## Independent 1/2 library category suites
+
+- Product rule: 1号曲库与2号曲库各自拥有完整且独立的星期、节日、自定义分类、排序、歌曲归属和每日播放计划；曲库切换只改变当前编辑目标，不复制数据、不装载 Deck、不触发播放。
+- Migration rule: existing single-library persisted data migrates only to 1号曲库. 2号曲库 starts with the same category skeleton but empty song membership, so the original library is preserved without silently duplicating it.
+- Desktop evidence: `artifacts/dual-library-one-suite.png` records 1号曲库 restoring its own 周三 selection; `artifacts/dual-library-two-suite.png` records 2号曲库 restoring its own 七夕 selection; `artifacts/dual-library-management-library2.png` records the Music Management target and every “加入” action changing to `2号曲库 / 七夕` while the real Home L region remains unchanged.
+- Viewport and density: captures were taken from the running Tauri desktop window at 2560 x 1600 physical px, approximately 1707 x 1067 CSS px at Windows 150% scaling.
+- Interaction evidence: the sequence 2号/七夕 → 1号/周三 → 2号/七夕 was exercised in the desktop app. The final Music Management capture shows the restored 2号/七夕 selection in both L and the right-side target badge. Both mpv IPC endpoints returned `pause=true` after every checked transition.
+- Automated evidence: focused playlist tests pass 8/8, including independent mutation and legacy migration coverage. Production WebView asset compilation passes and targeted whitespace validation has no error.
+- Findings: the prior shared-single-suite interpretation is removed. No actionable P0/P1/P2 issue remains for library isolation, per-library selection restoration, legacy-data ownership or non-autoplay switching.
+
+final result: passed
+
+## L-region track context management
+
+- Requested behavior: Music Management keeps the real Home L region uncluttered. Song ordering and removal live in a right-click menu instead of adding more buttons to the selected row.
+- Desktop evidence: `artifacts/track-context-menu-desktop.png` records the running Tauri app at 2560 x 1600 physical px. The first song in `1号曲库 / 周一` was right-clicked while already loaded in Deck 1; the custom menu opened without changing the Deck or the right-side section.
+- Menu behavior: the menu provides 上移, 下移 and 从当前列表移除. Because the captured list has one song, both ordering directions are correctly disabled while removal remains enabled. The fixed table hint reads `歌曲 · 右键管理`.
+- Data and safety behavior: ordering operates on the active playlist's persisted `trackPaths`; removal only removes that path from the current library/current category and never deletes the source file. Loaded or playing Deck state is not modified.
+- Automated evidence: playlist tests cover reorder and removal behavior; production WebView compilation and targeted whitespace validation pass. Both mpv IPC endpoints remained paused during the interaction.
+- Findings: no row-level control clutter was introduced, and no actionable P0/P1/P2 issue remains for the requested list ordering and removal entry point.
+- Alignment correction: the initial menu was rendered inside the transform-capable L region, making a fixed-position menu inherit the wrong containing block. Both category and track menus now render through a `document.body` portal. `artifacts/track-context-menu-aligned.png` records the corrected desktop state; a right click at physical `(300, 470)` places the menu origin at the matching viewport location under Windows 150% scaling.
+- Visible-order correction: `artifacts/playlist-visible-ordinal-desktop.png` records the user's three-song `爱` result in the running Tauri app. L now numbers the filtered/current-playlist rows `1, 2, 3` instead of exposing their complete-library indexes `127, 170, 730`; the right-side complete library intentionally retains its own independent `01, 02...` result order.
+- On-air removal correction: removing the currently playing L-row now captures the successor from the pre-removal order and the visible library/category source before mutating playlist state. An idle opposite Deck is preloaded at zero gain and receives an immediate 2.5-second equal-power crossfade; the removed-song Deck is paused after the handoff. With no successor it fades to silence and stops. If the opposite Deck is already under operator playback, its loaded song is preserved and receives the fade instead. Source audio files are never deleted.
+- On-air removal automated evidence: the queue test covers middle-item successor, last-item wrap and single-item no-successor behavior. Production compilation is required below; no live song is started solely for this check, so audible timing remains an operator validation item.
+
+final result: passed
+
+## Music Management all-playlists and category-management correction
+
+- Source visual truth: `C:/Users/leadb/AppData/Local/Temp/codex-clipboard-c1af368c-3092-4622-9cf4-a52f3e190cc3.png` (2483 x 1459 px) plus the user's explicit information-architecture correction: L is the sole current-category selector; right-side tabs start with 全部歌单 and 分类管理; L right-click exposes up/down sorting.
+- Desktop implementation evidence: `artifacts/music-management-all-desktop.png` (2560 x 1600 physical px), `artifacts/music-management-categories-desktop.png`, and `artifacts/music-management-l-context-menu.png`. The Tauri window ran at approximately 1707 x 1067 CSS px with device scale factor 1.5; no standalone browser preview was opened.
+- Combined comparison: `artifacts/music-management-reference-comparison.png` (2400 x 820 px) places the supplied 2483 x 1459 source and the 2560 x 1600 desktop implementation into equal 1200 px-wide columns without cropping.
+- Full-view result: L remains the existing Home playback-library business at its original 786 physical px width, including library switch, two category rows, search, track table and real 762-song data. The right side begins with 全部歌单 and 分类管理, followed by 每日播放, 歌曲编辑, 导入导出 and 歌手包; no right-side category selector duplicates L.
+- Interaction evidence: 全部歌单 renders the real library and targets only the L-selected category; already-added songs are disabled and identified. 分类管理 separates weekly, event and custom groups, synchronizes selection back to L, exposes bounded same-group ordering, custom creation and custom deletion. L right-click and keyboard context-menu affordances open the persisted up/down menu; a continuous desktop interaction confirmed that opening it does not change the active right-side section. No ordering button was pressed, so existing user data was not mutated during QA.
+- Safety evidence: both mpv child processes were queried through their IPC pipes after desktop interaction and returned `data: true` for the `pause` property. No Deck play or load control was exercised. Tauri close/exit now calls the shared player shutdown path before terminating the application.
+- Automated evidence: production WebView asset compilation passes; Rust desktop compilation passes; 14 focused playlist/media tests pass, including same-kind category ordering; whitespace validation passes.
+- Required fidelity surfaces: typography, graphite/cyan/green tokens, Phosphor icons, dense table rhythm, fixed bottom navigation and the real L dimensions remain consistent with the supplied desktop reference. No raster asset was introduced into the product UI. Copy explicitly states that category insertion does not load or play audio.
+- Findings: no actionable P0/P1/P2 issue remains for the requested desktop information architecture, L-region preservation, category insertion target, category-management layout, right-click ordering or non-autoplay behavior.
+
+final result: passed
+
+## Music Management folder filtering and category CRUD
+
+- All-library navigation: “全部歌单” now derives a folder index from each song's real path below `media/audio`, removes the internal `.king-imported` implementation segment, shows per-folder counts and applies folder selection before text search. `artifacts/music-management-folder-category.png` records the running Tauri desktop with the new “全部文件夹 · 762 首” control; the existing Home L region and its width remain unchanged.
+- Library scope: “分类管理” now contains an explicit 1号曲库 / 2号曲库 management switch. It changes the same active library state used by L, so it exposes the second library's independent category suite instead of creating a duplicate editor-only copy.
+- Category operations: the create form explicitly selects 节日活动 or 自定义分类. Both kinds support creation, stable-ID rename, deletion and bounded same-kind up/down sorting. Weekday names remain fixed because cold-start weekday routing and daily defaults depend on them.
+- Data safety: rename preserves category ID, track membership, Deck source references and daily-plan references. Deletion never removes audio files; daily assignments pointing at a deleted category fall back to their matching weekday category.
+- Automated evidence: focused media/playlist tests pass 24/24, including event/custom add, stable rename, same-kind reorder, deletion fallback and weekday immutability. Production WebView asset compilation passes. No category was created, renamed, reordered or deleted in the user's persisted desktop data during QA.
+
+final result: passed
+
+## Music Management C+R entrance motion
+
+- Source visual truth: `artifacts/home-vs-music-real-l-comparison.png` (5118 x 1528 px) remains the same-state visual reference for the invariant Home L region and the Music Management C+R layout. The user's motion request adds behavior to that accepted composition; it does not change the static target.
+- Implementation screenshot: `artifacts/music-management-motion-final.png` (1280 x 720 px) records the settled animation state in the running browser preview.
+- Viewport and normalization: 1280 x 720 CSS px, browser DPR 1.5; the browser screenshot API produced a normalized 1280 x 720 PNG. The earlier L-region comparison remains a same-density, same-crop pair. Motion timing was inspected from live computed styles rather than inferred from static frames.
+- State: demo media loaded, 周六 selected, 1号曲库 active, 歌单编排 visible. The management C+R region enters with `music-management-enter` for 280 ms from 24 px rightward offset and reduced opacity. Each functional workspace enters with `music-management-panel-enter` for 190 ms from a 12 px offset.
+- Full-view comparison evidence: the final screenshot preserves the accepted graphite shell, top/bottom navigation, real Home L business and C+R management proportions. No new image asset, typography, color, spacing or copy drift was introduced.
+- Focused motion evidence: the Home L region measured `{x:0,y:48,width:418,height:630}` before navigation, during the C+R animation and after completion. Only `.music-management-main` reported `animation-name: music-management-enter`; tab content reported `music-management-panel-enter`. L does not receive either animation.
+- Required fidelity surfaces: fonts and copy are unchanged; spacing and grid tracks remain unchanged; graphite/cyan/green tokens remain unchanged; no raster or icon substitution was introduced; functional safety copy remains visible. `prefers-reduced-motion: reduce` explicitly disables both transforms and fades.
+- Interaction and runtime evidence: Home to Music Management entrance, 歌单编排 to 每日播放 tab transition and return to 歌单编排 were exercised. Vite error overlay count: zero. Document dimensions equal the viewport. Production build passes; 13 focused playlist/media tests pass; `git diff --check` reports no whitespace error.
+- Findings: no actionable P0/P1/P2 mismatch. The motion is intentionally short and limited to C+R so it adds orientation without making the fixed operational L region appear to reload.
+- Comparison history: the first motion implementation passed the live geometry and interaction check; no corrective visual iteration was required.
+
+final result: passed
+
+## Music Management playlist workspace
+
+- Source visual truth: `C:/Users/leadb/AppData/Local/Temp/codex-clipboard-d4f3c2be-a29d-469d-a5d5-3b3416d6f14e.png` establishes the existing KING shell, graphite palette and Music Management state; `C:/Users/leadb/AppData/Local/Temp/codex-clipboard-40fce850-05e4-4cf7-9a61-013b4a7dbda3.png` identifies the package controls that must leave Home. The requested information architecture intentionally differs from the singer-package source state.
+- Implementation evidence: `artifacts/music-management-final-2554x1596.png` is the final full viewport; `artifacts/music-management-playlists-actual.png`, `artifacts/music-management-editor-actual.png` and `artifacts/music-management-packages-actual.png` cover the playlist, song-link and package states. `artifacts/music-management-reference-comparison.png` records the source-versus-implementation review.
+- Viewport and geometry: final review ran at 2554 x 1596 CSS px, device pixel ratio approximately 1, with document width/height exactly matching the viewport and no page-level overflow. A separate 1440 x 900 regression kept all four tabs and the bottom navigation visible while the work regions scroll internally.
+- Information architecture: the left operation region owns playlist selection/creation, song counts and seven-day default scheduling. The right region owns searchable library insertion, drag/button sorting, non-destructive removal and Deck preparation. Song editor, import/export and singer package are secondary tabs inside Music Management.
+- Required fidelity surfaces: the global top and bottom shell remains fixed; typography was enlarged after the first pass; spacing preserves a dense broadcast-console rhythm; graphite, cyan and green tokens match the existing product; iconography reuses the installed Phosphor set; copy states that Deck loading does not autoplay and lighting mapping does not trigger the live rig.
+- Interaction evidence: playlist selection, search/add, drag and button reordering, removal, daily assignment, song video/light binding, Deck 1/2 preparation, all four Music Management tabs and package action placement were inspected in the running browser. Home contains zero `.song-package-tools` elements. Browser console errors: zero.
+- Comparison history: first pass exposed P2-small table/sidebar typography; font sizes and row hierarchy were increased, then recaptured. The revised state has no remaining P0/P1/P2 visual issue for the supplied brief.
+
+final result: blocked
+
+## Music Management real L-region preservation correction
+
+- Source visual truth: the live Home screen captured as `artifacts/home-real-l-reference.png`, plus the user's correction screenshot `C:/Users/leadb/AppData/Local/Temp/codex-clipboard-0d717083-c447-480e-aac2-954402925960.png`. The user clarified that Home `UI-R02 / L` is real playback business and must remain unchanged rather than becoming a management sidebar.
+- Implementation screenshot: `artifacts/music-management-real-l-final.png`. The focused same-state comparison is `artifacts/home-vs-music-real-l-comparison.png` and places Home beside Music Management.
+- Viewport and normalization: both Home and Music Management were rendered at 2559 x 1599 CSS px with DPR approximately 1. The focused browser screenshots are 2559 x 1528 px because the in-app browser excludes its own 71 px chrome; both captures use the same crop and density.
+- State: browser demo media, 周三 selected, 1号曲库 active, empty 周三 published playlist. Selecting 周三 in the preserved L region synchronizes the right editor title to 周三.
+- Full-view evidence: the Home and Music Management captures use the same real `homeLibraryPanel` React element. The L region keeps the same x=0 origin, y=56 origin, 810.51 px width and 1489.33 px height; the management header and tabs begin at x=810.51 and occupy only C+R.
+- Focused comparison evidence: `artifacts/home-vs-music-real-l-comparison.png` confirms the L header, Deck target switch, two playlist rows, search, table header, empty/list region, typography, borders and selected states are visually identical. No separate management copy of L remains.
+- Findings history: the previous implementation introduced a P1 fixed 310 px vertical management sidebar and pushed L below a full-width header. The first correction matched the frame but still duplicated L business. The final correction reuses the same live Home component, preserves the measured Home C1-derived grid width across navigation, and synchronizes L playlist selection to the right editor.
+- Required fidelity surfaces: typography, spacing, graphite/cyan/green tokens, Phosphor icons and app-specific copy are inherited directly from Home. There are no new raster assets in L. The right-side controls retain explicit non-autoplay and non-triggering safety copy.
+- Interaction and console evidence: real 1/2 号曲库 switching, published playlist selection, search, track selection/Deck preparation handlers and playlist-to-editor synchronization remain connected. Vite error overlay count: zero. Production build and 13 focused runtime/playlist tests pass.
+
+final result: passed
+
+## Lighting management A/B floor-plan panel
+
+- Source visual truth: `C:/Users/leadb/Downloads/资源+2.svg` (`viewBox 0 0 762.75 930.05`) for the building outline, plus `C:/Users/leadb/AppData/Local/Temp/codex-clipboard-ca656997-14b9-47be-b279-816a47f76e48.png` (1667 × 1175 px) for approximate fixture distribution and inventory labels. The dimensioned P-01 image was used as supporting spatial reference.
+- Implementation screenshot: `artifacts/lighting-panel-ab-v2.png` (1920 × 1080 px).
+- Combined comparison evidence: `artifacts/lighting-panel-reference-comparison.png`.
+- Browser viewport / CSS viewport: 1920 × 1080 px; device density 1; no density normalization was needed for the implementation capture. The source and implementation were fitted into equal comparison columns without cropping.
+- State: bottom navigation `Avolites Tiger Touch Pro`; Titan offline configuration mode; A-area first reference fixture selected; B-area mapping and adjustment controls visible.
+- Full-view comparison: the supplied vertical floor geometry remains the dominant A-area surface, while the B area groups quick slots, static SWOP mirror, safe semantic adjustment controls and the complete effect registry. Both regions remain visible together without horizontal overflow.
+- Focused evidence: a `VIP 东侧` reference point was clicked; the selection card changed to `260W 光束摇头灯 · 设计数量 54 · 当前为参考位置`. A separate crop was unnecessary because the 844 px-wide plan and 1076 px-wide control region are both readable in the full 1920 px capture.
+
+### Comparison history
+
+- Earlier P2: the first A/B split exposed the plan and existing registry, but offline mode left the lower B area visually empty and did not present a persistent adjustment surface.
+- Fix: added a dedicated B-area `现场效果调节` rack for floor target, color family, energy, motion, beat sync, continuous mode and automatic eligibility. Controls stay disabled without a selected Titan Playback and never Fire a cue.
+- Post-fix evidence: `artifacts/lighting-panel-ab-v2.png` shows the control rack between the quick mapping and complete registry, with the A-area selection reflected in B.
+
+### Required fidelity surfaces
+
+- Fonts and typography: the existing compact KING console type scale and bilingual Titan terminology are preserved; A/B labels establish clear hierarchy without enlarging the global header.
+- Spacing and layout rhythm: the viewport is divided into stable left/right regions; A retains a tall plan aspect and B keeps dense console controls in aligned rows. No persistent control is cropped.
+- Colors and visual tokens: the established graphite/cyan console palette remains intact. Fixture families use restrained blue, cyan, green, lilac, amber and laser-purple icon colors corresponding to the P-11 legend.
+- Image quality and asset fidelity: the user's SVG is copied as a real vector asset and rendered without raster stretching. Fixture marks use the existing Phosphor icon library; no replacement floor plan or invented inline SVG is used.
+- Copy and content: P-11 fixture names and quantities are shown as design-reference inventory. The interface explicitly states that locations are approximate and Titan Fixture Patch is the only authoritative address source.
+- Interaction and safety: navigation, 65 floor points and the A-to-B selection readout were exercised. Configuration controls do not trigger Titan Playback. Browser console errors: zero.
+- Remaining P3: exact coordinates, fixture handles and grouping must be refined after a successful live Titan Patch read; this does not block the current layout or reference-map workflow.
+
+final result: passed
+
+## Deck embedded-cover replacement pass
+
+- Source visual truth: `C:/Users/leadb/AppData/Local/Temp/codex-clipboard-58b745c6-ee92-4c3f-ae57-acba6e7d426a.png` (645 x 80 px), showing the existing Deck title row and the exact music-note slot to replace.
+- Implementation evidence: `artifacts/deck-cover-full-actual.png` is the full running mixer region; `artifacts/deck-cover-actual.png` is the focused Deck 1 title row. The desktop viewport is 1707 x 1067 CSS px at device pixel ratio 1.5. The focused clip is 319.15 x 54 CSS px and 479 x 81 saved pixels.
+- Tested state: the real decoded `Eric周兴哲 - 怎么了.flac` is loaded in Deck 1. Its embedded 480 x 480 JPEG resolves through the Tauri asset protocol and renders in `.cover.cover-one.has-artwork`; the source icon remains the fallback for Deck 2, which has no cover.
+- Full-view comparison: the full mixer capture confirms that adding the image does not change Deck widths, header/action alignment, waveform position, transport rows, crossfader or lower controls.
+- Focused comparison: the source and implementation title-row crops were opened in one comparison input. At device scale 1.5 the 38 x 38 CSS cover becomes 57 x 57 pixels, matching the source's approximately 56 px slot. The original radius, gap, title baseline and artist/BPM baseline remain aligned.
+- Required fidelity surfaces: typography and copy are unchanged; spacing/layout retains the established Deck rhythm; side-specific green/blue tokens remain on the fallback icon; the real square cover uses `object-fit: cover`, keeps its native aspect ratio and has no stretching or placeholder treatment.
+- Regression evidence: the Rust embedded-cover extraction test, the Deck data-chain/fallback test and the production Web build pass. No P0/P1/P2 mismatch remains in the requested Deck cover slot. The pre-existing Deck 2 mojibake visible in both the supplied state and running full view is unrelated to this change.
+- Comparison history: the first rendered comparison passed; no visual correction loop was required.
+
+final result: passed
+
 ## LED physical-size and complete-B-region correction
 
 - Source visual truth: the user's onsite sketch `C:/Users/leadb/Downloads/default (1).jpg`, onsite wall photograph `C:/Users/leadb/Downloads/default.jpg`, and the explicit confirmed physical size `5120 mm(W) × 5760 mm(H)`.
@@ -240,5 +440,20 @@ final result: passed
 - Corrected regression: the 4:9 logical-canvas interpretation was removed, but the first correction still sent only a centred 960 × 1080 aperture. Because the DVP processor maps the complete 1920 × 1080 HDMI raster to the wall, that lit only 2560 mm of the 5120 mm B width and left 1280 mm black at each side. The final transport keeps the 2048 × 2304 authoring canvas and pre-stretches only the finished output 2× horizontally across the complete HDMI raster.
 - Runtime evidence: `artifacts/led-physical-geometry-output.png` captures the active 1920 × 1080 LED HDMI frame. The output screen and transformed transport canvas both cover x=0..1920; the inner 8:9 canvas is 960 × 1080 before a `matrix(2,0,0,1,0,0)` transform. Both B edges reach the HDMI edges. The 2048 × 2304 resolution test is currently sent to the physical second screen for onsite confirmation.
 - Automated evidence: the production web build passes; second-display routing asserts the output aperture is 8:9; C1/output normalized text parity passes after a clean WebView reload.
+
+final result: passed
+
+## Library weekday startup and two-library divider correction
+
+- Source visual truth: `C:/Users/leadb/AppData/Local/Temp/codex-clipboard-cc2079de-dfe5-4626-979d-1b01796de56c.png` (788 x 188 px), showing the two library targets above the weekday and event-category rows.
+- Desktop implementation evidence: `artifacts/library-weekday-cold-start-full.png` (2560 x 1600 physical px) records a cold Tauri launch; `artifacts/library-weekday-divider-actual.png` is the focused 788 x 188 px implementation crop; `artifacts/library-weekday-divider-comparison.png` places the source and implementation side by side at identical pixel dimensions.
+- Viewport and density: the desktop window is 2560 x 1600 physical px, approximately 1707 x 1067 CSS px at device scale factor 1.5. The focused source and implementation are both 788 x 188 px, so no density normalization or resampling was required for the detailed comparison.
+- State: the cold launch occurred on Monday, 2026-08-31, and selected 周一 automatically. The focused implementation was then switched manually to 七夕 to match the supplied source state; after capture it was restored to 周一.
+- Full-view regression evidence: the cold-start desktop capture preserves the complete L/C/R/B shell, fixed L width, real 762-song library, Deck layout and bottom navigation. No surrounding component moved when the divider was restored.
+- Focused comparison evidence: both images preserve the same two equal library columns, seven equal weekday columns, seven equal event columns, compact typography and graphite selection surfaces. The implementation adds the requested neutral one-pixel divider continuously beneath both library columns, while the active library overlays its existing two-pixel cyan channel line.
+- Comparison history: the previous implementation initialized the current category with a hard-coded 周六 value and relied on the active library underline, leaving the inactive library side visually without a bottom separator. Startup now resolves the local `Date.getDay()` through a tested Monday-first mapping; manual category buttons continue to update state without any timer resetting the selection. A positioned neutral divider is painted above both library buttons and the active button paints its channel line above that divider.
+- Required fidelity surfaces: the existing Inter/Noto Sans SC typography, row heights, column spacing, graphite tokens, cyan active state and all app-specific labels are unchanged. No image or icon asset was added to the product UI. The new line uses the existing neutral structure-line family and does not introduce another semantic color.
+- Interaction and safety evidence: manual selection of 七夕 succeeded, then 周一 was restored. Both mpv Deck IPC endpoints returned `pause=true` after the interaction; no load or playback control was exercised. The focused playlist tests pass 6/6, production WebView asset compilation passes and whitespace validation has no error.
+- Findings: the earlier startup-selection and missing-divider issues are resolved. No actionable P0/P1/P2 issue remains for the requested weekday initialization, manual category selection or two-library separator.
 
 final result: passed

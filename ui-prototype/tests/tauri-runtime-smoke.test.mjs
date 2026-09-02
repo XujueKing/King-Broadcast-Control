@@ -82,7 +82,7 @@ test("Tauri desktop keeps C1 active and the output WebView hidden on one display
   assert.match(mainState.status, /单屏 · C1 预览/);
   assert.match(mainState.footer, /单屏模式 · C1 实时预览/);
   assert.equal(mainState.deckCount, 2);
-  assert.deepEqual(mainState.mixerChannels, ["总声音大小", "耳机音量", "麦克风 1 音量", "麦克风 2 音量"]);
+  assert.deepEqual(mainState.mixerChannels, ["总声音大小", "CUE 耳机监听音量", "麦克风 1 音量", "麦克风 2 音量"]);
   assert.equal(mainState.mixerControlCount, 4);
   assert.equal(mainState.mixerStripHeight, mainState.crossfaderHeight);
   assert.notEqual(mainState.microphoneColors[0], mainState.microphoneColors[1]);

@@ -22,16 +22,16 @@ function memoryStorage() {
   };
 }
 
-test("Qu-16 CUE routes the complete ST3 Deck mix to Phones and restores LR",()=>{
+test("Qu-16 CUE routes the complete ST3 Deck mix without changing either fader",()=>{
   assert.deepEqual(qu16DeckCueWrites(true),[
-    {key:"fader:st-3",value:0},
+    {key:"assign:st-3:LR",value:0},
     {key:"pafl:st-3",value:1},
   ]);
-  assert.deepEqual(qu16DeckCueWrites(false,0.73),[
+  assert.deepEqual(qu16DeckCueWrites(false,1),[
     {key:"pafl:st-3",value:0},
-    {key:"fader:st-3",value:0.73},
+    {key:"assign:st-3:LR",value:1},
   ]);
-  assert.throws(()=>qu16DeckCueWrites(false),/原主扩推子值/);
+  assert.throws(()=>qu16DeckCueWrites(false),/LR Assign 真值/);
 });
 
 test("CUE waits for authoritative matching Qu-16 readback",()=>{
@@ -39,7 +39,7 @@ test("CUE waits for authoritative matching Qu-16 readback",()=>{
   const snapshot={
     connected:true,
     synced:true,
-    parameters:{"fader:st-3":0,"pafl:st-3":1},
+    parameters:{"assign:st-3:LR":0,"pafl:st-3":1},
     pendingDetails:{},
   };
   assert.equal(qu16WritesConfirmed(snapshot,writes),true);
@@ -106,7 +106,9 @@ test("CUE carries the selected Deck's complete rescue layer and isolates the oth
     },
     physicalAudioStarted:false,
   });
-  assert.equal(plans[0].volume,Math.min(100,24*(10**(4/20))));
+  // CUE follows the selected Deck's headphone level exactly. Accompaniment and
+  // rescue playback must not reintroduce the retired +4 dB mode boost.
+  assert.equal(plans[0].volume,24);
   assert.equal(plans[1].volume,0);
   assert.equal(plans[0].playing,true);
 });
@@ -132,23 +134,24 @@ test("physical Vocal Engine output disables duplicate local rescue players",()=>
   ]);
 });
 
-test("CUE recovery survives a renderer restart until LR is explicitly restored",()=>{
+test("CUE recovery survives a renderer restart until LR Assign is explicitly restored",()=>{
   const storage=memoryStorage();
   assert.equal(loadDeckCueRecovery(storage),null);
-  assert.equal(persistDeckCueRecovery({deck:1,mainFader:0.73},storage),true);
-  assert.deepEqual(loadDeckCueRecovery(storage),{deck:1,mainFader:0.73});
+  assert.equal(persistDeckCueRecovery({deck:1,mainAssigned:1},storage),true);
+  assert.deepEqual(loadDeckCueRecovery(storage),{deck:1,mainAssigned:1});
 
-  assert.equal(persistDeckCueRecovery({deck:2,mainFader:0.73},storage),true);
-  assert.deepEqual(loadDeckCueRecovery(storage),{deck:2,mainFader:0.73});
+  assert.equal(persistDeckCueRecovery({deck:2,mainAssigned:1},storage),true);
+  assert.deepEqual(loadDeckCueRecovery(storage),{deck:2,mainAssigned:1});
   assert.equal(clearDeckCueRecovery(storage),true);
   assert.equal(storage.values.has(DECK_CUE_RECOVERY_STORAGE_KEY),false);
   assert.equal(loadDeckCueRecovery(storage),null);
 });
 
 test("CUE recovery rejects malformed or unsafe persisted state",()=>{
-  assert.equal(normalizeDeckCueRecovery({deck:3,mainFader:0.5}),null);
-  assert.equal(normalizeDeckCueRecovery({deck:1,mainFader:"bad"}),null);
+  assert.equal(normalizeDeckCueRecovery({deck:3,mainAssigned:1}),null);
+  assert.equal(normalizeDeckCueRecovery({deck:1,mainAssigned:true}),null);
   assert.equal(normalizeDeckCueRecovery({deck:1}),null);
-  assert.equal(normalizeDeckCueRecovery({deck:"1",mainFader:0.5}),null);
-  assert.deepEqual(normalizeDeckCueRecovery({deck:1,mainFader:2}),{deck:1,mainFader:1});
+  assert.equal(normalizeDeckCueRecovery({deck:"1",mainAssigned:1}),null);
+  assert.equal(normalizeDeckCueRecovery({deck:1,mainAssigned:2}),null);
+  assert.deepEqual(normalizeDeckCueRecovery({deck:1,mainAssigned:0}),{deck:1,mainAssigned:0});
 });

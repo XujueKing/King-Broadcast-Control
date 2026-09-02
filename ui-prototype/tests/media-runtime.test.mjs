@@ -2,15 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   ACCOMPANIMENT_GAIN_DB,
+  AUTO_DJ_CROSSFADE_SECONDS,
+  AUTO_DJ_PRELOAD_SECONDS,
   deckOutputVolumePercent,
   deckOutputVolumeScalar,
+  describeReadyStemProgress,
   equalPowerGains,
   formatDuration,
   getAdjacentPlayableTrack,
+  getAdjacentPlayableTrackInQueue,
   getNextPlayableTrack,
+  getNextPlayableTrackInQueue,
   isPlayableVideoSource,
   mediaAssetFingerprint,
   parseDuration,
+  planDeckAutoTransition,
+  planDeckOperatorArbitration,
+  resetDeckVocalModeForTrackChange,
 } from "../src/media-runtime.js";
 
 test("duration formatting supports long club sets",()=>{
@@ -34,12 +42,20 @@ test("crossfader uses equal-power gains",()=>{
   assert.ok(Math.abs(equalPowerGains(100).deck2-1)<1e-12);
 });
 
-test("accompaniment mode applies a capped per-deck gain without changing original mode",()=>{
-  assert.equal(ACCOMPANIMENT_GAIN_DB,4);
+test("accompaniment switching is level-neutral",()=>{
+  assert.equal(ACCOMPANIMENT_GAIN_DB,0);
   assert.equal(deckOutputVolumePercent(0.5,80,"original"),40);
-  assert.ok(Math.abs(deckOutputVolumePercent(0.5,80,"accompaniment")-63.39572769844454)<1e-9);
+  assert.equal(deckOutputVolumePercent(0.5,80,"accompaniment"),40);
   assert.equal(deckOutputVolumePercent(1,100,"accompaniment"),100);
   assert.equal(deckOutputVolumeScalar(1,100,"accompaniment"),1);
+});
+
+test("loading another track resets only that Deck to original",()=>{
+  const modes={1:"accompaniment",2:"accompaniment"};
+  assert.deepEqual(resetDeckVocalModeForTrackChange(modes,1),{1:"original",2:"accompaniment"});
+  assert.deepEqual(resetDeckVocalModeForTrackChange(modes,2),{1:"accompaniment",2:"original"});
+  const original={1:"original",2:"accompaniment"};
+  assert.equal(resetDeckVocalModeForTrackChange(original,1),original);
 });
 
 test("sequence and shuffle never select the other loaded Deck",()=>{
@@ -58,4 +74,67 @@ test("media fingerprint changes when metadata changes",()=>{
   const initial=[{path:"song.mp3",modifiedUnixMs:1,sizeBytes:10,durationMs:1000,title:"A"}];
   const changed=[{...initial[0],title:"B"}];
   assert.notEqual(mediaAssetFingerprint(initial),mediaAssetFingerprint(changed));
+});
+
+test("playlist playback follows L-region order instead of complete-library indexes",()=>{
+  const queue=[126,169,729];
+  assert.equal(getNextPlayableTrackInQueue(queue,126,-1,false),169);
+  assert.equal(getNextPlayableTrackInQueue(queue,126,169,false),729);
+  assert.equal(getNextPlayableTrackInQueue(queue,729,-1,false),126);
+  assert.equal(getNextPlayableTrackInQueue([126],126,-1,false),null);
+  assert.equal(getAdjacentPlayableTrackInQueue(queue,169,-1,-1),126);
+  assert.equal(getAdjacentPlayableTrackInQueue(queue,169,126,1),729);
+});
+
+test("deleting an on-air playlist item captures its successor before removal",()=>{
+  const queueBeforeRemoval=[126,169,729];
+  assert.equal(getNextPlayableTrackInQueue(queueBeforeRemoval,169,-1,false),729);
+  assert.equal(getNextPlayableTrackInQueue(queueBeforeRemoval,729,-1,false),126);
+  assert.equal(getNextPlayableTrackInQueue([169],169,-1,false),null);
+});
+
+test("automatic DJ transition preloads and crossfades the next source-playlist song",()=>{
+  const queue=[126,169,729];
+  assert.deepEqual(planDeckAutoTransition({queue,currentIndex:126,mode:"sequence",remainingSeconds:AUTO_DJ_PRELOAD_SECONDS+1}),{action:"wait",nextIndex:169});
+  assert.deepEqual(planDeckAutoTransition({queue,currentIndex:126,mode:"sequence",remainingSeconds:AUTO_DJ_PRELOAD_SECONDS}),{action:"preload",nextIndex:169});
+  assert.deepEqual(planDeckAutoTransition({queue,currentIndex:126,mode:"sequence",remainingSeconds:AUTO_DJ_CROSSFADE_SECONDS,preparedTargetIndex:169}),{action:"crossfade",nextIndex:169});
+  assert.deepEqual(planDeckAutoTransition({queue,currentIndex:729,mode:"sequence",remainingSeconds:AUTO_DJ_PRELOAD_SECONDS}),{action:"preload",nextIndex:126});
+  assert.deepEqual(planDeckAutoTransition({queue,currentIndex:729,mode:"sequence",remainingSeconds:AUTO_DJ_CROSSFADE_SECONDS,preparedTargetIndex:126}),{action:"crossfade",nextIndex:126});
+  assert.deepEqual(planDeckAutoTransition({queue,currentIndex:126,mode:"repeat-one",remainingSeconds:1}),{action:"none",nextIndex:null});
+  assert.deepEqual(planDeckAutoTransition({queue,currentIndex:126,mode:"sequence",remainingSeconds:1,otherDeckPlaying:true}),{action:"none",nextIndex:null});
+});
+
+test("operator arbitration keeps playing or target-CUE Decks independent",()=>{
+  assert.deepEqual(
+    planDeckOperatorArbitration({mode:"sequence",targetDeck:2}),
+    {automationAllowed:true,eofAction:"continue-source",reason:"automatic"},
+  );
+  assert.deepEqual(
+    planDeckOperatorArbitration({mode:"sequence",targetDeck:2,cueDeck:1}),
+    {automationAllowed:true,eofAction:"continue-source",reason:"automatic"},
+  );
+  assert.deepEqual(
+    planDeckOperatorArbitration({mode:"sequence",targetDeck:2,targetPlaying:true,cueDeck:2}),
+    {automationAllowed:false,eofAction:"continue-source",reason:"cue-occupied"},
+  );
+  assert.deepEqual(
+    planDeckOperatorArbitration({mode:"sequence",targetDeck:2,targetPlaying:true,cueDeck:null}),
+    {automationAllowed:false,eofAction:"continue-source",reason:"operator-independent-playback"},
+  );
+});
+
+test("completed stems become usable before reference analysis finishes",()=>{
+  assert.deepEqual(
+    describeReadyStemProgress(true,{status:"running",stage:"analyzing-reference"}),
+    {label:"伴奏已就绪 · 补音参考制作中",actionLabel:"伴奏可用"},
+  );
+  assert.deepEqual(
+    describeReadyStemProgress(true,{status:"running",stage:"transcribing"}),
+    {label:"伴奏已就绪 · 歌词分析中",actionLabel:"伴奏可用"},
+  );
+  assert.deepEqual(
+    describeReadyStemProgress(true,{status:"ready",stage:"complete"}),
+    {label:"全部制作完成",actionLabel:"已完成"},
+  );
+  assert.equal(describeReadyStemProgress(false,{status:"running",stage:"separating-high-quality"}),null);
 });

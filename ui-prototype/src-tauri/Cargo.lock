@@ -2075,6 +2075,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "encoding_rs",
+ "flate2",
  "font-kit",
  "king-vocal-engine",
  "libloading 0.8.9",

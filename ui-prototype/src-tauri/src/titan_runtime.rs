@@ -246,6 +246,13 @@ fn read_static_playbacks(host: &str) -> Result<Vec<TitanPlaybackHandle>, String>
     read_playbacks_from_path(host, "/titan/handles/StaticPlaybacks")
 }
 
+fn read_triggerable_playbacks(host: &str) -> Result<Vec<TitanPlaybackHandle>, String> {
+    let mut handles = read_playbacks(host)?;
+    handles.extend(read_static_playbacks(host)?);
+    handles.retain(is_triggerable_playback);
+    Ok(handles)
+}
+
 fn read_handle_summaries(host: &str, path: &str) -> Result<Vec<TitanHandleSummary>, String> {
     let handles = http_get_json(host, path)?;
     let handles = handles
@@ -286,7 +293,7 @@ fn read_inventory(host: &str) -> Result<TitanInventory, String> {
         .to_string();
     let fixtures = read_handle_summaries(host, "/titan/handles/Fixtures")?;
     let groups = read_handle_summaries(host, "/titan/handles/Groups")?;
-    let playback_count = read_handle_summaries(host, "/titan/handles/Playbacks")?.len();
+    let playback_count = read_triggerable_playbacks(host)?.len();
     let authoritative = !live_show_name.trim().is_empty() && !fixtures.is_empty();
     let blocked_reason = if live_show_name.trim().is_empty() {
         "Titan WebAPI 当前没有暴露已加载 Show；不能把图纸数量当作真机数量".to_string()
@@ -313,11 +320,10 @@ fn read_inventory(host: &str) -> Result<TitanInventory, String> {
 }
 
 fn is_triggerable_playback(handle: &TitanPlaybackHandle) -> bool {
-    handle.group == "Playbacks"
-        && matches!(
-            handle.handle_type.as_str(),
-            "cueHandle" | "chaseHandle" | "cueListHandle"
-        )
+    matches!(
+        handle.handle_type.as_str(),
+        "cueHandle" | "chaseHandle" | "cueListHandle"
+    )
 }
 
 fn verified_playback(
@@ -343,7 +349,7 @@ fn verified_playback(
             }
         ));
     }
-    read_playbacks(host)?
+    read_triggerable_playbacks(host)?
         .into_iter()
         .find(|handle| handle.titan_id == Some(titan_id) && is_triggerable_playback(handle))
         .ok_or_else(|| {
@@ -418,7 +424,7 @@ pub async fn titan_status(host: String) -> Result<Value, String> {
 #[tauri::command]
 pub async fn titan_playbacks(host: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        serde_json::to_value(read_playbacks(&host)?).map_err(|error| error.to_string())
+        serde_json::to_value(read_triggerable_playbacks(&host)?).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -540,9 +546,12 @@ mod tests {
         assert!(is_triggerable_playback(&playback("chaseHandle")));
         assert!(is_triggerable_playback(&playback("cueListHandle")));
         assert!(!is_triggerable_playback(&playback("fixtureHandle")));
+        let mut roller_playback = playback("cueHandle");
+        roller_playback.group = "RollerA".to_string();
+        assert!(is_triggerable_playback(&roller_playback));
         let mut static_playback = playback("cueHandle");
         static_playback.group = "StaticPlaybacks".to_string();
-        assert!(!is_triggerable_playback(&static_playback));
+        assert!(is_triggerable_playback(&static_playback));
     }
 
     #[test]

@@ -1190,6 +1190,56 @@ def build_lrc(items: list[dict[str, Any]]) -> str:
     return "\n".join(f"{lrc_timestamp(start)}{text}" for start, text in display_lines if text) + "\n"
 
 
+LRC_LINE_TIMESTAMP = re.compile(r"\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]")
+
+
+def read_lrc_sidecar(media_path: Path) -> dict[str, Any] | None:
+    """Reuse an imported KRC/LRC timeline instead of asking MOSS to transcribe it again."""
+    sidecar = media_path.with_suffix(".lrc")
+    if not sidecar.is_file():
+        return None
+    raw = sidecar.read_text(encoding="utf-8-sig")
+    timed_lines: list[tuple[float, str]] = []
+    for line in raw.splitlines():
+        matches = list(LRC_LINE_TIMESTAMP.finditer(line))
+        if not matches:
+            continue
+        text = LRC_LINE_TIMESTAMP.sub("", line).strip()
+        if not text:
+            continue
+        for match in matches:
+            seconds = int(match.group(1)) * 60 + float(match.group(2))
+            timed_lines.append((seconds, text))
+    timed_lines.sort(key=lambda item: item[0])
+    unique_lines: list[tuple[float, str]] = []
+    for start, text in timed_lines:
+        if unique_lines and abs(start - unique_lines[-1][0]) < 0.001 and text == unique_lines[-1][1]:
+            continue
+        unique_lines.append((start, text))
+    if not unique_lines:
+        return None
+    items: list[dict[str, Any]] = []
+    for index, (start, text) in enumerate(unique_lines):
+        compact_length = len(re.sub(r"\s+", "", text))
+        natural_end = start + max(1.2, min(8.0, compact_length * 0.32))
+        next_start = unique_lines[index + 1][0] if index + 1 < len(unique_lines) else None
+        end = min(natural_end, next_start) if next_start is not None and next_start > start else natural_end
+        items.append(
+            {
+                "text": text,
+                "startSeconds": round(start, 3),
+                "endSeconds": round(max(start + 0.08, end), 3),
+            }
+        )
+    return {
+        "sourcePath": str(sidecar),
+        "text": "\n".join(text for _, text in unique_lines),
+        "language": "Chinese" if any(re.search(r"[\u3400-\u9fff]", text) for _, text in unique_lines) else "Unknown",
+        "items": items,
+        "lrc": raw if raw.endswith("\n") else raw + "\n",
+    }
+
+
 def publish_artifacts(working_directory: Path, derived_directory: Path) -> None:
     for name in ("lyrics.txt", "lyrics.lrc", "lyrics.words.json"):
         source = working_directory / name
@@ -1248,6 +1298,7 @@ def process_job(database_path: Path, job: dict[str, Any], pipeline: dict[str, An
         lyrics_path = derived_directory / "lyrics.lrc"
         words_path = derived_directory / "lyrics.words.json"
         text_path = derived_directory / "lyrics.txt"
+        sidecar_lyrics = read_lrc_sidecar(media_path)
         if lyrics_artifacts_are_current(derived_directory, pipeline):
             update_job(database_path, job_id, status="running", stage="reusing-lyrics")
             lyrics_payload = json.loads(words_path.read_text(encoding="utf-8"))
@@ -1259,6 +1310,30 @@ def process_job(database_path: Path, job: dict[str, Any], pipeline: dict[str, An
             temporary_lrc = derived_directory / "lyrics.lrc.tmp"
             temporary_lrc.write_text(build_lrc(words), encoding="utf-8")
             os.replace(temporary_lrc, lyrics_path)
+        elif sidecar_lyrics is not None:
+            update_job(database_path, job_id, status="running", stage="reusing-sidecar-lyrics")
+            text = str(sidecar_lyrics["text"])
+            language = str(sidecar_lyrics["language"])
+            words = list(sidecar_lyrics["items"])
+            (working_directory / "lyrics.txt").write_text(text + "\n", encoding="utf-8")
+            (working_directory / "lyrics.words.json").write_text(
+                json.dumps(
+                    {
+                        "language": language,
+                        "source": "sidecar-lrc",
+                        "sourcePath": sidecar_lyrics["sourcePath"],
+                        "items": words,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            (working_directory / "lyrics.lrc").write_text(
+                str(sidecar_lyrics["lrc"]), encoding="utf-8"
+            )
+            update_job(database_path, job_id, status="running", stage="publishing")
+            publish_artifacts(working_directory, derived_directory)
         else:
             update_job(database_path, job_id, status="running", stage="transcribing")
             text, language, words = transcribe_vocals_segmented(

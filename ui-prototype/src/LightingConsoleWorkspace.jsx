@@ -3,10 +3,18 @@ import {
   ArrowsClockwise,
   CheckCircle,
   DownloadSimple,
+  DotsNine,
   Eye,
   FolderOpen,
+  LightbulbFilament,
   Lightning,
+  MapPin,
   MagnifyingGlass,
+  Pulse,
+  SlidersHorizontal,
+  Sparkle,
+  SquaresFour,
+  Sun,
   UploadSimple,
 } from "@phosphor-icons/react";
 
@@ -32,6 +40,43 @@ const staticPlaybackObservations = [
   "未编程",
 ];
 
+const fixtureReferenceTypes = {
+  beam: { label:"260W 光束摇头灯", count:54, Icon:LightbulbFilament },
+  wash: { label:"摇头染色灯", count:59, Icon:Sun },
+  strobe: { label:"LED 屏闪灯", count:28, Icon:Pulse },
+  eye: { label:"两眼灯 200W", count:29, Icon:DotsNine },
+  matrix: { label:"50×50 矩阵灯", count:4, Icon:SquaresFour },
+  laser: { label:"5W 全彩激光", count:4, Icon:Sparkle },
+};
+
+const railPoints = (zone, x, ys, offset = 0) => ys.map((y, index) => ({
+  id:`${zone}-${x}-${y}`,
+  zone,
+  x,
+  y,
+  type:["beam", "wash", "eye", "strobe"][(index + offset) % 4],
+}));
+
+const fixtureReferencePoints = [
+  ...railPoints("舞池西侧", 25, [15,20,25,30,35,40], 0),
+  ...railPoints("舞池中西", 39, [11,16,21,26,31,36,41], 1),
+  ...railPoints("舞池中轴", 54, [11,16,21,26,31,36,41,46,51,56], 2),
+  ...railPoints("舞池东侧", 68, [16,21,26,31,36,41,46,51,56], 3),
+  ...railPoints("东侧卡座", 82, [28,34,40,46,52,58], 0),
+  ...railPoints("VIP 西侧", 25, [66,72,78,84,90], 1),
+  ...railPoints("VIP 中西", 39, [65,71,77,83,89], 2),
+  ...railPoints("VIP 中轴", 54, [65,71,77,83,89], 3),
+  ...railPoints("VIP 东侧", 68, [72,78,84,90], 0),
+  { id:"matrix-nw", zone:"舞池北侧", x:33, y:8, type:"matrix" },
+  { id:"matrix-ne", zone:"舞池北侧", x:69, y:8, type:"matrix" },
+  { id:"matrix-nw-2", zone:"舞池北侧", x:33, y:13, type:"matrix" },
+  { id:"matrix-ne-2", zone:"舞池北侧", x:69, y:13, type:"matrix" },
+  { id:"laser-nw", zone:"舞池北侧", x:39, y:6, type:"laser" },
+  { id:"laser-ne", zone:"舞池北侧", x:63, y:6, type:"laser" },
+  { id:"laser-cross-west", zone:"舞池横梁", x:47, y:34, type:"laser" },
+  { id:"laser-cross-east", zone:"舞池横梁", x:61, y:34, type:"laser" },
+];
+
 export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
   titanHost,
   titanStatus,
@@ -55,6 +100,7 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
   const [query, setQuery] = useState("");
   const [layerFilter, setLayerFilter] = useState("all");
   const [previewTitanId, setPreviewTitanId] = useState(null);
+  const [selectedFloorPoint, setSelectedFloorPoint] = useState(fixtureReferencePoints[0].id);
   const playbackRows = useMemo(() => {
     const rows = [...titanPlaybacks];
     const known = new Set(rows.map((playback) => Number(playback.titanId)));
@@ -105,6 +151,8 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
     () => new Map((titanStaticPlaybacks ?? []).map((playback) => [Number(playback.index), playback])),
     [titanStaticPlaybacks],
   );
+  const selectedReferencePoint = fixtureReferencePoints.find((point) => point.id === selectedFloorPoint) ?? fixtureReferencePoints[0];
+  const selectedReferenceType = fixtureReferenceTypes[selectedReferencePoint.type];
 
   return <section className="titan-workspace" aria-label="Avolites Titan 灯光控制台映射">
     <header className="titan-workspace-header">
@@ -120,7 +168,7 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
     </header>
 
     <section className="titan-package-bar">
-      <div><b>.kinglight</b><span>配置搬运包</span><small>导入只恢复配置，不 Fire / Release Playback</small></div>
+      <div><b>B区 · 设置与调节</b><span>.kinglight 配置搬运</span><small>导入只恢复配置，不 Fire / Release Playback</small></div>
       <button type="button" onClick={onExportPackage}><DownloadSimple/>导出配置包</button>
       <button type="button" onClick={() => onOpenPackageDirectory("outbox")}><FolderOpen/>导出目录</button>
       <button type="button" onClick={() => onOpenPackageDirectory("inbox")}><FolderOpen/>收件箱</button>
@@ -129,7 +177,7 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
     </section>
 
     <section className="titan-quick-map">
-      <header><span><b>首页快捷映射 0–9</b><small>一个 Playback 只占一个快捷位；改变选择不会触发真机</small></span><em>{Object.keys(titanMappings).length}/10 已绑定</em></header>
+      <header><span><b>快捷控制 0–9</b><small>一个 Playback 只占一个快捷位；改变选择不会触发真机</small></span><em>{Object.keys(titanMappings).length}/10 已绑定</em></header>
       <div>{Array.from({ length: 10 }, (_, presetId) => {
         const titanId = Number(titanMappings[presetId]);
         const playback = titanPlaybacks.find((item) => Number(item.titanId) === titanId);
@@ -157,21 +205,52 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
     </section>
 
     <section className="titan-stage-simulator" style={{ "--titan-preview-color": previewColor }}>
-      <header><span><b>KING CLUB 一楼灯位数字预演</b><small>READ-ONLY PATCH · 图纸只定位，不采信图例数量</small></span><em>{previewPlayback ? `${previewEffect.kingName || previewPlayback.legend || `Playback ${previewPlayback.titanId}`} · ${layerLabels[previewEffect.layer || ""]}` : "等待效果配置"}</em></header>
+      <header><span><b>A区 · 酒吧平面与灯位</b><small>SVG 建筑轮廓 · 灯位来自 P-11 参考图</small></span><em>{previewPlayback ? `${previewEffect.kingName || previewPlayback.legend || `Playback ${previewPlayback.titanId}`} · ${layerLabels[previewEffect.layer || ""]}` : "等待效果配置"}</em></header>
       <div className={`titan-venue-plan ${inventoryReady ? "inventory-ready" : "inventory-blocked"}`}>
-        <img src="/assets/king-club-floor-lighting-plan.png" alt="KING CLUB 一楼灯光分布图"/>
-        <div className="titan-patch-gate">
-          <strong>{inventoryReady ? "真机 Patch 已读取" : inventoryBusy ? "正在读取真机 Patch" : "灯位映射已锁定"}</strong>
-          <span>{inventoryMessage}</span>
-          <small>{inventoryReady ? `下一步把 ${titanInventory.fixtureCount} 个真机 Fixture 与图纸坐标逐一绑定；绑定前不生成虚构灯位。` : `控制台在线但 Show / Fixture 句柄未完整返回。缓存 Show：${titanInventory?.cachedShowName || "--"}；实时 Show：${titanInventory?.liveShowName || "--"}。`}</small>
+        <div className="titan-plan-canvas">
+          <img src="/assets/king-club-floor-outline.svg" alt="KING CLUB 一楼 SVG 平面轮廓"/>
+          <div className="titan-floor-points" aria-label="P-11 参考灯位">
+            {fixtureReferencePoints.map((point) => {
+              const type = fixtureReferenceTypes[point.type];
+              const FixtureIcon = type.Icon;
+              return <button
+                type="button"
+                key={point.id}
+                className={`titan-floor-point type-${point.type} ${selectedFloorPoint === point.id ? "selected" : ""}`}
+                style={{ left:`${point.x}%`, top:`${point.y}%` }}
+                aria-label={`${point.zone} · ${type.label}`}
+                title={`${point.zone} · ${type.label} · 参考坐标，待 Titan Patch 绑定`}
+                onClick={() => setSelectedFloorPoint(point.id)}
+              ><FixtureIcon weight="fill"/></button>;
+            })}
+          </div>
+          <div className="titan-plan-zone-labels" aria-hidden="true"><span className="dance">主舞池</span><span className="booth">DJ / 设备区</span><span className="vip">VIP 卡座</span><span className="entry">主入口</span></div>
+          <div className="titan-patch-gate">
+            <strong>{inventoryReady ? "真机 Patch 已读取" : inventoryBusy ? "正在读取真机 Patch" : "参考灯位 · 尚未绑定真机"}</strong>
+            <span>{inventoryMessage}</span>
+            <small>{inventoryReady ? `${titanInventory.fixtureCount} 个 Fixture / ${titanInventory.groupCount} 个 Group 已可用于坐标绑定。` : `图中位置只依据设计图，不写入 Titan；缓存 Show：${titanInventory?.cachedShowName || "--"}。`}</small>
+          </div>
         </div>
-        <div className="titan-stage-scale"><span>真实图纸底图</span><small>实际数量以 Titan Fixture Patch 为唯一依据</small></div>
+        <div className="titan-plan-selection"><MapPin weight="fill"/><span><b>{selectedReferencePoint.zone}</b><small>{selectedReferenceType.label} · 设计数量 {selectedReferenceType.count} · 当前为参考位置</small></span></div>
+        <div className="titan-floor-legend">{Object.entries(fixtureReferenceTypes).map(([id, type]) => { const LegendIcon = type.Icon; return <span key={id} className={`type-${id}`}><LegendIcon weight="fill"/><b>{type.label}</b><small>{type.count}</small></span>; })}</div>
+        <div className="titan-stage-scale"><span>平面图 A区</span><small>真机地址以 Titan Fixture Patch 为唯一依据</small></div>
+      </div>
+    </section>
+
+    <section className="titan-control-rack" aria-label="B区效果调节">
+      <header><span><SlidersHorizontal weight="fill"/><b>现场效果调节</b><small>只修改 KING 语义配置，不会立即 Fire Playback</small></span><em>{previewPlayback ? previewEffect.kingName || previewPlayback.legend || `Playback ${previewPlayback.titanId}` : "等待选择 Titan Playback"}</em></header>
+      <div>
+        <label className="titan-floor-target"><span>图纸定位</span><b>{selectedReferencePoint.zone}</b><small>{selectedReferenceType.label}</small></label>
+        <label><span>颜色族</span><select disabled={!previewPlayback} value={previewEffect.colorFamily ?? ""} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { colorFamily:event.target.value || null })}><option value="">颜色未知</option><option value="cyan">青蓝</option><option value="blue">蓝色</option><option value="green">绿色</option><option value="amber">琥珀</option><option value="red">红色</option><option value="purple">紫色</option><option value="pink">粉色</option><option value="white">白色</option></select></label>
+        <label><span>能量</span><select disabled={!previewPlayback} value={previewEffect.energy ?? ""} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { energy:event.target.value === "" ? null : Number(event.target.value) })}><option value="">能量未知</option><option value="0.2">低 20%</option><option value="0.5">中 50%</option><option value="0.8">高 80%</option><option value="1">峰值 100%</option></select></label>
+        <label><span>运动</span><select disabled={!previewPlayback} value={previewEffect.motion ?? ""} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { motion:event.target.value || null })}><option value="">运动未知</option><option value="none">静态</option><option value="slow">慢速</option><option value="medium">中速</option><option value="fast">快速</option></select></label>
+        <div className="titan-control-flags"><label><input type="checkbox" disabled={!previewPlayback} checked={previewEffect.beatSync === true} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { beatSync:event.target.checked })}/>节拍同步</label><label><input type="checkbox" disabled={!previewPlayback} checked={previewEffect.continuous === true} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { continuous:event.target.checked })}/>持续效果</label><label><input type="checkbox" disabled={!previewPlayback || previewEffect.layer === "event"} checked={previewEffect.safeAuto === true} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { safeAuto:event.target.checked })}/>允许自动</label></div>
       </div>
     </section>
 
     <section className="titan-registry">
       <header>
-        <div><b>完整效果注册表</b><small>把 Titan 已编程 Playback 解释成 KING 可调度的 Scene / Accent / Event；未知项默认禁止自动触发</small></div>
+        <div><SlidersHorizontal weight="fill"/><b>效果参数与完整注册表</b><small>把 Titan Playback 解释成 Scene / Accent / Event；未知项默认禁止自动触发</small></div>
         <label className="titan-search"><MagnifyingGlass/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、分组或 TitanId"/></label>
         <select value={layerFilter} onChange={(event) => setLayerFilter(event.target.value)}>
           <option value="all">全部效果</option><option value="active">真机正在运行</option><option value="scene">SCENE 场景层</option><option value="accent">ACCENT 节拍层</option><option value="event">EVENT 事件层</option><option value="unassigned">未分类</option>

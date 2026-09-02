@@ -1,0 +1,49 @@
+{
+  "format": "club.king.kinglight",
+  "version": 1,
+  "exportedAt": "2026-09-02T08:30:00+08:00",
+  "console": {
+    "vendor": "Avolites",
+    "family": "Titan",
+    "host": "192.168.1.154",
+    "deviceName": "TT-00608",
+    "softwareVersion": "11.3.5",
+    "showName": "2024.12.28"
+  },
+  "effects": [
+    {
+      "effectId": "titan:71835",
+      "presetId": 0,
+      "titanHandle": 71835,
+      "titanLegend": "Cue StaticPlaybacks[10]",
+      "kingName": "暗红加特林·常规",
+      "layer": "scene",
+      "category": "常规",
+      "colorFamily": "red",
+      "energy": 0.1,
+      "motion": "slow",
+      "strobe": false,
+      "beatSync": false,
+      "continuous": true,
+      "safeAuto": false,
+      "priority": 10
+    }
+  ],
+  "automation": {
+    "rhythmRule": "bar",
+    "videoRule": "off",
+    "intensity": 0.1
+  },
+  "presentation": {
+    "playbackModes": {
+      "0": "loop"
+    },
+    "fixtureColors": {}
+  },
+  "safety": {
+    "executeOnImport": false,
+    "allowFixtureDmx": false,
+    "allowPatchWrite": false,
+    "allowHighRiskEventAuto": false
+  }
+}

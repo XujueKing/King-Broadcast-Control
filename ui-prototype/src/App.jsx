@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
-  ACCOMPANIMENT_GAIN_DB,
+  AUTO_DJ_CROSSFADE_SECONDS,
+  AUTO_DJ_PRELOAD_SECONDS,
   deckOutputVolumePercent,
   deckOutputVolumeScalar,
+  describeReadyStemProgress,
   equalPowerGains,
   formatDuration,
-  getAdjacentPlayableTrack,
-  getNextPlayableTrack,
+  getAdjacentPlayableTrackInQueue,
+  getNextPlayableTrackInQueue,
   isPlayableVideoSource,
   mediaAssetFingerprint,
   parseDuration,
+  planDeckAutoTransition,
+  planDeckOperatorArbitration,
+  resetDeckVocalModeForTrackChange,
 } from "./media-runtime.js";
 import { collectRhythmEvents } from "./rhythm-runtime.js";
 import { reconcileStableAssets } from "./media-scan-stability.js";
@@ -37,10 +43,31 @@ import {
   qu16DeckCueWrites,
   qu16WritesConfirmed,
 } from "./deck-cue.js";
+import { kingClubQu16OutputBaselineWrites } from "./qu16-output-baseline.js";
 import { homeMicrophoneBindings, microphoneFaderReadback, microphoneFaderWrites } from "./microphone-control.js";
 import { MixerWorkspace } from "./MixerConsole.jsx";
 import { clearQu16MeterSnapshot, publishQu16MeterSnapshot } from "./qu16-meter-store.js";
 import { LightingConsoleWorkspace } from "./LightingConsoleWorkspace.jsx";
+import { ShowEditorWorkspace } from "./ShowEditorWorkspace.jsx";
+import {
+  PLAYLIST_MANAGEMENT_STORAGE_KEY,
+  addPlaylistCategory,
+  createPlaylistPlaybackSource,
+  createDefaultPlaylistLibraries,
+  currentWeekdayPlaylistName,
+  movePlaylistWithinKind,
+  movePlaylistTrack,
+  normalizePlaylistLibraries,
+  playlistWeekdays,
+  removePlaylistTrack,
+  removePlaylistCategory,
+  renamePlaylistCategory,
+  resolvePlaybackQueuePaths,
+  resolveWeekdayDeckStartupSelections,
+  seedPlaylistManagement,
+  updatePlaylistLibrary,
+  updatePlaylistTracks,
+} from "./playlist-management.js";
 import { prewarmPersistentVideoThumbnails } from "./video-thumbnail-cache.js";
 import { defaultMixerModelId, mixerModelById, mixerModels } from "./mixer-models/index.js";
 import {
@@ -64,7 +91,8 @@ import {
   SpeakerHigh, SpeakerSlash, ArrowsClockwise, MonitorPlay, WifiHigh, CheckCircle,
   GearSix, FloppyDisk, MusicNoteSimple, RepeatOnce, ListNumbers, Shuffle,
   ArrowCounterClockwise, Headphones, Microphone,
-  MagnifyingGlass, X,
+  MagnifyingGlass, X, Plus, Trash, ArrowUp, ArrowDown,
+  CalendarBlank, PencilSimple, FolderOpen, Folders, DownloadSimple, UploadSimple, FilmSlate,
 } from "@phosphor-icons/react";
 
 function useStableCallback(callback) {
@@ -194,8 +222,6 @@ const loadMixerNumber = (key, fallback) => {
     return fallback;
   }
 };
-const weekdayPlaylists = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-const specialPlaylists = ["情人节", "七夕", "万圣节", "圣诞节", "跨年", "店庆", "活动"];
 // 首版先以本地示例预设展示；名称、时长与循环方式后续由“灯光管理”页面配置并保存。
 const lights = [
   { id: 0, label: "绿色律动", duration: "01:20", loop: true },
@@ -226,6 +252,23 @@ const loadTitanEffectRegistry = () => {
     return Array.isArray(saved) ? saved : [];
   } catch {
     return [];
+  }
+};
+const loadLightPlaybackModes = () => {
+  const fallback = Object.fromEntries(lights
+    .filter((item) => item.label)
+    .map((item) => [item.id, item.loop ? "loop" : "once"]));
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("king.lighting.playbackModes"));
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return fallback;
+    return {
+      ...fallback,
+      ...Object.fromEntries(Object.entries(saved)
+        .map(([presetId,mode])=>[Number(presetId),mode])
+        .filter(([presetId,mode])=>Number.isInteger(presetId)&&presetId>=0&&presetId<=9&&(mode==="once"||mode==="loop"))),
+    };
+  } catch {
+    return fallback;
   }
 };
 const SITE_TITAN_IDENTITY = {deviceName:"TT-00608"};
@@ -294,14 +337,14 @@ const defaultMonitorTargets = [
   { name: "备用监控机位", short: "备用", status: "连接", source: "", src: "/assets/neon-stage.png" },
 ];
 const nav = [
-  ["首页", House], ["音乐管理", MusicNotes], ["视频管理", VideoCamera],
-  ["灯光管理", LightbulbFilament], ["调音台", SlidersHorizontal], ["Avolites Tiger Touch Pro", DiceFive], ["设置", GearSix],
+  ["首页", House], ["音乐管理", MusicNotes], ["演出编排", FilmSlate],
+  ["调音台", SlidersHorizontal], ["Avolites Tiger Touch Pro", DiceFive], ["设置", GearSix],
 ];
 const playbackModes = [
   ["single", "单曲播放", MusicNoteSimple],
   ["repeat-one", "单曲循环", RepeatOnce],
-  ["sequence", "顺序播放", ListNumbers],
-  ["shuffle", "随机播放", Shuffle],
+  ["sequence", "顺序播放 · 双 Deck 自动衔接", ListNumbers],
+  ["shuffle", "随机播放 · 双 Deck 自动衔接", Shuffle],
 ];
 // 使用真实歌曲进度；固定秒数的 DJ 时间窗口只改变屏幕上的显示尺度，不改变歌曲速度。
 // 峰值仅作为数据缓存，Canvas 只绘制当前可见窗口，避免数千个 DOM 柱状元素造成掉帧。
@@ -650,7 +693,7 @@ function DeckSignalMeter({ number, side, peaks, progress, durationSeconds, playi
   return <div ref={rootRef} className={`waveform deck-signal-meter deck-signal-meter-${side} ${playing?"is-live":""}`} data-motion-paused={motionPaused?"true":"false"} role="meter" aria-label={`Deck ${number} 实时输出电平`} aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span ref={fillRef}/></div>;
 }
 
-function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, onPrevious, onReplay, onNext, active, side, level, progress, onSeek, playbackMode, onPlaybackModeChange, lyricsEnabled, lyricsAvailable, vocalMode, accompanimentAvailable, aiRescueEnabled, aiReferenceStatus, onAiRescueToggle, onLyricsToggle, onVocalToggle, cueActive, cueAvailable, cueBusy, cueMessage, onCueToggle, meterMotionPaused }) {
+function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, onPrevious, onReplay, onNext, active, side, level, progress, onSeek, playbackMode, onPlaybackModeChange, automationOwner, lyricsEnabled, lyricsAvailable, vocalMode, accompanimentAvailable, aiRescueEnabled, aiReferenceStatus, onAiRescueToggle, onLyricsToggle, onVocalToggle, cueActive, cueAvailable, cueBusy, cueMessage, onCueToggle, meterMotionPaused }) {
   const demoWaveformPeaks = useMemo(() => buildWaveformPeaks(track.title, WAVEFORM_PEAK_COUNT), [track.title]);
   const dragRef = useRef(null);
   const [seekPreview, setSeekPreview] = useState(null);
@@ -658,6 +701,7 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
   const [rhythmSaving, setRhythmSaving] = useState(false);
   const [rhythmError, setRhythmError] = useState("");
   const [rhythmDraft, setRhythmDraft] = useState({ bpm:"120", firstDownbeatSeconds:"0", beatsPerBar:"4" });
+  const [coverFailed, setCoverFailed] = useState(false);
   const durationSeconds = parseDuration(track.duration);
   const displayedProgress = Math.min(durationSeconds, Math.max(0, seekPreview ?? progress));
   const waveformPeaks = analysis?.peaks?.length ? analysis.peaks : track.path ? [] : demoWaveformPeaks;
@@ -666,6 +710,7 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
   const aiReferenceReady = Boolean(aiReferenceStatus?.ready);
   const aiReferenceBound = Boolean(aiReferenceStatus?.bound);
   const aiRescueActive = vocalMode==="accompaniment"&&aiReferenceReady&&aiRescueEnabled;
+  const showCover = Boolean(track.coverSrc)&&!coverFailed;
   const aiRescueTitle = vocalMode!=="accompaniment"
     ? "先开启伴唱模式，再使用 AI 补音"
     : aiReferenceBusy
@@ -721,6 +766,7 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
     setSeekPreview(null);
     setRhythmEditorOpen(false);
   }, [track.title]);
+  useEffect(() => setCoverFailed(false), [track.coverSrc]);
 
   const previewSeek = (clientX) => {
     const drag = dragRef.current;
@@ -783,8 +829,8 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
   };
 
   return <section className={`deck deck-channel-${side} ${active ? "deck-active" : ""}`}>
-    <div className="deck-head"><span className="deck-number">DECK {number}</span><div className="deck-primary-actions"><button type="button" className={`deck-cue-toggle ${cueActive?"active":""}`} aria-label={`Deck ${number} ${cueActive?"关闭":"开启"} Qu-16 耳机 CUE`} aria-pressed={cueActive} title={cueMessage} disabled={!cueAvailable||cueBusy} onClick={onCueToggle}>{cueBusy&&cueActive?"…":"CUE"}</button><button type="button" className={`deck-play-toggle ${playing?"on":"paused"}`} onClick={onPlay} aria-label={`Deck ${number} ${playing?"暂停":"播放"}`} aria-pressed={playing} title={playing?"暂停":"播放"}>{playing?<Pause weight="fill"/>:<Play weight="fill"/>}</button></div></div>
-    <div className="deck-track"><div className={`cover cover-${side}`}><MusicNotes weight="fill" /></div><div><h3>{track.title}</h3><p>{track.artist} · <button type="button" className="deck-bpm-button" disabled={!track.path||!analysis} onClick={openRhythmEditor} title="校正 BPM 与小节第一拍">{analyzedBpm} BPM</button>{analysis?.correction&&<span className="rhythm-corrected">已校正</span>}</p></div></div>
+    <div className="deck-head"><span className="deck-number">DECK {number}</span>{automationOwner==="operator"?<span className="deck-automation-owner held" title="人工播放或 CUE 时保持独立；停止且无 CUE 后可被自动衔接使用">人工运行 · 空闲后自动</span>:<span className="deck-automation-owner" title="该 Deck 空闲时可由自动衔接使用">AUTO 待命</span>}<div className="deck-primary-actions"><button type="button" className={`deck-cue-toggle ${cueActive?"active":""}`} aria-label={`Deck ${number} ${cueActive?"关闭":"开启"} Qu-16 耳机 CUE`} aria-pressed={cueActive} title={cueMessage} disabled={!cueAvailable||cueBusy} onClick={onCueToggle}>{cueBusy&&cueActive?"…":"CUE"}</button><button type="button" className={`deck-play-toggle ${playing?"on":"paused"}`} onClick={onPlay} aria-label={`Deck ${number} ${playing?"暂停":"播放"}`} aria-pressed={playing} title={playing?"暂停":"播放"}>{playing?<Pause weight="fill"/>:<Play weight="fill"/>}</button></div></div>
+    <div className="deck-track"><div className={`cover cover-${side} ${showCover?"has-artwork":""}`}>{showCover?<img src={track.coverSrc} alt="" decoding="async" onError={()=>setCoverFailed(true)}/>:<MusicNotes weight="fill" />}</div><div><h3>{track.title}</h3><p>{track.artist} · <button type="button" className="deck-bpm-button" disabled={!track.path||!analysis} onClick={openRhythmEditor} title="校正 BPM 与小节第一拍">{analyzedBpm} BPM</button>{analysis?.correction&&<span className="rhythm-corrected">已校正</span>}</p></div></div>
     <DeckSignalMeter key={`fixed-tick-meter-v2-${number}`} number={number} side={side} peaks={waveformPeaks} progress={displayedProgress} durationSeconds={durationSeconds} playing={playing} outputPercent={level} motionPaused={meterMotionPaused}/>
     <div
       className={`track-waveform track-waveform-${side} ${playing?"is-playing":""} ${seekPreview!==null?"is-seeking":""}`}
@@ -807,7 +853,7 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
     <div className="time-row"><span>{formatDuration(displayedProgress)}</span><span>{track.duration}</span></div>
     <div className="deck-bottom-controls">
       <div className="transport" role="group" aria-label={`Deck ${number} 曲目控制`}><button type="button" className="track-step previous" aria-label={`Deck ${number} 装载上一首并暂停`} title="装载上一首（暂停）" onClick={onPrevious}><SkipBack weight="fill" /></button><button type="button" className="track-step replay" aria-label={`Deck ${number} 从头重放当前歌曲`} title="从头重放" onClick={onReplay}><ArrowCounterClockwise weight="bold" /></button><button type="button" className={`vocal-rescue-toggle ${aiRescueActive?"active":""} ${aiReferenceReady?"ready":"missing"} ${aiReferenceBusy?"busy":""}`} aria-label={`Deck ${number} ${aiRescueActive?"关闭":"打开"} AI 补音`} aria-pressed={aiRescueActive} disabled={vocalMode!=="accompaniment"||!aiReferenceReady||aiReferenceBusy} onClick={onAiRescueToggle} title={aiRescueTitle}>{aiReferenceBusy?"准备":aiReferenceReady?"补音✓":"补音"}</button><button type="button" className="track-step next" aria-label={`Deck ${number} 装载下一首并暂停`} title="装载下一首（暂停）" onClick={onNext}><SkipForward weight="fill" /></button><button type="button" className={`deck-extra-toggle lyrics-toggle ${lyricsEnabled?"active":""} ${!lyricsAvailable?"missing":""}`} aria-label={`Deck ${number} ${lyricsAvailable?(lyricsEnabled?"关闭":"打开"):"未找到"}歌词`} aria-pressed={lyricsEnabled&&lyricsAvailable} onClick={onLyricsToggle} title={lyricsAvailable?(lyricsEnabled?"关闭歌词":"打开歌词"):"未找到同名 LRC 歌词文件"}>{lyricsAvailable?"词":"无词"}</button></div>
-      <div className="deck-playback-modes" role="group" aria-label={`Deck ${number} 播放模式`}>{playbackModes.map(([id,label,Icon])=><button type="button" key={id} className={playbackMode===id?"active":""} aria-label={label} aria-pressed={playbackMode===id} onClick={()=>onPlaybackModeChange(id)} title={label}><Icon weight={playbackMode===id?"fill":"regular"}/></button>)}<button type="button" className="active vocal-toggle" aria-label={`Deck ${number} 当前${vocalMode==="original"?"原唱":"伴唱"}，点击切换`} aria-pressed={vocalMode==="accompaniment"} disabled={!accompanimentAvailable} onClick={onVocalToggle} title={!accompanimentAvailable?"伴唱音轨尚未生成":vocalMode==="original"?`当前原唱，点击切换为伴唱（自动补偿 +${ACCOMPANIMENT_GAIN_DB} dB）`: `当前伴唱（自动补偿 +${ACCOMPANIMENT_GAIN_DB} dB），点击切换为原唱`}>{vocalMode==="original"?"原唱":"伴唱"}</button></div>
+      <div className="deck-playback-modes" role="group" aria-label={`Deck ${number} 播放模式`}>{playbackModes.map(([id,label,Icon])=><button type="button" key={id} className={playbackMode===id?"active":""} aria-label={label} aria-pressed={playbackMode===id} onClick={()=>onPlaybackModeChange(id)} title={label}><Icon weight={playbackMode===id?"fill":"regular"}/></button>)}<button type="button" className="active vocal-toggle" aria-label={`Deck ${number} 当前${vocalMode==="original"?"原唱":"伴唱"}，点击切换`} aria-pressed={vocalMode==="accompaniment"} disabled={!accompanimentAvailable} onClick={onVocalToggle} title={!accompanimentAvailable?"伴唱音轨尚未生成":vocalMode==="original"?"当前原唱，点击切换为伴唱（保持 Deck 当前音量）":"当前伴唱（保持 Deck 当前音量），点击切换为原唱"}>{vocalMode==="original"?"原唱":"伴唱"}</button></div>
     </div>
     {rhythmEditorOpen&&<div className={`rhythm-editor rhythm-editor-${side}`} role="dialog" aria-label={`Deck ${number} 节拍网格校正`}>
       <header><b>节拍网格校正</b><button type="button" onClick={()=>setRhythmEditorOpen(false)}>关闭</button></header>
@@ -1115,6 +1161,18 @@ const loadSelectedVocalProfileId=()=>{
   try{return localStorage.getItem(VOCAL_PROFILE_SELECTED_STORAGE_KEY)||""}catch{return ""}
 };
 const normalizeSongPickerText=value=>String(value??"").trim().toLocaleLowerCase().replace(/\s+/g,"");
+const managedTrackIdentity=(track,index)=>track?.path??(track?.demo?`demo:${index}`:null);
+const managedSongFolder=(song)=>{
+  const rawPath=String(song?.path??"");
+  if(!rawPath||rawPath.startsWith("demo:"))return "演示歌曲";
+  const parts=rawPath.replace(/\//g,"\\").split("\\").filter(Boolean);
+  let folders=parts.slice(0,-1);
+  const audioRootIndex=folders.map((part)=>part.toLocaleLowerCase()).lastIndexOf("audio");
+  if(audioRootIndex>=0)folders=folders.slice(audioRootIndex+1);
+  else folders=folders.slice(-2);
+  if(folders[0]?.toLocaleLowerCase()===".king-imported")folders=folders.slice(1);
+  return folders.length?folders.join(" / "):"根目录";
+};
 const vocalProfileDeviceScore=(device)=>{
   const name=String(device?.name||"").toLowerCase();
   let score=0;
@@ -1126,7 +1184,14 @@ const vocalProfileDeviceScore=(device)=>{
   return score;
 };
 
-function MusicManagementView({ vocalProfiles, vocalProfileDevices, vocalProfileBusy, vocalProfileMessage, songs, selectedProfileId, onSelectedProfileIdChange, onCreateVocalProfile, onRecordVocalProfileSample, onDeleteVocalProfile, onPrepareVocalProfileSong }) {
+function MusicManagementView({ leftPanel, activeLibrary, onActiveLibraryChange, vocalProfiles, vocalProfileDevices, vocalProfileBusy, vocalProfileMessage, songs, videos, lightingEffects, playlistManagement, onPlaylistManagementChange, activePlaylistName, onActivePlaylistNameChange, onLoadTrackToDeck, onOpenShowEditor, runtimeMode, packageMessage, packageDirectories, packageReadyPaths, onExportPackage, onImportPackage, onOpenPackageDirectory, selectedProfileId, onSelectedProfileIdChange, onCreateVocalProfile, onRecordVocalProfileSample, onDeleteVocalProfile, onPrepareVocalProfileSong }) {
+  const [activeSection,setActiveSection]=useState("all");
+  const [libraryQuery,setLibraryQuery]=useState("");
+  const [libraryFolder,setLibraryFolder]=useState("");
+  const [selectedManagedSongPath,setSelectedManagedSongPath]=useState("");
+  const [categoryName,setCategoryName]=useState("");
+  const [categoryKind,setCategoryKind]=useState("event");
+  const [editingCategoryId,setEditingCategoryId]=useState("");
   const [profileName,setProfileName]=useState("");
   const [profileConsent,setProfileConsent]=useState(false);
   const [profileDevice,setProfileDevice]=useState(()=>{
@@ -1137,6 +1202,97 @@ function MusicManagementView({ vocalProfiles, vocalProfileDevices, vocalProfileB
   const [selectedSongPath,setSelectedSongPath]=useState(()=>{
     try{return localStorage.getItem(VOCAL_PROFILE_SONG_STORAGE_KEY)||""}catch{return ""}
   });
+  const songsByPath=useMemo(()=>new Map(songs.map(song=>[song.path,song])),[songs]);
+  const selectedPlaylist=playlistManagement.playlists.find(item=>item.name===activePlaylistName)??playlistManagement.playlists[0]??null;
+  const playlistGroups=useMemo(()=>[
+    {id:"weekday",label:"每周分类",items:playlistManagement.playlists.filter(item=>item.kind==="weekday")},
+    {id:"event",label:"节日活动",items:playlistManagement.playlists.filter(item=>item.kind==="event")},
+    {id:"custom",label:"自定义分类",items:playlistManagement.playlists.filter(item=>item.kind==="custom")},
+  ],[playlistManagement.playlists]);
+  const libraryFolders=useMemo(()=>{
+    const counts=new Map();
+    songs.forEach((song)=>{
+      const folder=managedSongFolder(song);
+      counts.set(folder,(counts.get(folder)??0)+1);
+    });
+    return [...counts.entries()]
+      .map(([name,count])=>({name,count}))
+      .sort((left,right)=>left.name.localeCompare(right.name,"zh-CN",{numeric:true}));
+  },[songs]);
+  const folderLibrarySongs=useMemo(
+    ()=>libraryFolder?songs.filter((song)=>managedSongFolder(song)===libraryFolder):songs,
+    [songs,libraryFolder],
+  );
+  const filteredLibrarySongs=useMemo(()=>{
+    const query=normalizeSongPickerText(libraryQuery);
+    return folderLibrarySongs.filter(song=>!query||normalizeSongPickerText(`${song.title} ${song.artist} ${song.path}`).includes(query)).slice(0,200);
+  },[folderLibrarySongs,libraryQuery]);
+  const selectedManagedSong=songsByPath.get(selectedManagedSongPath)??songs[0]??null;
+  const selectedBinding=selectedManagedSong?.path?playlistManagement.trackBindings[selectedManagedSong.path]??{}:{};
+  const todayName=currentWeekdayPlaylistName();
+  useEffect(()=>{
+    if(selectedManagedSongPath&&songsByPath.has(selectedManagedSongPath))return;
+    setSelectedManagedSongPath(songs[0]?.path??"");
+  },[selectedManagedSongPath,songs,songsByPath]);
+  useEffect(()=>{
+    if(!libraryFolder||libraryFolders.some((folder)=>folder.name===libraryFolder))return;
+    setLibraryFolder("");
+  },[libraryFolder,libraryFolders]);
+  useEffect(()=>{
+    setEditingCategoryId("");
+    setCategoryName("");
+  },[activeLibrary]);
+  const choosePlaylist=(playlistItem)=>{
+    onActivePlaylistNameChange(playlistItem.name);
+    setSelectedManagedSongPath(playlistItem.trackPaths[0]??"");
+  };
+  const submitCategory=()=>{
+    const name=categoryName.trim();
+    if(!name)return;
+    if(playlistManagement.playlists.some(item=>item.id!==editingCategoryId&&item.name.toLocaleLowerCase()===name.toLocaleLowerCase())){window.alert("已存在同名分类");return}
+    if(editingCategoryId){
+      const current=playlistManagement.playlists.find((item)=>item.id===editingCategoryId);
+      const updated=renamePlaylistCategory(playlistManagement,editingCategoryId,name);
+      onPlaylistManagementChange(updated);
+      if(current?.name===activePlaylistName)onActivePlaylistNameChange(name);
+      setEditingCategoryId("");
+      setCategoryName("");
+      return;
+    }
+    const item={id:`playlist:${categoryKind}:${Date.now()}`,name,kind:categoryKind,trackPaths:[]};
+    onPlaylistManagementChange(addPlaylistCategory(playlistManagement,item));
+    setCategoryName("");
+    choosePlaylist(item);
+  };
+  const beginRenameCategory=(playlistItem)=>{
+    if(!playlistItem||playlistItem.kind==="weekday")return;
+    setEditingCategoryId(playlistItem.id);
+    setCategoryKind(playlistItem.kind);
+    setCategoryName(playlistItem.name);
+  };
+  const cancelCategoryEdit=()=>{
+    setEditingCategoryId("");
+    setCategoryName("");
+  };
+  const deleteCategory=(playlistItem)=>{
+    if(!playlistItem||playlistItem.kind==="weekday")return;
+    if(!window.confirm(`删除分类“${playlistItem.name}”？歌曲文件不会被删除。`))return;
+    const updated=removePlaylistCategory(playlistManagement,playlistItem.id);
+    onPlaylistManagementChange(updated);
+    if(activePlaylistName===playlistItem.name)choosePlaylist(updated.playlists.find((item)=>item.name===currentWeekdayPlaylistName())??updated.playlists[0]);
+    if(editingCategoryId===playlistItem.id)cancelCategoryEdit();
+  };
+  const addSongToSelectedCategory=(path)=>{
+    if(!selectedPlaylist||!path)return;
+    onPlaylistManagementChange(updatePlaylistTracks(playlistManagement,selectedPlaylist.id,paths=>paths.includes(path)?paths:[...paths,path]));
+    setSelectedManagedSongPath(path);
+  };
+  const moveCategory=(playlistItem,direction)=>onPlaylistManagementChange(movePlaylistWithinKind(playlistManagement,playlistItem.id,direction));
+  const updateBinding=(patch)=>{
+    if(!selectedManagedSong?.path)return;
+    onPlaylistManagementChange({...playlistManagement,trackBindings:{...playlistManagement.trackBindings,[selectedManagedSong.path]:{...selectedBinding,...patch}}});
+  };
+  const updateDailySchedule=(day,playlistId)=>onPlaylistManagementChange({...playlistManagement,dailySchedule:{...playlistManagement.dailySchedule,[day]:playlistId}});
   useEffect(()=>{
     if(!selectedProfileId&&vocalProfiles[0]?.id)onSelectedProfileIdChange(vocalProfiles[0].id);
     if(selectedProfileId&&!vocalProfiles.some(profile=>profile.id===selectedProfileId))onSelectedProfileIdChange(vocalProfiles[0]?.id??"");
@@ -1186,11 +1342,42 @@ function MusicManagementView({ vocalProfiles, vocalProfileDevices, vocalProfileB
     return limited;
   },[songs,songQuery,selectedSong]);
   return <section className="music-management-view" aria-label="音乐管理">
-    <header className="music-management-header">
-      <div><MusicNotes weight="fill"/><span><b>音乐管理</b><small>歌手包录制与单曲补音制作</small></span></div>
-      <span>歌手只采集一次 · 每首歌离线生成参考轨</span>
-    </header>
-    <section className="vocal-profile-panel" aria-label="歌手音色包">
+    {leftPanel}
+    <div className="music-management-main">
+      <header className="music-management-header">
+        <div><MusicNotes weight="fill"/><span><b>音乐管理</b><small>管理歌单、每日播放顺序，以及歌曲的视频与灯光编排</small></span></div>
+        <span><b>{songs.length}</b> 首可用歌曲 · 今日计划 <strong>{playlistManagement.playlists.find(item=>item.id===playlistManagement.dailySchedule[todayName])?.name??"未设置"}</strong></span>
+      </header>
+      <div className="music-management-tabs" role="tablist" aria-label="音乐管理功能">
+        {[["all","全部歌单",ListNumbers],["categories","分类管理",Folders],["schedule","每日播放",CalendarBlank],["editor","歌曲编辑",PencilSimple],["packages","导入导出",FolderOpen],["vocal","歌手包",Microphone]].map(([id,label,Icon])=><button type="button" key={id} role="tab" aria-selected={activeSection===id} className={activeSection===id?"active":""} onClick={()=>setActiveSection(id)}><Icon weight={activeSection===id?"fill":"regular"}/>{label}</button>)}
+      </div>
+      <section className="music-management-content">
+        {activeSection==="all"&&<section className="playlist-arrangement-workspace all-playlists-workspace">
+          <header className="playlist-editor-header"><span><b>全部歌单</b><small>从完整曲库选择歌曲，插入左侧当前分类；不会自动装载或播放</small></span><strong className="current-category-target">{activeLibrary}号曲库 / {selectedPlaylist?.name??"未选择"} · {selectedPlaylist?.trackPaths.length??0} 首</strong></header>
+          <div className="playlist-library-adder all-playlists-search"><label className="all-playlists-folder"><Folders weight="fill"/><select aria-label="按歌曲文件夹分类" value={libraryFolder} onChange={event=>setLibraryFolder(event.target.value)}><option value="">全部文件夹 · {songs.length} 首</option>{libraryFolders.map(folder=><option value={folder.name} key={folder.name}>{folder.name} · {folder.count} 首</option>)}</select></label><label className="all-playlists-query"><MagnifyingGlass weight="bold"/><input aria-label="搜索全部歌单中的歌曲或歌手" type="search" value={libraryQuery} onChange={event=>setLibraryQuery(event.target.value)} placeholder={libraryFolder?`在 ${libraryFolder} 中搜索歌曲或歌手`:"搜索全部歌曲、歌手或目录"}/></label><span>{filteredLibrarySongs.length}/{folderLibrarySongs.length} 首</span></div>
+          <div className="playlist-table-head"><span>#</span><span>歌曲</span><span>歌手</span><span>BPM</span><span>时长</span><span>关联</span><span>加入当前分类</span></div>
+          <div className="playlist-track-list">{filteredLibrarySongs.length?filteredLibrarySongs.map((song,index)=>{const binding=playlistManagement.trackBindings[song.path]??{};const alreadyAdded=Boolean(selectedPlaylist?.trackPaths.includes(song.path));return <article key={song.path} className={selectedManagedSong?.path===song.path?"selected":""} onClick={()=>setSelectedManagedSongPath(song.path)}><span className="playlist-drag">{String(index+1).padStart(2,"0")}</span><span className="playlist-song-copy"><b>{song.title}</b><small>{song.tag||song.path?.split(/[\\/]/).pop()}</small></span><span>{song.artist||"--"}</span><span>{song.bpm||"--"}</span><span>{song.duration||"--"}</span><span className="playlist-bindings"><i className={binding.videoId?"bound":""}><VideoCamera/>视频</i><i className={binding.lightPresetId!==undefined&&binding.lightPresetId!==""?"bound":""}><LightbulbFilament/>灯光</i></span><span className="all-playlist-actions"><button type="button" disabled={!selectedPlaylist||alreadyAdded} onClick={event=>{event.stopPropagation();addSongToSelectedCategory(song.path)}}>{alreadyAdded?<><CheckCircle weight="fill"/>已在{selectedPlaylist.name}</>:<><Plus weight="bold"/>加入{selectedPlaylist?.name??"当前分类"}</>}</button><button type="button" onClick={event=>{event.stopPropagation();onLoadTrackToDeck(1,song.index)}} title="装载到 Deck 1，不自动播放">1</button><button type="button" onClick={event=>{event.stopPropagation();onLoadTrackToDeck(2,song.index)}} title="装载到 Deck 2，不自动播放">2</button></span></article>}):<div className="playlist-empty"><MusicNotes/><b>没有找到歌曲</b><small>请更换歌曲名、歌手或目录关键词。</small></div>}</div>
+        </section>}
+        {activeSection==="categories"&&<section className="category-management-workspace">
+          <header><div className="category-management-heading"><span><b>分类管理 · {activeLibrary}号曲库</b><small>两套曲库独立保存类型、顺序和歌曲归属</small></span><div className="category-library-switch" role="group" aria-label="选择要管理的曲库"><button type="button" className={activeLibrary===1?"active":""} onClick={()=>onActiveLibraryChange(1)}>1号曲库</button><button type="button" className={activeLibrary===2?"active":""} onClick={()=>onActiveLibraryChange(2)}>2号曲库</button></div></div><form onSubmit={event=>{event.preventDefault();submitCategory()}}><select aria-label="分类类型" value={categoryKind} disabled={Boolean(editingCategoryId)} onChange={event=>setCategoryKind(event.target.value)}><option value="event">节日活动</option><option value="custom">自定义分类</option></select><input aria-label={editingCategoryId?"修改分类名称":"新分类名称"} value={categoryName} onChange={event=>setCategoryName(event.target.value)} placeholder={editingCategoryId?"输入新名称":"输入分类名称"}/><button type="submit" disabled={!categoryName.trim()}>{editingCategoryId?<><FloppyDisk weight="bold"/>保存改名</>:<><Plus weight="bold"/>新建分类</>}</button>{editingCategoryId&&<button type="button" onClick={cancelCategoryEdit}><X weight="bold"/>取消</button>}</form></header>
+          <div className="category-management-groups">{playlistGroups.map(group=><section key={group.id}><header><span><b>{group.label}</b><small>{group.items.length} 个分类{group.id==="weekday"?" · 系统固定":" · 可增删改排序"}</small></span></header><div>{group.items.length?group.items.map((item,index)=><article key={item.id} className={selectedPlaylist?.id===item.id?"active":""} onClick={()=>choosePlaylist(item)}><span><Folders weight={selectedPlaylist?.id===item.id?"fill":"regular"}/><b>{item.name}</b><small>{item.trackPaths.length} 首 · {selectedPlaylist?.id===item.id?"左侧当前分类":"点击设为当前分类"}</small></span><div><button type="button" disabled={index===0} onClick={event=>{event.stopPropagation();moveCategory(item,-1)}} title="上移"><ArrowUp/></button><button type="button" disabled={index===group.items.length-1} onClick={event=>{event.stopPropagation();moveCategory(item,1)}} title="下移"><ArrowDown/></button>{item.kind!=="weekday"&&<><button type="button" onClick={event=>{event.stopPropagation();beginRenameCategory(item)}} title="修改名称"><PencilSimple/></button><button type="button" className="danger" onClick={event=>{event.stopPropagation();deleteCategory(item)}} title="删除分类"><Trash/></button></>}</div></article>):<div className="category-group-empty">还没有{group.label}，可从上方新增</div>}</div></section>)}</div>
+        </section>}
+        {activeSection==="schedule"&&<section className="daily-schedule-workspace">
+          <header><span><b>{activeLibrary}号曲库 · 每日播放计划</b><small>这套计划只属于当前曲库；保存计划不会自动启动播放</small></span></header>
+          <div>{playlistWeekdays.map(day=><label key={day} className={day===todayName?"today":""}><span><CalendarBlank weight="fill"/><b>{day}</b><small>{day===todayName?"今天":"默认歌单"}</small></span><select value={playlistManagement.dailySchedule[day]??""} onChange={event=>updateDailySchedule(day,event.target.value)}>{playlistManagement.playlists.map(item=><option key={item.id} value={item.id}>{item.name} · {item.trackPaths.length} 首</option>)}</select></label>)}</div>
+        </section>}
+        {activeSection==="editor"&&<section className="song-link-editor">
+          <header><span><b>歌曲演出项目</b><small>音乐管理只负责选择歌曲；视频、图片、文字与灯光统一进入演出编排</small></span></header>
+          <label className="song-editor-selector"><span>编辑歌曲</span><select value={selectedManagedSong?.path??""} onChange={event=>setSelectedManagedSongPath(event.target.value)}>{songs.map(song=><option key={song.path} value={song.path}>{song.title} · {song.artist||"--"}</option>)}</select></label>
+          {selectedManagedSong&&<><div className="song-editor-summary"><MusicNotes weight="fill"/><span><b>{selectedManagedSong.title}</b><small>{selectedManagedSong.artist||"未知歌手"} · {selectedManagedSong.bpm||"--"} BPM · {selectedManagedSong.duration||"--"}</small></span><div><button type="button" onClick={()=>onLoadTrackToDeck(1,selectedManagedSong.index)}>装载 Deck 1</button><button type="button" onClick={()=>onLoadTrackToDeck(2,selectedManagedSong.index)}>装载 Deck 2</button><button type="button" className="open-show-editor" onClick={()=>onOpenShowEditor(selectedManagedSong.index)}><FilmSlate weight="fill"/>打开演出编排</button></div></div><div className="song-binding-grid"><label><span><VideoCamera weight="fill"/><b>旧版视频关联</b><small>保留旧项目兼容；新项目请在演出编排时间线配置</small></span><select value={selectedBinding.videoId??""} onChange={event=>updateBinding({videoId:event.target.value})}><option value="">不关联视频</option>{videos.map(video=><option key={video.id} value={video.id}>{video.name}</option>)}</select></label><label><span><LightbulbFilament weight="fill"/><b>旧版灯光关联</b><small>只保存效果映射，不会在这里触发现场灯光</small></span><select value={selectedBinding.lightPresetId??""} onChange={event=>updateBinding({lightPresetId:event.target.value})}><option value="">不关联灯光</option>{lightingEffects.map(effect=><option key={effect.id} value={effect.id}>{effect.name}</option>)}</select></label></div><label className="song-editor-note"><span>编排备注</span><textarea value={selectedBinding.note??""} onChange={event=>updateBinding({note:event.target.value})} placeholder="例如：前奏 8 秒后切舞台视频，副歌进入暖场灯光"/></label></>}
+        </section>}
+        {activeSection==="packages"&&<section className="music-package-workspace">
+          <header><span><b>歌曲包导入与导出</b><small>图二中的文件操作已集中到这里，首页仅保留播放功能</small></span><strong className={runtimeMode==="full"?"full":"player"}>{runtimeMode==="full"?"制作 + 播放":"仅播放"}</strong></header>
+          <label><span>选择歌曲包</span><select value={selectedManagedSong?.path??""} onChange={event=>setSelectedManagedSongPath(event.target.value)}>{songs.map(song=><option key={song.path} value={song.path}>{song.title} · {song.artist||"--"}</option>)}</select></label>
+          <div className="music-package-actions"><button type="button" disabled={!selectedManagedSong||!packageReadyPaths.includes(selectedManagedSong.path)} onClick={()=>onExportPackage(selectedManagedSong?.path)}><DownloadSimple weight="bold"/>导出所选歌曲包</button><button type="button" onClick={()=>onOpenPackageDirectory("outbox")}><FolderOpen/>打开导出目录</button><button type="button" onClick={()=>onOpenPackageDirectory("inbox")}><FolderOpen/>打开收件箱</button><button type="button" onClick={onImportPackage}><UploadSimple weight="bold"/>导入收件箱</button></div>
+          <footer>{packageMessage||(packageDirectories?.inboxDirectory?`收件箱：${packageDirectories.inboxDirectory}`:"选择已完成 AI 制作的歌曲后可导出 .kingsong；导入不会自动播放。")}</footer>
+        </section>}
+        {activeSection==="vocal"&&<section className="vocal-profile-panel" aria-label="歌手音色包">
       <header>
         <div><Microphone weight="fill"/><span><b>歌手包 · 一次采集长期复用</b><small>每首歌仍需按歌词和旋律离线生成一次；歌手无需为每首歌重新录音</small></span></div>
         <strong className={selectedProfile?.state==="samples_ready"?"ready":"collecting"}>{selectedProfile ? (selectedProfile.state==="samples_ready"?"采样已合格":"采集中") : "尚未选择"}</strong>
@@ -1228,17 +1415,26 @@ function MusicManagementView({ vocalProfiles, vocalProfileDevices, vocalProfileB
         {selectedProfile.generatorState!=="ready"&&<p className="vocal-generator-warning">歌手采样可以先完成；本机歌声生成模型尚未安装时，只保存生成请求，不会用男原唱冒充女声。</p>}
       </>}
       <footer className={vocalProfileMessage?.state??"idle"}>{vocalProfileBusy?"正在录制或处理，请保持安静…":vocalProfileMessage?.message||"尚未建立歌手包"}</footer>
-    </section>
+    </section>}
+      </section>
+    </div>
   </section>;
 }
 
-function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitorChange, onSave, dirty, mixerModelId, mixerDriverStatus, mixerControlHost, mixerMeterStatus, onMixerModelChange, onMixerControlHostChange, onOpenMixerDriver, titanHost, titanStatus, titanPlaybacks, titanMappings, titanActionStatus, lightingPackageStatus, onTitanHostChange, onRefreshTitan, onTitanMappingChange, onExportLightingPackage, onImportLightingPackage, onOpenLightingPackageDirectory, vocalStatus, vocalBusy, onRefreshVocal, onVocalPresetChange, onVocalDisarm, vocalRouting, routingBusy, onDiscoverRouting, onSaveRouting, calibrationStatus, onRunCalibration }) {
+function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitorChange, onSave, dirty, runtimeCapability, audioAiWorker, aiRuntimeBusy, onAiRuntimeEnabledChange, mixerModelId, mixerDriverStatus, mixerControlHost, mixerMeterStatus, onMixerModelChange, onMixerControlHostChange, onOpenMixerDriver, titanHost, titanStatus, titanPlaybacks, titanMappings, titanActionStatus, lightingPackageStatus, onTitanHostChange, onRefreshTitan, onTitanMappingChange, onExportLightingPackage, onImportLightingPackage, onOpenLightingPackageDirectory, vocalStatus, vocalBusy, onRefreshVocal, onVocalPresetChange, onVocalDisarm, vocalRouting, routingBusy, onDiscoverRouting, onSaveRouting, calibrationStatus, onRunCalibration }) {
   const failoverView=describeVocalFailover(vocalStatus.failover);
+  const aiRuntimeAvailable=Boolean(runtimeCapability.aiProcessingAvailable);
+  const aiRuntimeEnabled=audioAiWorker.enabled!==false;
   return <section className="settings-view" aria-label="屏幕与监控设置">
     <header className="settings-header">
       <div><GearSix weight="fill"/><span><b>屏幕与监控按钮设置</b><small>左侧 4 个输出屏，右侧预览开关与 3 个监控机位</small></span></div>
       <button className="settings-save" onClick={onSave} disabled={!dirty}><FloppyDisk weight="fill"/>{dirty ? "保存配置" : "配置已保存"}</button>
     </header>
+    <section className={`settings-ai-runtime ${aiRuntimeEnabled?"enabled":"disabled"}`} aria-label="AI 歌曲制作运行开关">
+      <div className="settings-ai-runtime-identity"><Lightning weight="fill"/><span><b>AI 歌曲制作</b><small>控制 MOSS 8B、分轨和歌词制作后台；不影响 Deck、mpv、Qu-16 或已制作歌曲</small></span></div>
+      <div className="settings-ai-runtime-state" role="status"><i/><span><b>{!aiRuntimeAvailable?"本机为播放版":aiRuntimeEnabled?(audioAiWorker.running?"制作后台运行中":"制作后台启动中"):"开业模式 · AI 已关闭"}</b><small>{!aiRuntimeAvailable?"本机不会启动 MOSS 与制作 Worker":audioAiWorker.message||(aiRuntimeEnabled?"正在读取后台状态":"MOSS 与 Worker 均未运行")}</small></span></div>
+      <button type="button" className="settings-ai-runtime-toggle" role="switch" aria-checked={aiRuntimeEnabled} disabled={!aiRuntimeAvailable||aiRuntimeBusy} onClick={()=>onAiRuntimeEnabledChange(!aiRuntimeEnabled)}><span/><b>{aiRuntimeBusy?"处理中":aiRuntimeEnabled?"关闭 AI 制作":"开启 AI 制作"}</b></button>
+    </section>
     <section className="settings-mixer-model" aria-label="调音台型号设置">
       <div className="settings-mixer-identity"><SlidersHorizontal weight="fill"/><span><b>调音台型号包</b><small>USB-B 传输音频 · 以太网 TCP-MIDI 控制 · 选择型号后切换数字孪生 UI 与驱动</small></span></div>
       <label><span>当前型号</span><select value={mixerModelId} onChange={event=>onMixerModelChange(event.target.value)}>{mixerModels.map(model=><option value={model.id} key={model.id}>{model.displayName}</option>)}</select></label>
@@ -1348,21 +1544,52 @@ export function App() {
   const previewPanelRef = useRef(null);
   const lightPanelRef = useRef(null);
   const [library, setLibrary] = useState(1);
-  const [playlist, setPlaylist] = useState("周六");
+  const [playlistSelections,setPlaylistSelections]=useState(()=>{
+    const today=currentWeekdayPlaylistName();
+    return {"1":today,"2":today};
+  });
+  const playlist=playlistSelections[String(library)]??currentWeekdayPlaylistName();
+  const setPlaylist=useCallback((value)=>{
+    setPlaylistSelections(current=>{
+      const key=String(library);
+      const previous=current[key]??currentWeekdayPlaylistName();
+      const next=typeof value==="function"?value(previous):value;
+      return next===previous?current:{...current,[key]:next};
+    });
+  },[library]);
+  const [playlistLibraries,setPlaylistLibraries]=useState(()=>{
+    try{return normalizePlaylistLibraries(JSON.parse(localStorage.getItem(PLAYLIST_MANAGEMENT_STORAGE_KEY)))}catch{return createDefaultPlaylistLibraries()}
+  });
+  const playlistManagement=playlistLibraries.libraries[String(library)];
+  const setPlaylistManagement=useCallback((value)=>{
+    setPlaylistLibraries(current=>updatePlaylistLibrary(current,library,value));
+  },[library]);
+  const [playlistContextMenu,setPlaylistContextMenu]=useState(null);
+  const [trackContextMenu,setTrackContextMenu]=useState(null);
   const [songSearch, setSongSearch] = useState("");
   const [selectedTrack, setSelectedTrack] = useState(null);
-  const [deck1, setDeck1] = useState(0);
-  const [deck2, setDeck2] = useState(1);
+  const [deck1, setDeck1] = useState(()=>desktopRuntime?null:0);
+  const [deck2, setDeck2] = useState(()=>desktopRuntime?null:1);
+  const [deckPlaybackQueueSources,setDeckPlaybackQueueSources]=useState({1:null,2:null});
   // 首屏默认由 Deck 1 播放；Deck 2 是待播位，只有操作员手动点击播放才会出声。
   const [playingDecks, setPlayingDecks] = useState(() => desktopRuntime ? { 1: false, 2: false } : { 1: true, 2: false });
   const [deckProgress, setDeckProgress] = useState(() => desktopRuntime ? { 1: 0, 2: 0 } : { 1: 136, 2: 0 });
+  // KINGCLUB onsite cold-start baseline. Persisted operator values still win,
+  // while a cleared WebView profile now falls back to the accepted safe mix.
+  // Crossfade remains a live Auto-DJ state and must not be restored mid-queue.
   const [crossfade, setCrossfade] = useState(28);
-  const [masterVolume, setMasterVolume] = useState(()=>loadMixerNumber("king.mixer.master",100));
-  const [headphoneVolume, setHeadphoneVolume] = useState(()=>loadMixerNumber("king.mixer.headphones",70));
+  const [masterVolume, setMasterVolume] = useState(()=>loadMixerNumber("king.mixer.master",66));
+  const [headphoneVolume, setHeadphoneVolume] = useState(()=>loadMixerNumber("king.mixer.headphones",33));
   const [microphoneVolumes, setMicrophoneVolumes] = useState([null,null]);
   const [faderInteractionActive, setFaderInteractionActive] = useState(false);
   const [vocalStatus,setVocalStatus]=useState(()=>createOfflineVocalStatus(desktopRuntime?"等待读取独立 Vocal Engine":"浏览器预览；未连接独立 Vocal Engine"));
   const [deckPlaybackModes, setDeckPlaybackModes] = useState({ 1: "sequence", 2: "sequence" });
+  const [deckAutomationOwners,setDeckAutomationOwners]=useState({1:"automatic",2:"automatic"});
+  const deckAutomationOwnersRef=useRef(deckAutomationOwners);
+  const setDeckAutomationOwner=useCallback((deckNumber,owner)=>{
+    deckAutomationOwnersRef.current={...deckAutomationOwnersRef.current,[deckNumber]:owner};
+    setDeckAutomationOwners(deckAutomationOwnersRef.current);
+  },[]);
   const [deckLyricsEnabled, setDeckLyricsEnabled] = useState({ 1: true, 2: true });
   const [deckVocalModes, setDeckVocalModes] = useState({ 1: "original", 2: "original" });
   const [deckAiRescueEnabled, setDeckAiRescueEnabled] = useState({ 1: true, 2: true });
@@ -1378,15 +1605,17 @@ export function App() {
   const initialDeckCueRecoveryRef=useRef(undefined);
   if(initialDeckCueRecoveryRef.current===undefined)initialDeckCueRecoveryRef.current=loadDeckCueRecovery();
   const [deckCue, setDeckCue] = useState(()=>initialDeckCueRecoveryRef.current
-    ? {deck:initialDeckCueRecoveryRef.current.deck,busy:false,message:`检测到上次异常退出时 Deck ${initialDeckCueRecoveryRef.current.deck} 的 CUE；关闭后恢复原主扩电平`}
+    ? {deck:initialDeckCueRecoveryRef.current.deck,busy:false,message:`检测到上次异常退出时 Deck ${initialDeckCueRecoveryRef.current.deck} 的 CUE；关闭后恢复 LR 路由`}
     : {deck:null,busy:false,message:"连接 Qu-16 后可用耳机 CUE"});
-  const deckCueMainFaderRef=useRef(initialDeckCueRecoveryRef.current?.mainFader??null);
+  const deckCueMainAssignedRef=useRef(initialDeckCueRecoveryRef.current?.mainAssigned??null);
+  const [qu16OutputRestore,setQu16OutputRestore]=useState({busy:false,state:"idle",message:"恢复 8/26 已确认的 ST3 → LR 主输出基准"});
   const [video, setVideo] = useState(0);
   const [videoAssets, setVideoAssets] = useState([]);
   const [audioAssets, setAudioAssets] = useState([]);
   const audioAssetsRef = useRef([]);
   const audioScanStabilityRef = useRef(new Map());
   const deckSelectionRef = useRef({ 1:null, 2:null });
+  const deckStartupSelectionAppliedRef = useRef({1:false,2:false});
   const [audioAnalyses, setAudioAnalyses] = useState({});
   const audioAnalysesRef = useRef({});
   const audioAnalysisPendingRef = useRef(new Set());
@@ -1396,7 +1625,8 @@ export function App() {
   const audioAiQueueChainRef = useRef(Promise.resolve());
   const [runtimeCapability, setRuntimeCapability] = useState({ mode:desktopRuntime?"detecting":"player", hasNvidia:false, aiProcessingAvailable:false, message:desktopRuntime?"正在识别硬件":"浏览器播放版" });
   const [audioAiJobs, setAudioAiJobs] = useState([]);
-  const [audioAiWorker, setAudioAiWorker] = useState({ running:false, message:"" });
+  const [audioAiWorker, setAudioAiWorker] = useState({ enabled:null, running:false, message:"正在读取 AI 制作状态" });
+  const [aiRuntimeBusy,setAiRuntimeBusy]=useState(false);
   const [manualAiPendingPaths, setManualAiPendingPaths] = useState([]);
   const [songPackageDirectories, setSongPackageDirectories] = useState({ inboxDirectory:"", outboxDirectory:"" });
   const [songPackageMessage, setSongPackageMessage] = useState("");
@@ -1408,9 +1638,20 @@ export function App() {
   const mpvAutoplayAfterLoadRef = useRef({ 1:false, 2:false });
   const mpvEndingRef = useRef({ 1:false, 2:false });
   const mpvEofHandledRef = useRef({ 1:false, 2:false });
+  const mpvAutoTransitionRef = useRef({phase:"idle"});
+  const mpvAutoTransitionTimerRef = useRef(null);
+  const operatorDeckControlRef=useRef(async()=>{});
   const rhythmCursorRef = useRef({ 1:{ trackKey:null, seconds:0 }, 2:{ trackKey:null, seconds:0 } });
   const mpvVolumeWriterRef = useRef(null);
   if (!mpvVolumeWriterRef.current) mpvVolumeWriterRef.current = createMpvVolumeWriter();
+  const cancelMpvAutoTransition=useCallback(()=>{
+    if(mpvAutoTransitionTimerRef.current!==null){
+      window.clearInterval(mpvAutoTransitionTimerRef.current);
+      mpvAutoTransitionTimerRef.current=null;
+    }
+    mpvAutoTransitionRef.current={phase:"idle"};
+  },[]);
+  useEffect(()=>()=>cancelMpvAutoTransition(),[cancelMpvAutoTransition]);
   const mpvEnabled = desktopRuntime && mpvRuntime.available;
   const writeDeckOutputVolumes = useCallback((nextCrossfade,nextMasterVolume) => {
     const { deck1Gain:deckOneGain,deck2Gain:deckTwoGain,outputVolume } = deckCueMix(nextCrossfade,nextMasterVolume,headphoneVolume,deckCue.deck);
@@ -1424,6 +1665,57 @@ export function App() {
     if (deckOneAudioRef.current) deckOneAudioRef.current.volume = deckOutputVolumeScalar(deckOneGain,outputVolume,deckVocalModes[1]);
     if (deckTwoAudioRef.current) deckTwoAudioRef.current.volume = deckOutputVolumeScalar(deckTwoGain,outputVolume,deckVocalModes[2]);
   },[deckCue.deck,deckVocalModes,headphoneVolume,mpvEnabled]);
+  const takeDeckOperatorControl=async(deckNumber,{rollbackAutoTarget=true}={})=>{
+    setDeckAutomationOwner(deckNumber,"operator");
+    const transition=mpvAutoTransitionRef.current;
+    if(transition.phase==="idle")return;
+    const wasAutoTarget=transition.targetDeck===deckNumber;
+    const pendingAutoLoad=wasAutoTarget&&transition.phase==="preloading"?transition.loadPromise:null;
+    const shouldRollback=rollbackAutoTarget
+      && transition.phase==="crossfading"
+      && wasAutoTarget;
+    cancelMpvAutoTransition();
+    if(!shouldRollback){
+      if(pendingAutoLoad)await pendingAutoLoad.catch(()=>null);
+      if(wasAutoTarget&&["preloading","ready"].includes(transition.phase))writeDeckOutputVolumes(crossfade,masterVolume);
+      return;
+    }
+    const sourceDeck=transition.sourceDeck;
+    const targetDeck=transition.targetDeck;
+    const startPosition=Number.isFinite(transition.visualPosition)?transition.visualPosition:crossfade;
+    const endpoint=sourceDeck===1?0:100;
+    const rollback={phase:"operator-rollback",sourceDeck,targetDeck};
+    mpvAutoTransitionRef.current=rollback;
+    await new Promise((resolve)=>{
+      const startedAt=performance.now();
+      mpvAutoTransitionTimerRef.current=window.setInterval(()=>{
+        if(mpvAutoTransitionRef.current!==rollback){resolve();return}
+        const progress=Math.min(1,(performance.now()-startedAt)/400);
+        const position=startPosition+(endpoint-startPosition)*progress;
+        setCrossfade(Math.round(position));
+        writeDeckOutputVolumes(position,masterVolume);
+        if(progress<1)return;
+        window.clearInterval(mpvAutoTransitionTimerRef.current);
+        mpvAutoTransitionTimerRef.current=null;
+        setCrossfade(endpoint);
+        writeDeckOutputVolumes(endpoint,masterVolume);
+        void (async()=>{
+          if(mpvEnabled){
+            try{
+              const state=await invoke("mpv_deck_set_paused",{deck:targetDeck,paused:true});
+              applyMpvDeckState(state);
+            }catch(error){
+              console.error("人工接管时停止自动目标 Deck 失败",error);
+            }
+          }
+          setPlayingDecks((current)=>({...current,[targetDeck]:false,[sourceDeck]:true}));
+          mpvAutoTransitionRef.current={phase:"idle"};
+          resolve();
+        })();
+      },40);
+    });
+  };
+  operatorDeckControlRef.current=takeDeckOperatorControl;
   const beginFaderInteraction = useCallback(() => {
     setFaderInteractionActive(true);
   },[]);
@@ -1444,7 +1736,92 @@ export function App() {
     lyricsModifiedUnixMs:item.lyricsModifiedUnixMs ?? null,
     vocalsPath:item.vocalsPath ?? null,
     accompanimentPath:item.accompanimentPath ?? null,
+    coverSrc:item.coverSrc ?? "",
   })) : demoTracks.map((item)=>({...item,demo:true,tag:`演示 · ${item.tag}`})), [audioAssets]);
+  const activePlaylistRecord=useMemo(
+    ()=>playlistManagement.playlists.find((item)=>item.name===playlist)??null,
+    [playlistManagement.playlists,playlist],
+  );
+  const activePlaylistPlaybackSource=useMemo(
+    ()=>createPlaylistPlaybackSource(library,activePlaylistRecord),
+    [library,activePlaylistRecord],
+  );
+  const trackIndexByPath=useMemo(
+    ()=>new Map(tracks.map((track,index)=>[managedTrackIdentity(track,index),index])),
+    [tracks],
+  );
+  const activePlaylistTrackIndexes=useMemo(()=>{
+    if(!playlistManagement.seeded||!activePlaylistRecord)return tracks.map((_,index)=>index);
+    return activePlaylistRecord.trackPaths.map((path)=>trackIndexByPath.get(path)).filter(Number.isInteger);
+  },[tracks,trackIndexByPath,activePlaylistRecord,playlistManagement.seeded]);
+  const deckPlaybackTrackIndexes=useMemo(()=>Object.fromEntries([1,2].map((deckNumber)=>[
+    deckNumber,
+    resolvePlaybackQueuePaths(playlistLibraries,deckPlaybackQueueSources[deckNumber])
+      .map((path)=>trackIndexByPath.get(path))
+      .filter(Number.isInteger),
+  ])),[playlistLibraries,deckPlaybackQueueSources,trackIndexByPath]);
+  useEffect(()=>{
+    if(!desktopRuntime||!tracks.length)return;
+    const selections=resolveWeekdayDeckStartupSelections(
+      playlistLibraries,
+      trackIndexByPath,
+      currentWeekdayPlaylistName(),
+    );
+    const pendingDecks=[1,2].filter((deckNumber)=>!deckStartupSelectionAppliedRef.current[deckNumber]);
+    if(!pendingDecks.length)return;
+    setDeckPlaybackQueueSources((current)=>{
+      let changed=false;
+      const next={...current};
+      for(const deckNumber of pendingDecks){
+        const source=selections[deckNumber].source;
+        if(!source)continue;
+        const existing=current[deckNumber];
+        if(existing?.kind===source.kind&&existing?.libraryKey===source.libraryKey&&existing?.playlistId===source.playlistId)continue;
+        next[deckNumber]=source;
+        changed=true;
+      }
+      return changed?next:current;
+    });
+    const resolvedDecks=pendingDecks.filter((deckNumber)=>Number.isInteger(selections[deckNumber].trackIndex));
+    if(!resolvedDecks.length)return;
+    for(const deckNumber of resolvedDecks)deckStartupSelectionAppliedRef.current[deckNumber]=true;
+    if(resolvedDecks.includes(1))setDeck1(selections[1].trackIndex);
+    if(resolvedDecks.includes(2))setDeck2(selections[2].trackIndex);
+    setDeckProgress((current)=>Object.fromEntries([1,2].map((deckNumber)=>[
+      deckNumber,
+      resolvedDecks.includes(deckNumber)?0:current[deckNumber],
+    ])));
+    setPlayingDecks((current)=>Object.fromEntries([1,2].map((deckNumber)=>[
+      deckNumber,
+      resolvedDecks.includes(deckNumber)?false:current[deckNumber],
+    ])));
+  },[desktopRuntime,tracks.length,playlistLibraries,trackIndexByPath]);
+  useEffect(()=>{
+    const trackPaths=tracks.map(managedTrackIdentity).filter(Boolean);
+    setPlaylistManagement(current=>seedPlaylistManagement(current,trackPaths,playlist));
+  },[tracks,playlist,setPlaylistManagement]);
+  useEffect(()=>{
+    try{localStorage.setItem(PLAYLIST_MANAGEMENT_STORAGE_KEY,JSON.stringify(playlistLibraries))}catch{}
+  },[playlistLibraries]);
+  useEffect(()=>{
+    if(!playlistContextMenu&&!trackContextMenu)return undefined;
+    const closeMenu=(event)=>{
+      if(event?.type==="pointerdown"&&event.button===2)return;
+      setPlaylistContextMenu(null);
+      setTrackContextMenu(null);
+    };
+    const closeOnKey=(event)=>{if(event.key==="Escape")closeMenu()};
+    window.addEventListener("pointerdown",closeMenu);
+    window.addEventListener("resize",closeMenu);
+    window.addEventListener("blur",closeMenu);
+    window.addEventListener("keydown",closeOnKey);
+    return ()=>{
+      window.removeEventListener("pointerdown",closeMenu);
+      window.removeEventListener("resize",closeMenu);
+      window.removeEventListener("blur",closeMenu);
+      window.removeEventListener("keydown",closeOnKey);
+    };
+  },[playlistContextMenu,trackContextMenu]);
   useEffect(() => {
     if (!desktopRuntime) return;
     const deck = selectDominantDeck(playingDecks,crossfade) ?? (crossfade < 50 ? 1 : 2);
@@ -1566,13 +1943,13 @@ export function App() {
     return ()=>{disposed=true};
   },[]);
   useEffect(() => {
-    if (!window.__TAURI_INTERNALS__||!runtimeCapability.aiProcessingAvailable) return;
+    if (!window.__TAURI_INTERNALS__||!runtimeCapability.aiProcessingAvailable||audioAiWorker.enabled===false) return;
     const loadedDeckPaths=[tracks[deck1]?.path,tracks[deck2]?.path].filter(Boolean);
     const playingPaths=[playingDecks[1]?tracks[deck1]?.path:null,playingDecks[2]?tracks[deck2]?.path:null].filter(Boolean);
     invoke("set_audio_ai_scheduler",{playingPaths,deckPaths:[...new Set(loadedDeckPaths)]})
       .then((worker)=>setAudioAiWorker((current)=>JSON.stringify(current)===JSON.stringify(worker)?current:worker))
       .catch((error)=>console.error("更新 AI 三级调度失败",error));
-  },[runtimeCapability.aiProcessingAvailable,playingDecks[1],playingDecks[2],tracks,deck1,deck2]);
+  },[runtimeCapability.aiProcessingAvailable,audioAiWorker.enabled,playingDecks[1],playingDecks[2],tracks,deck1,deck2]);
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return undefined;
     let disposed = false;
@@ -1588,6 +1965,19 @@ export function App() {
     const timer=window.setInterval(refresh,3000);
     return ()=>{disposed=true;window.clearInterval(timer)};
   },[]);
+  const changeAiRuntimeEnabled=useCallback(async(enabled)=>{
+    if(!window.__TAURI_INTERNALS__||aiRuntimeBusy)return;
+    setAiRuntimeBusy(true);
+    try{
+      const worker=await invoke("set_audio_ai_runtime_enabled",{enabled});
+      setAudioAiWorker(worker);
+    }catch(error){
+      console.error("切换 AI 制作运行状态失败",error);
+      setSongPackageMessage(`AI 制作开关失败：${String(error)}`);
+    }finally{
+      setAiRuntimeBusy(false);
+    }
+  },[aiRuntimeBusy]);
   useEffect(() => {
     audioAssetsRef.current = audioAssets;
     deckSelectionRef.current = {
@@ -1596,6 +1986,7 @@ export function App() {
     };
   }, [audioAssets, deck1, deck2, tracks]);
   const [mediaLibraryDirectories, setMediaLibraryDirectories] = useState({ rootDirectory:"", videoDirectory:"", audioDirectory:"" });
+  const [audioImportStatus,setAudioImportStatus]=useState({state:"idle",detected:0,ready:0,failed:0,message:""});
   const [imageAssets, setImageAssets] = useState([]);
   const [systemFonts, setSystemFonts] = useState(fallbackFontFamilies);
   const [fontLibraryDirectory,setFontLibraryDirectory] = useState("");
@@ -1664,7 +2055,7 @@ export function App() {
   const videoColorCanvasRef=useRef(null);
   const videoColorSamplingErrorRef=useRef(null);
   const videoColorAutomationRef=useRef({family:null,stableSamples:0});
-  const [lightPlaybackModes, setLightPlaybackModes] = useState(() => Object.fromEntries(lights.filter((item) => item.label).map((item) => [item.id, item.loop ? "loop" : "once"])));
+  const [lightPlaybackModes, setLightPlaybackModes] = useState(loadLightPlaybackModes);
   const [fixtureColorEditor, setFixtureColorEditor] = useState(null);
   const [fixtureColors, setFixtureColors] = useState(() => Object.fromEntries(fixtureControls.map((fixture) => [fixture.id, fixture.color])));
   const [screenTargets, setScreenTargets] = useState(() => loadTargetSettings("king.screenTargets", defaultScreenTargets));
@@ -2322,10 +2713,11 @@ export function App() {
   },[faderInteractionActive,microphoneBindings,mixerParameterSnapshot]);
   const toggleDeckCue=useCallback(async(deckNumber)=>{
     if(deckCue.busy)return;
+    await operatorDeckControlRef.current(deckNumber,{rollbackAutoTarget:true});
     const turningOff=deckCue.deck===deckNumber;
     const switchingDeck=deckCue.deck!==null&&!turningOff;
     if(switchingDeck){
-      const saved=persistDeckCueRecovery({deck:deckNumber,mainFader:deckCueMainFaderRef.current});
+      const saved=persistDeckCueRecovery({deck:deckNumber,mainAssigned:deckCueMainAssignedRef.current});
       if(!saved){
         setDeckCue(current=>({...current,busy:false,message:"无法保存 CUE 恢复状态，已拒绝切换 Deck"}));
         return;
@@ -2333,44 +2725,68 @@ export function App() {
       setDeckCue({deck:deckNumber,busy:false,message:`Deck ${deckNumber} 的完整声音正在送往 Qu-16 Phones`});
       return;
     }
-    const liveFader=Number(mixerParameterSnapshot?.parameters?.["fader:st-3"]);
-    if(!turningOff&&!Number.isFinite(liveFader)){
-      setDeckCue(current=>({...current,busy:false,message:"尚未取得 ST3 主扩推子真值，CUE 未改变"}));
+    const liveMainAssigned=Number(mixerParameterSnapshot?.parameters?.["assign:st-3:LR"]);
+    if(!turningOff&&![0,1].includes(liveMainAssigned)){
+      setDeckCue(current=>({...current,busy:false,message:"尚未取得 ST3 → LR Assign 真值，CUE 未改变"}));
       return;
     }
-    const restoreFader=turningOff?deckCueMainFaderRef.current:liveFader;
-    if(turningOff&&!Number.isFinite(restoreFader)){
-      setDeckCue(current=>({...current,busy:false,message:"缺少 CUE 前的 ST3 推子值，已拒绝不安全切换"}));
+    const restoreMainAssigned=turningOff?deckCueMainAssignedRef.current:liveMainAssigned;
+    if(turningOff&&![0,1].includes(restoreMainAssigned)){
+      setDeckCue(current=>({...current,busy:false,message:"缺少 CUE 前的 ST3 → LR Assign 真值，已拒绝不安全切换"}));
       return;
     }
-    if(!turningOff&&!persistDeckCueRecovery({deck:deckNumber,mainFader:liveFader})){
-      setDeckCue(current=>({...current,busy:false,message:"无法保存 ST3 原主扩电平，CUE 未改变"}));
+    if(!turningOff&&!persistDeckCueRecovery({deck:deckNumber,mainAssigned:liveMainAssigned})){
+      setDeckCue(current=>({...current,busy:false,message:"无法保存 ST3 原 LR Assign，CUE 未改变"}));
       return;
     }
-    if(!turningOff)deckCueMainFaderRef.current=liveFader;
-    setDeckCue(current=>({...current,busy:true,message:turningOff?"正在关闭耳机 CUE 并恢复主扩":"正在把完整 Deck 声音从主扩切到耳机"}));
-    const cueWrites=qu16DeckCueWrites(!turningOff,restoreFader);
+    if(!turningOff)deckCueMainAssignedRef.current=liveMainAssigned;
+    setDeckCue(current=>({...current,busy:true,message:turningOff?"正在关闭耳机 CUE 并恢复 LR 路由":"正在把完整 Deck 声音从主扩切到耳机"}));
+    const cueWrites=qu16DeckCueWrites(!turningOff,restoreMainAssigned);
     const response=await writeQu16Parameters(cueWrites);
     if(!response.accepted){
-      setDeckCue(current=>({...current,busy:false,message:"Qu-16 CUE 写入未接受；恢复状态已保留，请以真机 LR/PAFL/Fader 为准"}));
+      setDeckCue(current=>({...current,busy:false,message:"Qu-16 CUE 写入未接受；恢复状态已保留，请以真机 LR Assign/PAFL 为准"}));
       return;
     }
     if(!await waitForQu16Readback(cueWrites)){
-      setDeckCue(current=>({...current,busy:false,message:"Qu-16 CUE 权威回读超时；恢复状态已保留，请以真机 LR/PAFL/Fader 为准"}));
+      setDeckCue(current=>({...current,busy:false,message:"Qu-16 CUE 权威回读超时；恢复状态已保留，请以真机 LR Assign/PAFL 为准"}));
       return;
     }
     if(turningOff){
       clearDeckCueRecovery();
-      deckCueMainFaderRef.current=null;
+      deckCueMainAssignedRef.current=null;
     }
     setDeckCue({
       deck:turningOff?null:deckNumber,
       busy:false,
       message:turningOff
-        ? "CUE 已关闭；完整 Deck 声音已恢复到原主扩电平"
+        ? "CUE 已关闭；完整 Deck 声音已恢复到原 LR 路由，推子未被改变"
         : `Deck ${deckNumber} 的完整声音正在送往 Qu-16 Phones；主扩已隔离`,
     });
   },[deckCue.busy,deckCue.deck,mixerParameterSnapshot,waitForQu16Readback,writeQu16Parameters]);
+  const restoreQu16OutputBaseline=useCallback(async()=>{
+    if(qu16OutputRestore.busy)return;
+    if(mixerControlStatus.mode!=="hardware-live"){
+      setQu16OutputRestore({busy:false,state:"error",message:"Qu-16 尚未完成真机同步，未执行恢复"});
+      return;
+    }
+    const confirmed=window.confirm("将恢复 8/26 已确认的 ST3 → LR 主输出：ST3/LR 推子回到 0 dB、解除两路 Mute、ST3 Assign 到 LR、关闭 ST3 PAFL。请先确认功放/DP448 音量已降低。不会改 CH11/CH12、麦克风、48V、处理、DCA 或 Mute Group。\n\n确认现在恢复？");
+    if(!confirmed)return;
+    const writes=kingClubQu16OutputBaselineWrites();
+    setQu16OutputRestore({busy:true,state:"working",message:"正在写入并等待 Qu-16 真机回读…"});
+    const response=await writeQu16Parameters(writes);
+    if(!response.accepted){
+      setQu16OutputRestore({busy:false,state:"error",message:`恢复写入未接受${response.error?`：${response.error}`:""}`});
+      return;
+    }
+    if(!await waitForQu16Readback(writes,3500)){
+      setQu16OutputRestore({busy:false,state:"error",message:"恢复写入已发送，但真机回读未全部确认；请查看实体 ST3/LR"});
+      return;
+    }
+    clearDeckCueRecovery();
+    deckCueMainAssignedRef.current=null;
+    setDeckCue({deck:null,busy:false,message:"CUE 已关闭；ST3 主推子未再被 CUE 修改"});
+    setQu16OutputRestore({busy:false,state:"success",message:"8/26 ST3 → LR 主输出基准已由真机回读确认"});
+  },[mixerControlStatus.mode,qu16OutputRestore.busy,waitForQu16Readback,writeQu16Parameters]);
   useEffect(() => {
     if (!desktopRuntime) return undefined;
     let disposed = false;
@@ -2381,8 +2797,8 @@ export function App() {
   }, [desktopRuntime]);
   useEffect(() => {
     if (!audioAssets.length) return;
-    setDeck1((current)=>Number.isInteger(current)&&current>=0&&current<audioAssets.length?current:0);
-    setDeck2((current)=>Number.isInteger(current)&&current>=0&&current<audioAssets.length?current:(audioAssets.length>1?1:null));
+    setDeck1((current)=>Number.isInteger(current)&&current>=0&&current<audioAssets.length?current:null);
+    setDeck2((current)=>Number.isInteger(current)&&current>=0&&current<audioAssets.length?current:null);
     if (!realAudioInitializedRef.current) {
       realAudioInitializedRef.current = true;
       setDeckProgress({ 1:0, 2:0 });
@@ -2483,6 +2899,9 @@ export function App() {
     window.localStorage.setItem("king.rhythm.video", videoRhythmRule);
   }, [lightRhythmRule, videoRhythmRule]);
   useEffect(() => {
+    window.localStorage.setItem("king.lighting.playbackModes", JSON.stringify(lightPlaybackModes));
+  }, [lightPlaybackModes]);
+  useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return;
     invoke("scan_image_library")
       .then((library) => {
@@ -2502,6 +2921,7 @@ export function App() {
           videoDirectory: library.videoDirectory ?? "",
           audioDirectory: library.audioDirectory ?? "",
         });
+        setAudioImportStatus(library.audioImport??{state:"idle",detected:0,ready:0,failed:0,message:""});
         const nextVideos = (library.videos ?? []).map((item) => ({
           ...item,
           id: `local-video:${item.path}`,
@@ -2524,6 +2944,7 @@ export function App() {
           id: `local-audio:${item.path}`,
           type: "audio",
           src: convertFileSrc(item.path),
+          coverSrc: item.thumbnailPath ? convertFileSrc(item.thumbnailPath) : "",
           durationSeconds: Number(item.durationMs ?? 0) / 1000,
         }));
         for (const item of runtimeCapability.aiProcessingAvailable ? nextAudio : []) {
@@ -2542,16 +2963,16 @@ export function App() {
         setVideoAssets((current)=>mediaAssetFingerprint(current)===mediaAssetFingerprint(nextVideos)?current:nextVideos);
         if (mediaAssetFingerprint(audioAssetsRef.current) !== mediaAssetFingerprint(nextAudio)) {
           const previousDecks = deckSelectionRef.current;
-          const findTrackIndex = (selection, fallback) => {
+          const findTrackIndex = (selection) => {
             const matched = nextAudio.findIndex((item)=>item.path===selection?.path || item.id===selection?.id);
             if (matched >= 0) return matched;
-            return nextAudio.length ? Math.min(Math.max(0, fallback ?? 0), nextAudio.length - 1) : null;
+            return null;
           };
-          const nextDeck1 = findTrackIndex(previousDecks[1], 0);
-          const nextDeck2 = findTrackIndex(previousDecks[2], nextAudio.length > 1 ? 1 : 0);
+          const nextDeck1 = findTrackIndex(previousDecks[1]);
+          const nextDeck2 = findTrackIndex(previousDecks[2]);
           audioAssetsRef.current = nextAudio;
           setDeck1(nextDeck1);
-          setDeck2(nextDeck2 === nextDeck1 && nextAudio.length > 1 ? (nextDeck1 + 1) % nextAudio.length : nextDeck2);
+          setDeck2(nextDeck2);
           setAudioAssets(nextAudio);
         }
       })
@@ -2612,8 +3033,9 @@ export function App() {
         return trackIndex;
       }
       if (mode === "sequence" || mode === "shuffle") {
-        const nextTrack = getNextPlayableTrack(tracks.length, trackIndex, excludedIndex, mode === "shuffle");
+        const nextTrack = getNextPlayableTrackInQueue(deckPlaybackTrackIndexes[deckNumber], trackIndex, excludedIndex, mode === "shuffle");
         if (nextTrack !== null) {
+          resetDeckForTrackChange(deckNumber);
           setTrack(nextTrack);
           setDeckProgress(current => ({ ...current, [deckNumber]: 0 }));
           return nextTrack;
@@ -2624,7 +3046,7 @@ export function App() {
     };
     const resolvedDeck1 = finishDeck(1, deck1, deck2, setDeck1);
     finishDeck(2, deck2, resolvedDeck1, setDeck2);
-  }, [deckProgress, deck1, deck2, playingDecks, deckPlaybackModes, tracks]);
+  }, [deckProgress, deck1, deck2, playingDecks, deckPlaybackModes, tracks, deckPlaybackTrackIndexes]);
   useEffect(() => {
     const workspace = workspaceRef.current;
     const preview = previewPanelRef.current;
@@ -2642,12 +3064,20 @@ export function App() {
     syncPreviewWidth();
     return () => {
       observer.disconnect();
-      workspace.style.removeProperty("--led-preview-width");
+      // Keep the measured home C1 width while switching to management pages so
+      // the shared L/C/R grid — especially the L region — does not jump.
     };
   }, [activeNav]);
   const isTrackLoaded = (index) => index===deck1||index===deck2;
-  const prepareTrack = (deck, index) => {
+  const resetDeckForTrackChange = (deckNumber) => {
+    setDeckVocalModes((current)=>resetDeckVocalModeForTrackChange(current,deckNumber));
+  };
+  const prepareTrack = async(deck, index) => {
     if (index===null||isTrackLoaded(index)) return;
+    deckStartupSelectionAppliedRef.current[deck]=true;
+    await takeDeckOperatorControl(deck,{rollbackAutoTarget:true});
+    setDeckPlaybackQueueSources((current)=>({...current,[deck]:activePlaylistPlaybackSource}));
+    resetDeckForTrackChange(deck);
     if (deck === 1) {
       setDeck1(index);
     } else {
@@ -2662,17 +3092,16 @@ export function App() {
   const loadSelected = () => loadTrack(selectedTrack);
   const packageTrackIndex = selectedTrack ?? deck1;
   const packageTrack = tracks[packageTrackIndex];
-  const packageTrackJob = packageTrack?.path
-    ? audioAiJobByPath.get(normalizeMediaPath(packageTrack.path))
-    : null;
-  const exportSelectedPackage = async () => {
-    if (!packageTrack?.path || packageTrackJob?.status !== "ready") return;
+  const exportSelectedPackage = async (requestedPath) => {
+    const requestedTrack=requestedPath?tracks.find(track=>track.path===requestedPath):packageTrack;
+    const requestedJob=requestedTrack?.path?audioAiJobByPath.get(normalizeMediaPath(requestedTrack.path)):null;
+    if (!requestedTrack?.path || requestedJob?.status !== "ready") return;
     setSongPackageMessage("正在生成歌曲包…");
     try {
       const result = await invoke("export_kingsong", {
-        path:packageTrack.path,
-        title:packageTrack.title,
-        artist:packageTrack.artist,
+        path:requestedTrack.path,
+        title:requestedTrack.title,
+        artist:requestedTrack.artist,
       });
       setSongPackageMessage(`已导出：${result.path}`);
     } catch (error) {
@@ -3044,6 +3473,17 @@ export function App() {
     }
   };
   const insertTrack = (deck, index) => prepareTrack(deck, index);
+  const insertTrackWithoutPlaylistQueue = async(deck, index) => {
+    if (index===null||isTrackLoaded(index)) return;
+    deckStartupSelectionAppliedRef.current[deck]=true;
+    await takeDeckOperatorControl(deck,{rollbackAutoTarget:true});
+    setDeckPlaybackQueueSources((current)=>({...current,[deck]:{kind:"single"}}));
+    resetDeckForTrackChange(deck);
+    if (deck===1) setDeck1(index); else setDeck2(index);
+    setDeckProgress((current)=>({...current,[deck]:0}));
+    setPlayingDecks((current)=>({...current,[deck]:false}));
+    setSelectedTrack(null);
+  };
   const getDeckAudio = (deckNumber) => deckNumber === 1 ? deckOneAudioRef.current : deckTwoAudioRef.current;
   const playbackPathForDeck = (deckNumber, track) => (
     deckVocalModes[deckNumber] === "accompaniment" && track?.accompanimentPath
@@ -3140,8 +3580,9 @@ export function App() {
     setAudioAssets((current)=>current.map((item)=>item.id===trackId&&item.durationSeconds!==durationSeconds?{...item,durationSeconds}:item));
     setDeckProgress((current)=>({...current,[deckNumber]:Math.min(current[deckNumber]??0,durationSeconds)}));
   };
-  const seekDeck = (deckNumber, seconds) => {
+  const seekDeck = async(deckNumber, seconds) => {
     const safeSeconds = Math.max(0,Number(seconds)||0);
+    await takeDeckOperatorControl(deckNumber,{rollbackAutoTarget:true});
     mpvEofHandledRef.current[deckNumber] = false;
     if (mpvEnabled) {
       const trackIndex = deckNumber===1?deck1:deck2;
@@ -3156,17 +3597,25 @@ export function App() {
     if (audio && tracks[deckNumber===1?deck1:deck2]?.src) audio.currentTime = Math.min(safeSeconds,Number.isFinite(audio.duration)?audio.duration:safeSeconds);
     setDeckProgress((current)=>({...current,[deckNumber]:safeSeconds}));
   };
-  const loadAdjacentDeckTrack = (deckNumber, direction) => {
+  const loadAdjacentDeckTrack = async(deckNumber, direction) => {
     const currentIndex = deckNumber===1?deck1:deck2;
     const excludedIndex = deckNumber===1?deck2:deck1;
     if(currentIndex===null||currentIndex===undefined)return;
-    const nextIndex = getAdjacentPlayableTrack(tracks.length,currentIndex,excludedIndex,direction);
+    const lockedQueue=deckPlaybackQueueSources[deckNumber]
+      ? deckPlaybackTrackIndexes[deckNumber]
+      : activePlaylistTrackIndexes;
+    if(!deckPlaybackQueueSources[deckNumber]) {
+      setDeckPlaybackQueueSources((current)=>({...current,[deckNumber]:activePlaylistPlaybackSource}));
+    }
+    const nextIndex = getAdjacentPlayableTrackInQueue(lockedQueue,currentIndex,excludedIndex,direction);
     if (nextIndex===null) return;
+    await takeDeckOperatorControl(deckNumber,{rollbackAutoTarget:true});
     const audio = getDeckAudio(deckNumber);
     audio?.pause();
     if (mpvEnabled&&mpvLoadedPathsRef.current[deckNumber]) invoke("mpv_deck_set_paused",{deck:deckNumber,paused:true}).catch((error)=>console.error(`Deck ${deckNumber} mpv 暂停失败`,error));
     mpvLoadedPathsRef.current[deckNumber]=null;
     mpvEofHandledRef.current[deckNumber]=false;
+    resetDeckForTrackChange(deckNumber);
     if (deckNumber===1) setDeck1(nextIndex); else setDeck2(nextIndex);
     setDeckProgress((current)=>({...current,[deckNumber]:0}));
     setPlayingDecks((current)=>({...current,[deckNumber]:false}));
@@ -3187,9 +3636,9 @@ export function App() {
       return;
     }
     if (mode === "sequence" || mode === "shuffle") {
-      const excludedIndex = deckNumber === 1 ? deck2 : deck1;
-      const nextTrack = getNextPlayableTrack(tracks.length,trackIndex,excludedIndex,mode === "shuffle");
+      const nextTrack = getNextPlayableTrackInQueue(deckPlaybackTrackIndexes[deckNumber],trackIndex,-1,mode === "shuffle");
       if (nextTrack !== null) {
+        resetDeckForTrackChange(deckNumber);
         if (deckNumber === 1) setDeck1(nextTrack); else setDeck2(nextTrack);
         setDeckProgress((current)=>({...current,[deckNumber]:0}));
         return;
@@ -3200,6 +3649,10 @@ export function App() {
   const toggleDeckPlayback = async (deckNumber, trackIndex) => {
     const track = tracks[trackIndex];
     if(!track)return;
+    await takeDeckOperatorControl(deckNumber,{rollbackAutoTarget:true});
+    if(!playingDecks[deckNumber]&&!deckPlaybackQueueSources[deckNumber]) {
+      setDeckPlaybackQueueSources((current)=>({...current,[deckNumber]:activePlaylistPlaybackSource}));
+    }
     if (mpvEnabled&&track?.path) {
       try {
         await ensureMpvDeckLoaded(deckNumber,trackIndex);
@@ -3240,8 +3693,180 @@ export function App() {
     }
     setPlayingDecks(current => ({ ...current, [deckNumber]: !current[deckNumber] }));
   };
+  const prepareMpvAutoTransition=async(
+    sourceDeck,
+    sourceTrackIndex,
+    targetTrackIndex,
+    crossfadeSeconds=AUTO_DJ_CROSSFADE_SECONDS,
+    targetQueueSource=null,
+  )=>{
+    if(!mpvEnabled||mpvAutoTransitionRef.current.phase!=="idle")return false;
+    const targetDeck=sourceDeck===1?2:1;
+    const targetTrack=tracks[targetTrackIndex];
+    if(!targetTrack?.path)return false;
+    setDeckAutomationOwner(targetDeck,"automatic");
+    const transition={phase:"preloading",sourceDeck,targetDeck,sourceTrackIndex,targetTrackIndex,crossfadeSeconds,targetStartsSilent:true};
+    mpvAutoTransitionRef.current=transition;
+    try{
+      await invoke("mpv_deck_set_paused",{deck:targetDeck,paused:true});
+      if(mpvAutoTransitionRef.current!==transition)return;
+      mpvAutoplayAfterLoadRef.current[targetDeck]=false;
+      mpvLoadedPathsRef.current[targetDeck]=null;
+      mpvEofHandledRef.current[targetDeck]=false;
+      resetDeckForTrackChange(targetDeck);
+      setDeckPlaybackQueueSources((current)=>({
+        ...current,
+        [targetDeck]:targetQueueSource??current[sourceDeck],
+      }));
+      transition.loadPromise=invoke("mpv_deck_load",{deck:targetDeck,path:targetTrack.path});
+      const state=await transition.loadPromise;
+      if(mpvAutoTransitionRef.current!==transition)return;
+      mpvLoadedPathsRef.current[targetDeck]=targetTrack.path;
+      await invoke("mpv_deck_set_volume",{deck:targetDeck,volume:0});
+      if(mpvAutoTransitionRef.current!==transition)return;
+      if(targetDeck===1)setDeck1(targetTrackIndex);else setDeck2(targetTrackIndex);
+      setDeckProgress((current)=>({...current,[targetDeck]:0}));
+      setPlayingDecks((current)=>({...current,[targetDeck]:false}));
+      applyMpvDeckState(state);
+      transition.phase="ready";
+      return true;
+    }catch(error){
+      if(mpvAutoTransitionRef.current===transition)mpvAutoTransitionRef.current={phase:"idle"};
+      console.error("自动 DJ 预载下一首失败",error);
+      return false;
+    }
+  };
+  const beginMpvAutoTransition=async(sourceDeck)=>{
+    const transition=mpvAutoTransitionRef.current;
+    if(transition.phase!=="ready"||transition.sourceDeck!==sourceDeck)return;
+    transition.phase="crossfading";
+    const targetDeck=transition.targetDeck;
+    try{
+      const startedState=await invoke("mpv_deck_set_paused",{deck:targetDeck,paused:false});
+      if(mpvAutoTransitionRef.current!==transition)return;
+      applyMpvDeckState(startedState);
+      const startedAt=performance.now();
+      const visualStart=crossfade;
+      const initialGains=equalPowerGains(visualStart);
+      const sourceBaseGain=sourceDeck===1?initialGains.deck1:initialGains.deck2;
+      const targetBaseGain=transition.targetStartsSilent?0:(targetDeck===1?initialGains.deck1:initialGains.deck2);
+      const transitionSeconds=Math.max(.4,Number(transition.crossfadeSeconds)||AUTO_DJ_CROSSFADE_SECONDS);
+      mpvAutoTransitionTimerRef.current=window.setInterval(()=>{
+        if(mpvAutoTransitionRef.current!==transition){cancelMpvAutoTransition();return}
+        const progress=Math.min(1,(performance.now()-startedAt)/(transitionSeconds*1000));
+        const angle=progress*Math.PI/2;
+        const sourceGain=sourceBaseGain*Math.cos(angle);
+        const targetGain=Math.sqrt(targetBaseGain*targetBaseGain*(1-progress)+Math.sin(angle)**2);
+        mpvVolumeWriterRef.current.enqueue([
+          {deck:sourceDeck,volume:deckOutputVolumePercent(sourceGain,masterVolume,deckVocalModes[sourceDeck])},
+          {deck:targetDeck,volume:deckOutputVolumePercent(targetGain,masterVolume,"original")},
+        ]);
+        const visualPosition=sourceDeck===1
+          ? visualStart+(100-visualStart)*progress
+          : visualStart*(1-progress);
+        transition.visualPosition=visualPosition;
+        setCrossfade(Math.round(visualPosition));
+        if(progress<1)return;
+        window.clearInterval(mpvAutoTransitionTimerRef.current);
+        mpvAutoTransitionTimerRef.current=null;
+        mpvEofHandledRef.current[sourceDeck]=true;
+        invoke("mpv_deck_set_paused",{deck:sourceDeck,paused:true})
+          .then(applyMpvDeckState)
+          .catch((error)=>console.error("自动 DJ 停止上一 Deck 失败",error));
+        setPlayingDecks((current)=>({...current,[sourceDeck]:false,[targetDeck]:true}));
+        setDeckAutomationOwner(sourceDeck,"automatic");
+        const endpoint=targetDeck===1?0:100;
+        setCrossfade(endpoint);
+        writeDeckOutputVolumes(endpoint,masterVolume);
+        mpvAutoTransitionRef.current={phase:"idle"};
+      },100);
+    }catch(error){
+      if(mpvAutoTransitionRef.current===transition)mpvAutoTransitionRef.current={phase:"idle"};
+      console.error("自动 DJ 启动下一首失败",error);
+    }
+  };
+  const fadeOutDeletedMpvDeck=async(deckNumber,durationSeconds=2.5)=>{
+    cancelMpvAutoTransition();
+    const transition={phase:"fading-deleted",sourceDeck:deckNumber};
+    mpvAutoTransitionRef.current=transition;
+    const initialGains=equalPowerGains(crossfade);
+    const initialGain=deckNumber===1?initialGains.deck1:initialGains.deck2;
+    const startedAt=performance.now();
+    mpvAutoTransitionTimerRef.current=window.setInterval(()=>{
+      if(mpvAutoTransitionRef.current!==transition){cancelMpvAutoTransition();return}
+      const progress=Math.min(1,(performance.now()-startedAt)/(Math.max(.4,durationSeconds)*1000));
+      mpvVolumeWriterRef.current.enqueue([{
+        deck:deckNumber,
+        volume:deckOutputVolumePercent(initialGain*(1-progress),masterVolume,deckVocalModes[deckNumber]),
+      }]);
+      if(progress<1)return;
+      window.clearInterval(mpvAutoTransitionTimerRef.current);
+      mpvAutoTransitionTimerRef.current=null;
+      invoke("mpv_deck_set_paused",{deck:deckNumber,paused:true})
+        .then(applyMpvDeckState)
+        .catch((error)=>console.error("删除播放歌曲后的淡出停止失败",error));
+      setPlayingDecks((current)=>({...current,[deckNumber]:false}));
+      mpvAutoTransitionRef.current={phase:"idle"};
+    },100);
+  };
+  const transitionDeletedPlayingTrack=async(deckNumber,trackIndex,nextTrackIndex,targetQueueSource)=>{
+    if(!mpvEnabled)return;
+    const targetDeck=deckNumber===1?2:1;
+    cancelMpvAutoTransition();
+    if(playingDecks[targetDeck]){
+      mpvAutoTransitionRef.current={
+        phase:"ready",
+        sourceDeck:deckNumber,
+        targetDeck,
+        sourceTrackIndex:trackIndex,
+        targetTrackIndex:targetDeck===1?deck1:deck2,
+        crossfadeSeconds:2.5,
+        targetStartsSilent:false,
+      };
+      await beginMpvAutoTransition(deckNumber);
+      return;
+    }
+    if(nextTrackIndex===null){
+      await fadeOutDeletedMpvDeck(deckNumber);
+      return;
+    }
+    const prepared=await prepareMpvAutoTransition(deckNumber,trackIndex,nextTrackIndex,2.5,targetQueueSource);
+    if(!prepared){
+      await fadeOutDeletedMpvDeck(deckNumber);
+      return;
+    }
+    await beginMpvAutoTransition(deckNumber);
+  };
+  const advanceMpvAutoTransition=async(deckNumber,trackIndex,state)=>{
+    if(state?.paused||!state?.duration)return;
+    const targetDeck=deckNumber===1?2:1;
+    const arbitration=planDeckOperatorArbitration({
+      mode:deckPlaybackModes[deckNumber],
+      targetDeck,
+      targetPlaying:Boolean(playingDecks[targetDeck]),
+      cueDeck:deckCue.deck,
+    });
+    if(!arbitration.automationAllowed)return;
+    const transition=mpvAutoTransitionRef.current;
+    const preparedTargetIndex=transition.sourceDeck===deckNumber&&transition.phase==="ready"
+      ? transition.targetTrackIndex
+      : null;
+    const plan=planDeckAutoTransition({
+      queue:deckPlaybackTrackIndexes[deckNumber],
+      currentIndex:trackIndex,
+      mode:deckPlaybackModes[deckNumber],
+      remainingSeconds:Math.max(0,state.duration-state.timePos),
+      preparedTargetIndex,
+      otherDeckPlaying:Boolean(playingDecks[targetDeck]),
+    });
+    if(plan.action==="preload")await prepareMpvAutoTransition(deckNumber,trackIndex,plan.nextIndex);
+    else if(plan.action==="crossfade")await beginMpvAutoTransition(deckNumber);
+  };
   const finishMpvDeck = async (deckNumber, trackIndex) => {
     if (mpvEndingRef.current[deckNumber]) return;
+    const automaticTransition=mpvAutoTransitionRef.current;
+    if(automaticTransition.phase==="crossfading"&&automaticTransition.sourceDeck===deckNumber)return;
+    if(automaticTransition.sourceDeck===deckNumber)cancelMpvAutoTransition();
     mpvEndingRef.current[deckNumber]=true;
     try {
       const mode=deckPlaybackModes[deckNumber];
@@ -3253,12 +3878,12 @@ export function App() {
         return;
       }
       if(mode==="sequence"||mode==="shuffle") {
-        const excludedIndex=deckNumber===1?deck2:deck1;
-        const nextTrack=getNextPlayableTrack(tracks.length,trackIndex,excludedIndex,mode==="shuffle");
+        const nextTrack=getNextPlayableTrackInQueue(deckPlaybackTrackIndexes[deckNumber],trackIndex,-1,mode==="shuffle");
         if(nextTrack!==null) {
           mpvEofHandledRef.current[deckNumber]=false;
           mpvAutoplayAfterLoadRef.current[deckNumber]=true;
           mpvLoadedPathsRef.current[deckNumber]=null;
+          resetDeckForTrackChange(deckNumber);
           if(deckNumber===1)setDeck1(nextTrack);else setDeck2(nextTrack);
           setDeckProgress((current)=>({...current,[deckNumber]:0}));
           return;
@@ -3313,6 +3938,7 @@ export function App() {
           const state=await invoke("mpv_deck_state",{deck:deckNumber});
           if(disposed)return;
           applyMpvDeckState(state);
+          await advanceMpvAutoTransition(deckNumber,trackIndex,state);
           const reachedEnd=Boolean(state.eofReached)||(state.duration>0&&state.timePos>=state.duration-.06);
           if(!reachedEnd) {
             mpvEofHandledRef.current[deckNumber]=false;
@@ -3330,7 +3956,7 @@ export function App() {
     poll();
     const timer=window.setInterval(poll,160);
     return()=>{disposed=true;window.clearInterval(timer)};
-  },[mpvEnabled,deck1,deck2,deckOnePath,deckTwoPath,deckPlaybackModes,tracks.length]);
+  },[mpvEnabled,deck1,deck2,deckOnePath,deckTwoPath,deckPlaybackModes,tracks.length,deckPlaybackTrackIndexes,playingDecks,deckCue.deck]);
   const activeMediaType = mediaTypes.find(type => type.id === mediaType) ?? mediaTypes[0];
   const activeMediaCategories = mediaCategories[mediaType] ?? [];
   const availableVideos = useMemo(() => videoAssets.length
@@ -3743,6 +4369,9 @@ export function App() {
     ? { deck1:deckCue.deck===1?headphoneVolume:0, deck2:deckCue.deck===2?headphoneVolume:0 }
     : { deck1:100-crossfade, deck2:crossfade };
   const handleCrossfadeChange = (event) => {
+    const automaticTarget=mpvAutoTransitionRef.current.targetDeck;
+    if(automaticTarget)void takeDeckOperatorControl(automaticTarget,{rollbackAutoTarget:false});
+    else cancelMpvAutoTransition();
     const nextCrossfade = Number(event.target.value);
     writeDeckOutputVolumes(nextCrossfade,masterVolume);
     setCrossfade(nextCrossfade);
@@ -3769,14 +4398,55 @@ export function App() {
   };
   const filteredTrackEntries = useMemo(() => {
     const query = songSearch.trim().toLocaleLowerCase("zh-CN");
-    if (!query) return tracks.map((track,index)=>({track,index}));
-    return tracks
-      .map((track,index)=>({track,index}))
+    const trackIndexByPath=new Map(tracks.map((track,index)=>[managedTrackIdentity(track,index),index]));
+    const playlistEntries=playlistManagement.seeded&&activePlaylistRecord
+      ? activePlaylistRecord.trackPaths.map(path=>trackIndexByPath.get(path)).filter(Number.isInteger).map(index=>({track:tracks[index],index}))
+      : tracks.map((track,index)=>({track,index}));
+    if (!query) return playlistEntries;
+    return playlistEntries
       .filter(({track}) => [track.title,track.artist,track.tag,track.path]
         .some((value)=>String(value ?? "").toLocaleLowerCase("zh-CN").includes(query)));
-  },[tracks,songSearch]);
+  },[tracks,songSearch,activePlaylistRecord,playlistManagement.seeded]);
+  const moveTrackInActivePlaylist = useCallback((track,index,direction) => {
+    const trackPath=managedTrackIdentity(track,index);
+    if(!trackPath||![-1,1].includes(direction))return;
+    setPlaylistManagement(current=>{
+      const selected=current.playlists.find(item=>item.name===playlist);
+      if(!selected)return current;
+      const fromIndex=selected.trackPaths.indexOf(trackPath);
+      return updatePlaylistTracks(current,selected.id,paths=>movePlaylistTrack(paths,fromIndex,fromIndex+direction));
+    });
+  },[playlist,setPlaylistManagement]);
+  const removeTrackFromActivePlaylist = useCallback((track,index) => {
+    const trackPath=managedTrackIdentity(track,index);
+    if(!trackPath)return;
+    setPlaylistManagement(current=>{
+      const selected=current.playlists.find(item=>item.name===playlist);
+      return selected
+        ? updatePlaylistTracks(current,selected.id,paths=>removePlaylistTrack(paths,trackPath))
+        : current;
+    });
+    setSelectedTrack(current=>current===index?null:current);
+  },[playlist,setPlaylistManagement]);
+  const openTrackContextMenu = useCallback((event,track,index) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(activeNav!=="音乐管理"||!activePlaylistRecord)return;
+    const trackPath=managedTrackIdentity(track,index);
+    if(activePlaylistRecord.trackPaths.indexOf(trackPath)<0)return;
+    const width=174;
+    const height=132;
+    setPlaylistContextMenu(null);
+    setTrackContextMenu({
+      track,
+      index,
+      trackPath,
+      x:Math.max(8,Math.min(event.clientX,window.innerWidth-width-8)),
+      y:Math.max(8,Math.min(event.clientY,window.innerHeight-height-8)),
+    });
+  },[activeNav,activePlaylistRecord]);
   const requestManualAiProduction = useCallback(async (track) => {
-    if (!track?.path || !runtimeCapability.aiProcessingAvailable) return;
+    if (!track?.path || !runtimeCapability.aiProcessingAvailable||audioAiWorker.enabled===false) return;
     const normalizedPath = normalizeMediaPath(track.path);
     setManualAiPendingPaths((current)=>current.includes(normalizedPath)?current:[...current,normalizedPath]);
     try {
@@ -3794,8 +4464,8 @@ export function App() {
     } finally {
       setManualAiPendingPaths((current)=>current.filter((path)=>path!==normalizedPath));
     }
-  },[runtimeCapability.aiProcessingAvailable]);
-  const trackRows = useMemo(() => filteredTrackEntries.map(({track:t,index:i})=>{
+  },[runtimeCapability.aiProcessingAvailable,audioAiWorker.enabled]);
+  const trackRows = useMemo(() => filteredTrackEntries.map(({track:t,index:i},listPosition)=>{
     const trackAnalysis = audioAnalyses[audioAnalysisKey(t)];
     const aiJob = t.path ? audioAiJobByPath.get(normalizeMediaPath(t.path)) : null;
     const aiError = String(aiJob?.errorMessage ?? aiJob?.error_message ?? "");
@@ -3806,7 +4476,8 @@ export function App() {
         : /convert string to float/i.test(aiError)
           ? "时间解析失败"
           : "制作失败";
-    const aiLabel = aiJob?.status==="ready"?"已制作":aiJob?.status==="skipped"?(aiJob.stage==="missing-artist"?"无歌手/仅播放":"DJ长音频/仅播放"):aiJob?.status==="running"?`制作中/${aiJob.stage}`:aiJob?.status==="paused"?"播放中/制作暂停":aiJob?.status==="queued"?"待制作":aiJob?.status==="failed"?aiFailureLabel:runtimeCapability.mode==="player"?"可播放":"待登记";
+    const stemProgress = describeReadyStemProgress(Boolean(t.accompanimentPath),aiJob);
+    const aiLabel = stemProgress?.label ?? (aiJob?.status==="ready"?"全部制作完成":aiJob?.status==="skipped"?(aiJob.stage==="missing-artist"?"无歌手/仅播放":"DJ长音频/仅播放"):aiJob?.status==="running"?`制作中/${aiJob.stage}`:aiJob?.status==="paused"?"播放中/制作暂停":aiJob?.status==="queued"?"待制作":aiJob?.status==="failed"?aiFailureLabel:runtimeCapability.mode==="player"?"可播放":"待登记");
     const aiTitle = aiJob?.status==="failed" && aiError ? `${aiLabel}：${aiError}` : aiLabel;
     const trackBpm = Number(trackAnalysis?.bpm) > 0 ? Number(trackAnalysis.bpm).toFixed(1).replace(/\.0$/, "") : t.bpm;
     const inDeck1 = i===deck1;
@@ -3819,24 +4490,119 @@ export function App() {
     const rowSelected = !locked&&selectedTrack===i;
     const manualAiPending = Boolean(t.path&&manualAiPendingPaths.includes(normalizeMediaPath(t.path)));
     const missingArtist = !t.artist||t.artist==="--";
-    const manualAiDisabled = manualAiPending||!runtimeCapability.aiProcessingAvailable||missingArtist||["ready","running","paused"].includes(aiJob?.status)||aiJob?.status==="skipped";
+    const manualAiDisabled = manualAiPending||!runtimeCapability.aiProcessingAvailable||audioAiWorker.enabled===false||missingArtist||["ready","running","paused"].includes(aiJob?.status)||aiJob?.status==="skipped";
     const manuallyPrioritized = aiJob?.status==="queued"&&["manual-priority","manual-retry"].includes(aiJob?.stage);
-    const manualAiLabel = manualAiPending?"提交中":aiJob?.status==="ready"?"已完成":aiJob?.status==="running"||aiJob?.status==="paused"?"制作中":manuallyPrioritized?"已置顶":aiJob?.status==="queued"?"优先":aiJob?.status==="failed"?"重做":missingArtist?"补歌手":aiJob?.status==="skipped"?"仅播放":"AI制作";
-    const manualAiTitle = missingArtist?"请先在歌曲文件名或标签中补充歌手名":manuallyPrioritized?"已置顶，当前任务结束后立即制作":aiJob?.status==="queued"?"将这首歌提到 AI 制作队列最前面":aiJob?.status==="failed"?"重新制作歌词和原唱/伴唱":"制作歌词和原唱/伴唱";
-    return <div key={t.id??`${t.title}-${i}`} role="button" aria-disabled={locked} tabIndex={locked?-1:0} className={`track-row ${rowSelected?"selected":""} ${locked?"deck-locked":""} ${inDeck1?"deck-one":""} ${inDeck2?"deck-two":""} ${onAir?"on-air":""} ${bothOnAir?"on-air-both":""}`} onClick={()=>{if(!locked)setSelectedTrack(i)}} onDoubleClick={()=>{if(!locked)loadTrack(i)}} onKeyDown={event=>{if(event.key==="Enter"&&!locked)setSelectedTrack(i)}}>
-      <span className={`track-index ${inDeck1||inDeck2?"deck-indicators":""}`}>{inDeck1||inDeck2?[inDeck1&&<SpeakerHigh key="deck-1" className="deck-one-indicator" weight={onAirDeck1?"fill":"regular"}/>,inDeck2&&<SpeakerHigh key="deck-2" className="deck-two-indicator" weight={onAirDeck2?"fill":"regular"}/>]:String(i+1).padStart(2,"0")}</span><span className="track-info"><b title={t.title}>{t.title}</b><small title={`${t.tag} · ${aiTitle}`}>{t.tag} · {aiLabel}</small></span><span className="track-artist" title={t.artist}>{t.artist}</span><span title={`BPM ${trackBpm}`}>{trackBpm}</span><span title={`时长 ${t.duration}`}>{t.duration}</span>
+    const manualAiLabel = audioAiWorker.enabled===false?"AI已关":manualAiPending?"提交中":stemProgress?.actionLabel??(aiJob?.status==="ready"?"已完成":aiJob?.status==="running"||aiJob?.status==="paused"?"制作中":manuallyPrioritized?"已置顶":aiJob?.status==="queued"?"优先":aiJob?.status==="failed"?"重做":missingArtist?"补歌手":aiJob?.status==="skipped"?"仅播放":"AI制作");
+    const manualAiTitle = audioAiWorker.enabled===false?"AI 歌曲制作已在设置中关闭":missingArtist?"请先在歌曲文件名或标签中补充歌手名":manuallyPrioritized?"已置顶，当前任务结束后立即制作":aiJob?.status==="queued"?"将这首歌提到 AI 制作队列最前面":aiJob?.status==="failed"?"重新制作歌词和原唱/伴唱":"制作歌词和原唱/伴唱";
+    return <div key={t.id??`${t.title}-${i}`} role="button" aria-disabled={locked} tabIndex={locked?-1:0} className={`track-row ${rowSelected?"selected":""} ${locked?"deck-locked":""} ${inDeck1?"deck-one":""} ${inDeck2?"deck-two":""} ${onAir?"on-air":""} ${bothOnAir?"on-air-both":""}`} onClick={()=>{if(!locked)setSelectedTrack(i)}} onDoubleClick={()=>{if(!locked)loadTrack(i)}} onPointerDown={event=>{if(event.button===2)openTrackContextMenu(event,t,i)}} onContextMenuCapture={event=>openTrackContextMenu(event,t,i)} onKeyDown={event=>{if(event.key==="Enter"&&!locked)setSelectedTrack(i)}}>
+      <span className={`track-index ${inDeck1||inDeck2?"deck-indicators":""}`}>{inDeck1||inDeck2?[inDeck1&&<SpeakerHigh key="deck-1" className="deck-one-indicator" weight={onAirDeck1?"fill":"regular"}/>,inDeck2&&<SpeakerHigh key="deck-2" className="deck-two-indicator" weight={onAirDeck2?"fill":"regular"}/>]:String(listPosition+1)}</span><span className="track-info"><b title={t.title}>{t.title}</b><small title={`${t.tag} · ${aiTitle}`}>{t.tag} · {aiLabel}</small></span><span className="track-artist" title={t.artist}>{t.artist}</span><span title={`BPM ${trackBpm}`}>{trackBpm}</span><span title={`时长 ${t.duration}`}>{t.duration}</span>
       {onAir&&<span className="track-playing-decks" aria-label={`正在由${bothOnAir?" Deck 1 和 Deck 2":` Deck ${onAirDeck1?1:2}`}播放`}>{onAirDeck1&&<span className="track-playing-badge deck-one-label">1</span>}{onAirDeck2&&<span className="track-playing-badge deck-two-label">2</span>}</span>}
       <button className="track-insert track-ai-action" disabled={manualAiDisabled} aria-label={`${manualAiLabel}：${t.title}`} title={manualAiTitle} onClick={event=>{event.stopPropagation();requestManualAiProduction(t)}} onDoubleClick={event=>event.stopPropagation()}>{manualAiLabel}</button>
       <button className="track-insert track-deck-one-action" aria-label="装载到 1 号 Deck，不自动播放" title="装载到 1 号 Deck（不自动播放）" onClick={event=>{event.stopPropagation();insertTrack(1,i)}} onDoubleClick={event=>event.stopPropagation()}>1</button>
       <button className="track-insert track-deck-two-action" aria-label="装载到 2 号 Deck，不自动播放" title="装载到 2 号 Deck（不自动播放）" onClick={event=>{event.stopPropagation();insertTrack(2,i)}} onDoubleClick={event=>event.stopPropagation()}>2</button>
     </div>;
-  }), [filteredTrackEntries,audioAnalyses,audioAiJobByPath,runtimeCapability.mode,runtimeCapability.aiProcessingAvailable,manualAiPendingPaths,deck1,deck2,playingDecks,selectedTrack,library,requestManualAiProduction]);
+  }), [filteredTrackEntries,audioAnalyses,audioAiJobByPath,runtimeCapability.mode,runtimeCapability.aiProcessingAvailable,audioAiWorker.enabled,manualAiPendingPaths,deck1,deck2,playingDecks,selectedTrack,library,openTrackContextMenu,requestManualAiProduction]);
   const exitApplication = () => {
     invoke("exit_application").catch((error) => {
       console.error("退出桌面程序失败", error);
       window.close();
     });
   };
+
+  const weekdayPlaylistItems=playlistManagement.playlists.filter(item=>item.kind==="weekday");
+  const secondaryPlaylistItems=playlistManagement.playlists.filter(item=>item.kind==="event"||item.kind==="custom");
+  const openPlaylistSortMenu=(event,item)=>{
+    event.preventDefault();
+    event.stopPropagation();
+    const width=154;
+    const height=92;
+    const anchor=event.currentTarget?.getBoundingClientRect?.();
+    const requestedX=event.clientX||anchor?.left||8;
+    const requestedY=event.clientY||anchor?.bottom||8;
+    setPlaylistContextMenu({
+      playlistId:item.id,
+      x:Math.max(8,Math.min(requestedX,window.innerWidth-width-8)),
+      y:Math.max(8,Math.min(requestedY,window.innerHeight-height-8)),
+    });
+  };
+  const movePlaylistFromL=(item,direction)=>{
+    setPlaylistManagement(current=>movePlaylistWithinKind(current,item.id,direction));
+    setPlaylistContextMenu(null);
+  };
+  const contextPlaylist=playlistContextMenu?playlistManagement.playlists.find(item=>item.id===playlistContextMenu.playlistId)??null:null;
+  const contextPlaylistGroup=contextPlaylist?playlistManagement.playlists.filter(item=>item.kind===contextPlaylist.kind):[];
+  const contextPlaylistIndex=contextPlaylist?contextPlaylistGroup.findIndex(item=>item.id===contextPlaylist.id):-1;
+  const contextTrackIndex=trackContextMenu&&activePlaylistRecord
+    ? activePlaylistRecord.trackPaths.indexOf(trackContextMenu.trackPath)
+    : -1;
+  const moveTrackFromL=(direction)=>{
+    if(!trackContextMenu)return;
+    moveTrackInActivePlaylist(trackContextMenu.track,trackContextMenu.index,direction);
+    setTrackContextMenu(null);
+  };
+  const removeTrackFromL=()=>{
+    if(!trackContextMenu)return;
+    const removedIndex=trackContextMenu.index;
+    const matchingPlayingDeck=playingDecks[1]&&deck1===removedIndex
+      ? 1
+      : playingDecks[2]&&deck2===removedIndex
+        ? 2
+        : null;
+    const matchingPlaybackSource=matchingPlayingDeck===null
+      ? null
+      : deckPlaybackQueueSources[matchingPlayingDeck];
+    const playingDeckNumber=matchingPlaybackSource
+      && activePlaylistPlaybackSource
+      && matchingPlaybackSource.kind===activePlaylistPlaybackSource.kind
+      && matchingPlaybackSource.libraryKey===activePlaylistPlaybackSource.libraryKey
+      && matchingPlaybackSource.playlistId===activePlaylistPlaybackSource.playlistId
+      ? matchingPlayingDeck
+      : null;
+    const orderedIndexes=activePlaylistRecord
+      ? activePlaylistRecord.trackPaths.map((path)=>trackIndexByPath.get(path)).filter(Number.isInteger)
+      : [];
+    const nextTrackIndex=playingDeckNumber===null
+      ? null
+      : getNextPlayableTrackInQueue(orderedIndexes,removedIndex,-1,false);
+    if(playingDeckNumber!==null){
+      void transitionDeletedPlayingTrack(
+        playingDeckNumber,
+        removedIndex,
+        nextTrackIndex,
+        activePlaylistPlaybackSource,
+      );
+    }
+    removeTrackFromActivePlaylist(trackContextMenu.track,trackContextMenu.index);
+    setTrackContextMenu(null);
+  };
+
+  const homeLibraryPanel = <aside className="panel library-panel" aria-label="首页 L 区播放曲库">
+    <div className="panel-title"><MusicNotes weight="fill"/><div><b>播放曲库</b><small title={[mpvRuntime.message,audioImportStatus.message].filter(Boolean).join(" · ")}>{audioAssets.length?`${library}号曲库 · ${playlist}常规歌单 · ${tracks.length} 首 · ${mpvEnabled?"mpv 播放引擎":"兼容引擎"}${audioImportStatus.detected?` · KGMA ${audioImportStatus.ready}/${audioImportStatus.detected}`:""}`:`${library}号曲库 · ${playlist}常规歌单 · 当前为演示数据${audioImportStatus.detected?` · KGMA ${audioImportStatus.ready}/${audioImportStatus.detected}`:""}`}</small></div></div>
+    <div className="library-switch"><button className={library===1?"active":""} onClick={()=>{setLibrary(1);setPlaylistContextMenu(null);setTrackContextMenu(null);setSelectedTrack(null)}}>1号曲库</button><button className={library===2?"active":""} onClick={()=>{setLibrary(2);setPlaylistContextMenu(null);setTrackContextMenu(null);setSelectedTrack(null)}}>2号曲库</button></div>
+    <div className="playlist-tabs" aria-label="歌单选择">
+      <div className="playlist-row weekday-row">{weekdayPlaylistItems.map(item=><button key={item.id} className={playlist===item.name?"active":""} onClick={()=>setPlaylist(item.name)} onContextMenu={event=>openPlaylistSortMenu(event,item)} onKeyDown={event=>{if(event.key==="ContextMenu"||(event.shiftKey&&event.key==="F10"))openPlaylistSortMenu(event,item)}} title={`${item.name} · 右键排序`}>{item.name}</button>)}</div>
+      <div className="playlist-row special-row">{secondaryPlaylistItems.map(item=><button key={item.id} className={playlist===item.name?"active":""} onClick={()=>setPlaylist(item.name)} onContextMenu={event=>openPlaylistSortMenu(event,item)} onKeyDown={event=>{if(event.key==="ContextMenu"||(event.shiftKey&&event.key==="F10"))openPlaylistSortMenu(event,item)}} title={`${item.name} · 右键排序`}>{item.name}</button>)}</div>
+    </div>
+    <label className="song-search">
+      <MagnifyingGlass weight="bold"/>
+      <input value={songSearch} onChange={event=>setSongSearch(event.target.value)} placeholder="搜索歌曲、歌手或目录" aria-label="搜索歌曲、歌手或目录"/>
+      <span>{filteredTrackEntries.length}/{tracks.length}</span>
+      {songSearch&&<button type="button" onClick={()=>setSongSearch("")} title="清空搜索" aria-label="清空搜索"><X weight="bold"/></button>}
+    </label>
+    <div className="table-head"><span>{activeNav==="音乐管理"?"歌曲 · 右键管理":"歌曲"}</span><span>歌手</span><span>BPM</span><span>时长</span></div>
+    <div className="track-list" onContextMenu={event=>{if(activeNav==="音乐管理")event.preventDefault()}}>{trackRows.length?trackRows:<div className="track-search-empty"><b>没有找到歌曲</b><small>请更换歌曲名、歌手或目录关键词</small></div>}</div>
+    {contextPlaylist&&createPortal(<div className="playlist-context-menu" role="menu" aria-label={`${contextPlaylist.name} 分类排序`} style={{left:playlistContextMenu.x,top:playlistContextMenu.y}} onPointerDown={event=>event.stopPropagation()}>
+      <strong>{contextPlaylist.name}<small>调整 L 区顺序</small></strong>
+      <button type="button" role="menuitem" disabled={contextPlaylistIndex<=0} onClick={()=>movePlaylistFromL(contextPlaylist,-1)}><ArrowUp/>上移</button>
+      <button type="button" role="menuitem" disabled={contextPlaylistIndex<0||contextPlaylistIndex>=contextPlaylistGroup.length-1} onClick={()=>movePlaylistFromL(contextPlaylist,1)}><ArrowDown/>下移</button>
+    </div>,document.body)}
+    {trackContextMenu&&contextTrackIndex>=0&&createPortal(<div className="playlist-context-menu track-context-menu" role="menu" aria-label={`${trackContextMenu.track.title} 歌单操作`} style={{left:trackContextMenu.x,top:trackContextMenu.y}} onPointerDown={event=>event.stopPropagation()}>
+      <strong title={trackContextMenu.track.title}>{trackContextMenu.track.title}<small>{library}号曲库 / {playlist} · 只调整当前列表</small></strong>
+      <button type="button" role="menuitem" disabled={contextTrackIndex===0} onClick={()=>moveTrackFromL(-1)}><ArrowUp/>上移</button>
+      <button type="button" role="menuitem" disabled={contextTrackIndex===activePlaylistRecord.trackPaths.length-1} onClick={()=>moveTrackFromL(1)}><ArrowDown/>下移</button>
+      <button type="button" role="menuitem" className="danger" onClick={removeTrackFromL}><Trash/>从当前列表移除</button>
+    </div>,document.body)}
+  </aside>;
 
   return <div className="app-shell">
     <div className="media-audio-engine" aria-hidden="true">
@@ -3845,10 +4611,10 @@ export function App() {
     </div>
     <header className="topbar">
       <div className="brand"><img src="/assets/king-club-logo-white.svg" alt="King Club"/><div><strong>AI Broadcast Control 2027</strong></div></div>
-      <div className="system-status"><span className={`runtime-mode runtime-mode-${runtimeCapability.mode}`} title={`${runtimeCapability.message}${runtimeCapability.aiProcessingAvailable?` · AI worker ${audioAiWorker.running?"运行中":"等待中"}`:""}`}>{runtimeCapability.mode==="full"?<><span className="nvidia-runtime-logo" aria-label="NVIDIA"><img src="/assets/nvidia-logo-horiz-wht-16x9.png" alt="NVIDIA"/></span><span className="runtime-edition">全功能版</span></>:<><Lightning weight="fill"/> {runtimeCapability.mode==="detecting"?"识别硬件":"播放版"}</>}</span><span><WifiHigh /> 本机控制</span><span className={ledOutputStatus.connected?"led-connected":"led-disconnected"} title={ledOutputStatus.message}><MonitorPlay /> {ledOutputStatus.previewMode?"单屏 · C1 预览":ledOutputStatus.connected?"第二屏 + C1 预览":"LED 主屏未连接"}</span><RuntimeClock/><button type="button" className="app-exit-button" onClick={exitApplication} title="退出软件" aria-label="退出软件"><X weight="bold"/></button></div>
+      <div className="system-status"><span className={`runtime-mode runtime-mode-${runtimeCapability.mode}`} title={`${runtimeCapability.message}${runtimeCapability.aiProcessingAvailable?` · AI worker ${audioAiWorker.enabled===false?"已关闭":audioAiWorker.running?"运行中":"等待中"}`:""}`}>{runtimeCapability.mode==="full"?<><span className="nvidia-runtime-logo" aria-label="NVIDIA"><img src="/assets/nvidia-logo-horiz-wht-16x9.png" alt="NVIDIA"/></span><span className="runtime-edition">全功能版</span></>:<><Lightning weight="fill"/> {runtimeCapability.mode==="detecting"?"识别硬件":"播放版"}</>}</span><span><WifiHigh /> 本机控制</span><span className={ledOutputStatus.connected?"led-connected":"led-disconnected"} title={ledOutputStatus.message}><MonitorPlay /> {ledOutputStatus.previewMode?"单屏 · C1 预览":ledOutputStatus.connected?"第二屏 + C1 预览":"LED 主屏未连接"}</span><RuntimeClock/><button type="button" className="app-exit-button" onClick={exitApplication} title="退出软件" aria-label="退出软件"><X weight="bold"/></button></div>
     </header>
 
-    <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""} ${activeNav==="调音台"?"mixer-layout":""} ${activeNav==="Avolites Tiger Touch Pro"?"titan-layout":""}`}>
+    <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""} ${activeNav==="调音台"?"mixer-layout":""} ${activeNav==="Avolites Tiger Touch Pro"?"titan-layout":""} ${activeNav==="演出编排"?"show-editor-layout":""}`}>
       {activeNav === "设置" ? <SettingsView
         screenTargets={screenTargets}
         monitorTargets={monitorTargets}
@@ -3856,6 +4622,10 @@ export function App() {
         onMonitorChange={updateMonitorTarget}
         onSave={saveTargetSettings}
         dirty={settingsDirty}
+        runtimeCapability={runtimeCapability}
+        audioAiWorker={audioAiWorker}
+        aiRuntimeBusy={aiRuntimeBusy}
+        onAiRuntimeEnabledChange={changeAiRuntimeEnabled}
         mixerModelId={mixerModelId}
         mixerDriverStatus={mixerDriverStatus}
         mixerControlHost={mixerControlHost}
@@ -3887,17 +4657,45 @@ export function App() {
         calibrationStatus={calibrationStatus}
         onRunCalibration={runVocalCalibration}
       /> : activeNav === "音乐管理" ? <MusicManagementView
+        leftPanel={homeLibraryPanel}
+        activeLibrary={library}
+        onActiveLibraryChange={setLibrary}
         vocalProfiles={vocalProfiles}
         vocalProfileDevices={vocalProfileDevices}
         vocalProfileBusy={vocalProfileBusy}
         vocalProfileMessage={vocalProfileMessage}
-        songs={tracks.filter(track=>track.path).map(track=>({title:track.title,artist:track.artist,path:track.path}))}
+        songs={tracks.map((track,index)=>({...track,index,path:managedTrackIdentity(track,index)})).filter(track=>track.path)}
+        videos={availableVideos}
+        lightingEffects={[...lights.filter(item=>item.label).map(item=>({id:String(item.id),name:item.label})),...titanEffectRegistry.map(item=>({id:String(item.effectId??item.id),name:item.name??item.label??item.legend??`灯光效果 ${item.effectId??item.id}`}))].filter((item,index,items)=>item.id&&items.findIndex(candidate=>candidate.id===item.id)===index)}
+        playlistManagement={playlistManagement}
+        onPlaylistManagementChange={setPlaylistManagement}
+        activePlaylistName={playlist}
+        onActivePlaylistNameChange={setPlaylist}
+        onLoadTrackToDeck={insertTrackWithoutPlaylistQueue}
+        onOpenShowEditor={(trackIndex)=>{setSelectedTrack(trackIndex);setActiveNav("演出编排")}}
+        runtimeMode={runtimeCapability.mode}
+        packageMessage={songPackageMessage}
+        packageDirectories={songPackageDirectories}
+        packageReadyPaths={tracks.filter(track=>track.path&&audioAiJobByPath.get(normalizeMediaPath(track.path))?.status==="ready").map(track=>track.path)}
+        onExportPackage={exportSelectedPackage}
+        onImportPackage={importPackageInbox}
+        onOpenPackageDirectory={openPackageDirectory}
         selectedProfileId={selectedVocalProfileId}
         onSelectedProfileIdChange={selectVocalProfile}
         onCreateVocalProfile={createVocalProfile}
         onRecordVocalProfileSample={recordVocalProfileSample}
         onDeleteVocalProfile={deleteVocalProfile}
         onPrepareVocalProfileSong={prepareVocalProfileSong}
+      /> : activeNav === "演出编排" ? <ShowEditorWorkspace
+        track={tracks[selectedTrack]??tracks[deck1]??tracks[activePlaylistTrackIndexes[0]]??tracks[0]??null}
+        deck1={deck1}
+        deck2={deck2}
+        playingDecks={playingDecks}
+        cueDeck={deckCue.deck}
+        crossfade={crossfade}
+        programMedia={outputBaseMedia}
+        previewMedia={stagedBaseMedia}
+        videos={availableVideos}
       /> : <>
       <LightingConsoleWorkspace
         titanHost={titanHost}
@@ -3919,28 +4717,7 @@ export function App() {
         onImportPackage={stableImportLightingPackage}
         onOpenPackageDirectory={stableOpenLightingPackageDirectory}
       />
-      <aside className="panel library-panel">
-        <div className="panel-title"><MusicNotes weight="fill"/><div><b>播放曲库</b><small title={mpvRuntime.message}>{audioAssets.length?`${playlist}常规歌单 · ${tracks.length} 首 · ${mpvEnabled?"mpv 播放引擎":"兼容引擎"}`:`${playlist}常规歌单 · 当前为演示数据`}</small></div></div>
-        <div className="library-switch"><button className={library===1?"active":""} onClick={()=>setLibrary(1)}>1号曲库</button><button className={library===2?"active":""} onClick={()=>setLibrary(2)}>2号曲库</button></div>
-        <div className="song-package-tools" title={songPackageMessage||`收件箱：${songPackageDirectories.inboxDirectory||"正在建立"}`}>
-          <span className={runtimeCapability.mode==="full"?"full":"player"}>{runtimeCapability.mode==="full"?"制作 + 播放":"仅播放"}</span>
-          <button type="button" onClick={exportSelectedPackage} disabled={!packageTrack?.path||packageTrackJob?.status!=="ready"}>导出包</button>
-          <button type="button" onClick={()=>openPackageDirectory("inbox")}>收件箱</button>
-          <button type="button" onClick={importPackageInbox}>导入包</button>
-        </div>
-        <div className="playlist-tabs" aria-label="歌单选择">
-          <div className="playlist-row weekday-row">{weekdayPlaylists.map(p=><button key={p} className={playlist===p?"active":""} onClick={()=>setPlaylist(p)}>{p}</button>)}</div>
-          <div className="playlist-row special-row">{specialPlaylists.map(p=><button key={p} className={playlist===p?"active":""} onClick={()=>setPlaylist(p)}>{p}</button>)}</div>
-        </div>
-        <label className="song-search">
-          <MagnifyingGlass weight="bold"/>
-          <input value={songSearch} onChange={event=>setSongSearch(event.target.value)} placeholder="搜索歌曲、歌手或目录" aria-label="搜索歌曲、歌手或目录"/>
-          <span>{filteredTrackEntries.length}/{tracks.length}</span>
-          {songSearch&&<button type="button" onClick={()=>setSongSearch("")} title="清空搜索" aria-label="清空搜索"><X weight="bold"/></button>}
-        </label>
-        <div className="table-head"><span>歌曲</span><span>歌手</span><span>BPM</span><span>时长</span></div>
-        <div className="track-list">{trackRows.length?trackRows:<div className="track-search-empty"><b>没有找到歌曲</b><small>请更换歌曲名、歌手或目录关键词</small></div>}</div>
-      </aside>
+      {homeLibraryPanel}
 
       <section className="center-column">
         <div ref={previewPanelRef} className="panel preview-panel">
@@ -3992,7 +4769,8 @@ export function App() {
               onReplay={()=>replayDeck(1)}
               onNext={()=>loadAdjacentDeckTrack(1,1)}
               playbackMode={deckPlaybackModes[1]}
-              onPlaybackModeChange={mode=>setDeckPlaybackModes(current=>({...current,1:mode}))}
+              onPlaybackModeChange={mode=>{void takeDeckOperatorControl(1,{rollbackAutoTarget:false});setDeckPlaybackModes(current=>({...current,1:mode}))}}
+              automationOwner={deckAutomationOwners[1]}
               lyricsEnabled={deckLyricsEnabled[1]}
               lyricsAvailable={deckLyricsLines[1].length>0}
               vocalMode={deckVocalModes[1]}
@@ -4025,7 +4803,8 @@ export function App() {
               onReplay={()=>replayDeck(2)}
               onNext={()=>loadAdjacentDeckTrack(2,1)}
               playbackMode={deckPlaybackModes[2]}
-              onPlaybackModeChange={mode=>setDeckPlaybackModes(current=>({...current,2:mode}))}
+              onPlaybackModeChange={mode=>{void takeDeckOperatorControl(2,{rollbackAutoTarget:false});setDeckPlaybackModes(current=>({...current,2:mode}))}}
+              automationOwner={deckAutomationOwners[2]}
               lyricsEnabled={deckLyricsEnabled[2]}
               lyricsAvailable={deckLyricsLines[2].length>0}
               vocalMode={deckVocalModes[2]}
@@ -4068,7 +4847,7 @@ export function App() {
         </section>
         <section ref={lightPanelRef} className={`panel light-panel ${lightingEnabled ? "lighting-on" : "lighting-off"}`}>
           <div className="panel-title compact"><LightbulbFilament weight="fill"/><div className="titan-panel-identity"><b>{titanStatus.connected?titanStatus.deviceName:"Avolites Titan"}</b><small className={titanStatus.connected?"titan-live":"titan-offline"}>{titanStatus.connected?`Titan ${titanStatus.softwareVersion} · ${titanStatus.showName} · ${titanPlaybacks.length} Cue/Playback`:titanStatus.message||"离线模拟 · 不发送现场灯光命令"}</small></div><label className="rhythm-rule-control lighting-rhythm-rule" title="自动模式只跟随当前实际占主导声音的 Deck"><Lightning weight="fill"/><select aria-label="灯光节拍联动规则" value={lightRhythmRule} onChange={(event)=>setLightRhythmRule(event.target.value)}>{rhythmRuleOptions.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label><button type="button" className="lighting-power-toggle" aria-pressed={lightingEnabled} title={lightingEnabled ? "暂停 KING 灯光联动；不会修改 Titan Show" : "恢复 KING 灯光联动"} onClick={()=>setLightingEnabled((enabled)=>!enabled)}><span className="live-dot"/>{lightingEnabled ? "灯光联动" : "联动暂停"}</button></div>
-          <div className="light-grid">{lights.map((lightPreset)=>{const titanId=Number(titanMappings[lightPreset.id]);const mappedPlayback=titanPlaybacks.find((playback)=>playback.titanId===titanId);const configured=Boolean(lightPreset.label||mappedPlayback);const displayName=lightPreset.label||mappedPlayback?.legend||`Titan 效果 ${lightPreset.id}`;const isActive=effectiveLight===lightPreset.id;const simulatedActive=!titanStatus.connected&&isTitanPresetSimulated(titanSimulation,lightPreset.id);const mode=lightPlaybackModes[lightPreset.id]??"once";return <div className={`light-preset ${configured?"configured":"empty"} ${isActive?"active":""} ${mappedPlayback?.active?"titan-active":""} ${simulatedActive?"titan-simulated":""} ${light===null&&isActive?"rhythm-active":""}`} key={lightPreset.id}><button type="button" className="light-preset-main" disabled={!configured} onClick={()=>{setLight(lightPreset.id);triggerTitanPlayback(lightPreset.id,"manual")}} aria-label={configured?`触发 ${displayName}`:`${lightPreset.id} 号灯光预设未配置`} title={mappedPlayback?`${displayName} · TitanId ${mappedPlayback.titanId}`:displayName}><span className="light-number">{lightPreset.id}</span>{configured&&<span className="light-name">{displayName}</span>}{configured&&<span className="light-duration">{mappedPlayback?.active?"TITAN LIVE":simulatedActive?"SIMULATION":lightPreset.duration||"已绑定"}</span>}</button>{configured&&<button type="button" className="light-mode-toggle" onClick={()=>setLightPlaybackModes((current)=>({...current,[lightPreset.id]:mode==="loop"?"once":"loop"}))} aria-label={`${displayName}${mode==="loop"?"循环播放":"单次播放"}`} title={mode==="loop"?"循环播放：点击改为单次":"单次播放：点击改为循环"}>{mode==="loop"?<ArrowsClockwise weight="bold"/>:<span className="light-once">1</span>}</button>}</div>})}</div>
+          <div className="light-grid">{lights.map((lightPreset)=>{const titanId=Number(titanMappings[lightPreset.id]);const mappedPlayback=titanPlaybacks.find((playback)=>playback.titanId===titanId);const registeredEffect=titanEffectRegistry.find((effect)=>Number(effect.presetId)===lightPreset.id);const configured=Boolean(lightPreset.label||mappedPlayback||registeredEffect);const displayName=registeredEffect?.kingName||lightPreset.label||mappedPlayback?.legend||`Titan 效果 ${lightPreset.id}`;const isActive=effectiveLight===lightPreset.id;const simulatedActive=!titanStatus.connected&&isTitanPresetSimulated(titanSimulation,lightPreset.id);const mode=lightPlaybackModes[lightPreset.id]??"once";return <div className={`light-preset ${configured?"configured":"empty"} ${isActive?"active":""} ${mappedPlayback?.active?"titan-active":""} ${simulatedActive?"titan-simulated":""} ${light===null&&isActive?"rhythm-active":""}`} key={lightPreset.id}><button type="button" className="light-preset-main" disabled={!configured} onClick={()=>{setLight(lightPreset.id);triggerTitanPlayback(lightPreset.id,"manual")}} aria-label={configured?`触发 ${displayName}`:`${lightPreset.id} 号灯光预设未配置`} title={mappedPlayback?`${displayName} · TitanId ${mappedPlayback.titanId}`:displayName}><span className="light-number">{lightPreset.id}</span>{configured&&<span className="light-name">{displayName}</span>}{configured&&<span className="light-duration">{mappedPlayback?.active?"TITAN LIVE":simulatedActive?"SIMULATION":lightPreset.duration||"已绑定"}</span>}</button>{configured&&<button type="button" className="light-mode-toggle" onClick={()=>setLightPlaybackModes((current)=>({...current,[lightPreset.id]:mode==="loop"?"once":"loop"}))} aria-label={`${displayName}${mode==="loop"?"循环播放":"单次播放"}`} title={mode==="loop"?"循环播放：点击改为单次":"单次播放：点击改为循环"}>{mode==="loop"?<ArrowsClockwise weight="bold"/>:<span className="light-once">1</span>}</button>}</div>})}</div>
           <div className="quick-actions">
             <button type="button" className={light===null?"auto active":"auto"} aria-pressed={light===null} onClick={()=>setLight(null)}>自动</button>
             {fixtureControls.map((fixture)=>{const color=fixtureColors[fixture.id];const colorValue=`rgb(${color.r}, ${color.g}, ${color.b})`;return <button type="button" key={fixture.id} className="fixture-control" style={{"--fixture-color":colorValue,"--fixture-text":isLightColor(color)?"#07100e":"#ffffff"}} onDoubleClick={(event)=>openFixtureColorPicker(fixture.id,event)} title="双击打开 RGB 调色板"><span className="fixture-color-dot"/>{fixture.label}</button>})}
@@ -4076,7 +4855,7 @@ export function App() {
           {fixtureColorEditor&&(()=>{const color=fixtureColors[fixtureColorEditor.id];const hsv=rgbToHsv(color);const hue=fixtureColorEditor.hue;return <div className="fixture-color-editor" style={{left:fixtureColorEditor.left}} role="dialog" aria-label="RGB 调色板"><div className="fixture-color-editor-head"><b>{fixtureControls.find((fixture)=>fixture.id===fixtureColorEditor.id)?.label} 调色板</b><button type="button" onClick={()=>setFixtureColorEditor(null)}>关闭</button></div><div className="fixture-picker-body" style={{display:"grid",gridTemplateColumns:"minmax(0, 1fr) 18px 64px",gap:"8px",alignItems:"stretch",justifyItems:"stretch"}}><div className="fixture-sv-field" style={{width:"100%",height:"155px",background:`linear-gradient(to bottom, transparent, #000), linear-gradient(to right, #fff, hsl(${hue}, 100%, 50%))`}} onPointerDown={updatePickerSV} onPointerMove={(event)=>event.buttons&&updatePickerSV(event)}><i className="fixture-sv-cursor" style={{left:`calc(${hsv.s*100}% - 6px)`,top:`calc(${(1-hsv.v)*100}% - 6px)`}}/></div><div className="fixture-hue-field" style={{width:"18px",height:"155px",background:"linear-gradient(to bottom, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)"}} onPointerDown={updatePickerHue} onPointerMove={(event)=>event.buttons&&updatePickerHue(event)}><i className="fixture-hue-cursor" style={{top:`calc(${hue/3.6}% - 4px)`}}/></div><div className="fixture-picker-preview" style={{width:"64px",height:"155px",backgroundColor:`rgb(${color.r}, ${color.g}, ${color.b})`,color:isLightColor(color)?"#07100e":"#ffffff",textShadow:isLightColor(color)?"none":"0 1px 1px #000"}}><span>R {color.r}</span><span>G {color.g}</span><span>B {color.b}</span></div></div></div>})()}
         </section>
       </aside>
-      <MixerWorkspace model={activeMixerModel} meterStatus={mixerMeterStatus} parameterSnapshot={mixerParameterSnapshot} controlStatus={mixerControlStatus} onWriteParameters={writeQu16Parameters}/>
+      <MixerWorkspace model={activeMixerModel} meterStatus={mixerMeterStatus} parameterSnapshot={mixerParameterSnapshot} controlStatus={mixerControlStatus} onWriteParameters={writeQu16Parameters} outputRestoreStatus={qu16OutputRestore} onRestoreOutputBaseline={restoreQu16OutputBaseline}/>
       </>}
     </main>
 

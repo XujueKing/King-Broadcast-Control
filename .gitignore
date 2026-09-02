@@ -31,6 +31,18 @@ __pycache__/
 
 # Downloaded AI model checkpoints and caches
 /checkpoints/
+/models/
+ui-prototype/models/
+vocal-engine/models/
+*.ckpt
+*.gguf
+*.onnx
+*.safetensors
+*.pt
+*.pth
+
+# Venue-local recovery copies and candidate desktop binaries
+hardware-backups/
 
 # Local UI design-QA captures
 ui-prototype/implementation-*.png
