@@ -24,8 +24,9 @@ export const gatlingPaletteForVideoFamily = (
 ) => profile.palettes[String(family || "neutral")] ?? profile.palettes.neutral;
 
 // Fixture 42 exposes a normalized Speed control. The现场-confirmed quiet look
-// reads 92/255, or 0.361. Keep music tracking in a deliberately narrow band so
-// an unusually high BPM cannot turn the ceiling ambience into a strobe look.
+// reads 92/255, or 0.361. The runtime may use the fixture's full normalized
+// range; the musical grid, rather than an arbitrary dark-scene ceiling, limits
+// how frequently Titan receives changes.
 export const gatlingSpeedForBpm = (bpm, profile = kingclubGatlingProfile) => {
   const numeric = Number(bpm);
   if (!Number.isFinite(numeric) || numeric < 30 || numeric > 300)
@@ -34,8 +35,8 @@ export const gatlingSpeedForBpm = (bpm, profile = kingclubGatlingProfile) => {
   return Number(
     clamp(
       profile.baseSpeedValue + (bounded - 128) * 0.0021,
-      0.22,
-      0.47,
+      0,
+      1,
     ).toFixed(3),
   );
 };
@@ -49,18 +50,16 @@ export const gatlingPulseForRhythm = (
   const isBar = Boolean(event?.isBar || event?.type === "bar");
   const baseSpeed = gatlingSpeedForBpm(bpm, profile);
 
-  // Do not use the ceiling fixture as a one-shot strobe.  The fixture's own
-  // animation keeps moving between updates; KING changes its speed/energy on
-  // the musical grid to form longer looks.  Ordinary beats are deliberately
-  // reduced to half-rate commands so Titan's programmer queue remains ahead
-  // of the music and video-colour commands are not starved.
+  // Alternate high/low energy every beat so the pulse is physically visible.
+  // Titan still receives at most one update per musical marker; there is no
+  // free-running or random strobe loop outside the analysed beat grid.
   if (!isBar && beatIndex % 2 === 1) {
     return {
-      skip:true,
-      look:"hold",
+      skip:false,
+      look:"beat-shadow",
       baseDimmerPercent:profile.baseDimmerPercent,
-      peakDimmerPercent:profile.baseDimmerPercent,
-      speedValue:baseSpeed,
+      peakDimmerPercent:5,
+      speedValue:Number(clamp(baseSpeed * 0.7, 0, 1).toFixed(3)),
     };
   }
 
@@ -71,15 +70,15 @@ export const gatlingPulseForRhythm = (
           skip:false,
           look:"meteor",
           baseDimmerPercent:profile.baseDimmerPercent,
-          peakDimmerPercent:13.2,
-          speedValue:Number(clamp(baseSpeed + 0.035, 0.22, 0.47).toFixed(3)),
+          peakDimmerPercent:65,
+          speedValue:Number(clamp(baseSpeed + 0.3, 0, 1).toFixed(3)),
         }
       : {
           skip:false,
           look:"light-speed",
           baseDimmerPercent:profile.baseDimmerPercent,
-          peakDimmerPercent:15,
-          speedValue:Number(clamp(baseSpeed + 0.09, 0.22, 0.47).toFixed(3)),
+          peakDimmerPercent:100,
+          speedValue:Number(clamp(baseSpeed + 0.62, 0, 1).toFixed(3)),
         };
   }
 
@@ -87,7 +86,7 @@ export const gatlingPulseForRhythm = (
     skip:false,
     look:"stars",
     baseDimmerPercent:profile.baseDimmerPercent,
-    peakDimmerPercent:beatIndex % 4 === 0 ? 11.6 : 10.8,
-    speedValue:Number(clamp(baseSpeed - 0.1, 0.22, 0.47).toFixed(3)),
+    peakDimmerPercent:35,
+    speedValue:Number(clamp(baseSpeed + 0.08, 0, 1).toFixed(3)),
   };
 };

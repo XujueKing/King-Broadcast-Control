@@ -2979,7 +2979,7 @@ export function App() {
         rhythmCursorRef.current[deckNumber] = { trackKey, seconds:currentSeconds };
         continue;
       }
-      const events = collectRhythmEvents(analysis, cursor.seconds, currentSeconds);
+      const events = collectRhythmEvents(analysis, cursor.seconds, currentSeconds, {lookAheadSeconds:0.16});
       rhythmCursorRef.current[deckNumber] = { trackKey, seconds:currentSeconds };
       for (const rhythmEvent of events) {
         window.dispatchEvent(new CustomEvent("king:rhythm", { detail:{
@@ -2989,6 +2989,7 @@ export function App() {
           trackPath:track.path,
           observedAtSeconds:currentSeconds,
           lateByMs:Math.max(0, Math.round((currentSeconds - rhythmEvent.atSeconds) * 1000)),
+          leadByMs:Math.max(0, Math.round((rhythmEvent.atSeconds - currentSeconds) * 1000)),
           bpm:Number(analysis?.bpm) || 0,
           confidence:Number(analysis?.bpmConfidence) || 0,
         } }));

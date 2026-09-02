@@ -23,22 +23,23 @@ test("BPM tracking preserves the accepted 128 BPM speed and clamps extremes", ()
   assert.equal(gatlingSpeedForBpm(180), 0.47);
 });
 
-test("ordinary beats form a dark half-rate star field instead of a short flash", () => {
+test("ordinary beats form a visible star-field pulse", () => {
   const pulse = gatlingPulseForRhythm({ type:"beat", beatIndex:2, bpm:128 });
 
   assert.equal(pulse.look, "stars");
   assert.equal(pulse.skip, false);
   assert.equal(pulse.baseDimmerPercent, kingclubGatlingProfile.baseDimmerPercent);
-  assert.equal(pulse.peakDimmerPercent, 10.8);
-  assert.equal(pulse.speedValue, 0.261);
+  assert.equal(pulse.peakDimmerPercent, 35);
+  assert.equal(pulse.speedValue, 0.441);
   assert.ok(pulse.peakDimmerPercent > pulse.baseDimmerPercent);
 });
 
-test("odd ordinary beats hold the current look to protect Titan command latency", () => {
+test("odd ordinary beats create the low-energy side of the pulse", () => {
   const pulse = gatlingPulseForRhythm({ type:"beat", beatIndex:3, bpm:128 });
 
-  assert.equal(pulse.look, "hold");
-  assert.equal(pulse.skip, true);
+  assert.equal(pulse.look, "beat-shadow");
+  assert.equal(pulse.skip, false);
+  assert.equal(pulse.peakDimmerPercent, 5);
 });
 
 test("alternating bars create light-speed and meteor looks", () => {
@@ -46,21 +47,21 @@ test("alternating bars create light-speed and meteor looks", () => {
   const meteor = gatlingPulseForRhythm({ type:"bar", isBar:true, beatIndex:12, bpm:156 });
 
   assert.equal(lightSpeed.look, "light-speed");
-  assert.equal(lightSpeed.peakDimmerPercent, 15);
-  assert.equal(lightSpeed.speedValue, 0.47);
+  assert.equal(lightSpeed.peakDimmerPercent, 100);
+  assert.equal(lightSpeed.speedValue, 1);
   assert.equal(meteor.look, "meteor");
-  assert.equal(meteor.peakDimmerPercent, 13.2);
+  assert.equal(meteor.peakDimmerPercent, 65);
   assert.ok(meteor.speedValue < lightSpeed.speedValue);
 });
 
-test("all rhythmic looks remain inside the现场-confirmed safety envelope", () => {
+test("all rhythmic looks remain inside the fixture protocol envelope", () => {
   for (const event of [
     {type:"beat",beatIndex:2,bpm:30},
     {type:"bar",isBar:true,beatIndex:8,bpm:300},
     {type:"bar",isBar:true,beatIndex:12,bpm:70},
   ]) {
     const look=gatlingPulseForRhythm(event);
-    assert.ok(look.peakDimmerPercent >= 5 && look.peakDimmerPercent <= 15);
-    assert.ok(look.speedValue >= 0.22 && look.speedValue <= 0.47);
+    assert.ok(look.peakDimmerPercent >= 0 && look.peakDimmerPercent <= 100);
+    assert.ok(look.speedValue >= 0 && look.speedValue <= 1);
   }
 });

@@ -23,3 +23,23 @@ test("backward seek and pause do not emit events", () => {
   assert.deepEqual(collectRhythmEvents(analysis, 2, 1), []);
   assert.deepEqual(collectRhythmEvents(analysis, 1, 1), []);
 });
+
+test("irregular detector output is regularized to the analysed BPM grid", () => {
+  const irregular = {
+    bpm:128,
+    beats:[0.5, 0.97, 1.05, 1.98, 2.45, 2.92],
+    downbeats:[0.5],
+  };
+  const events = collectRhythmEvents(irregular, 1.3, 2.1);
+
+  assert.equal(events.length, 2);
+  assert.ok(events.every((event) => event.regularized));
+  assert.equal(Number((events[1].atSeconds - events[0].atSeconds).toFixed(5)), 0.46875);
+});
+
+test("look-ahead emits the next grid marker for Titan latency compensation", () => {
+  const events = collectRhythmEvents(analysis, 0.3, 0.4, { lookAheadSeconds:0.16 });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].atSeconds, 0.5);
+});

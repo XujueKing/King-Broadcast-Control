@@ -442,11 +442,11 @@ fn validate_gatling_levels(
     if palette_titan_id.is_some_and(|id| !KINGCLUB_GATLING_PALETTES.contains(&id)) {
         return Err("加特林颜色不在现场已核对的 Colour 70-77 白名单中".to_string());
     }
-    if dimmer_percent.is_some_and(|level| !level.is_finite() || !(5.0..=15.0).contains(&level)) {
-        return Err("加特林自动亮度必须保持在暗场 5%-15% 范围".to_string());
+    if dimmer_percent.is_some_and(|level| !level.is_finite() || !(0.0..=100.0).contains(&level)) {
+        return Err("加特林自动亮度超出灯具 0%-100% 范围".to_string());
     }
-    if speed_value.is_some_and(|speed| !speed.is_finite() || !(0.22..=0.47).contains(&speed)) {
-        return Err("加特林自动速度超出现场限定范围".to_string());
+    if speed_value.is_some_and(|speed| !speed.is_finite() || !(0.0..=1.0).contains(&speed)) {
+        return Err("加特林自动速度超出灯具归一化 0-1 范围".to_string());
     }
     Ok(())
 }
@@ -756,10 +756,11 @@ mod tests {
     }
 
     #[test]
-    fn gatling_automation_is_restricted_to_dark_safe_ranges() {
+    fn gatling_automation_uses_fixture_protocol_ranges() {
         assert!(validate_gatling_levels(Some(33_207), Some(10.0), Some(0.361)).is_ok());
+        assert!(validate_gatling_levels(Some(33_207), Some(100.0), Some(1.0)).is_ok());
         assert!(validate_gatling_levels(Some(1), Some(10.0), Some(0.361)).is_err());
-        assert!(validate_gatling_levels(Some(33_207), Some(20.0), Some(0.361)).is_err());
-        assert!(validate_gatling_levels(Some(33_207), Some(10.0), Some(0.8)).is_err());
+        assert!(validate_gatling_levels(Some(33_207), Some(100.1), Some(0.361)).is_err());
+        assert!(validate_gatling_levels(Some(33_207), Some(10.0), Some(1.01)).is_err());
     }
 }
