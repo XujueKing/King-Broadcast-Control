@@ -58,8 +58,8 @@ export const gatlingPulseForRhythm = (
       skip:false,
       look:"beat-shadow",
       baseDimmerPercent:profile.baseDimmerPercent,
-      peakDimmerPercent:5,
-      speedValue:Number(clamp(baseSpeed * 0.7, 0, 1).toFixed(3)),
+      peakDimmerPercent:3,
+      speedValue:Number(clamp(baseSpeed * 0.64, 0, 1).toFixed(3)),
     };
   }
 
@@ -70,8 +70,8 @@ export const gatlingPulseForRhythm = (
           skip:false,
           look:"meteor",
           baseDimmerPercent:profile.baseDimmerPercent,
-          peakDimmerPercent:65,
-          speedValue:Number(clamp(baseSpeed + 0.3, 0, 1).toFixed(3)),
+          peakDimmerPercent:72,
+          speedValue:Number(clamp(baseSpeed + 0.34, 0, 1).toFixed(3)),
         }
       : {
           skip:false,
@@ -86,7 +86,7 @@ export const gatlingPulseForRhythm = (
     skip:false,
     look:"stars",
     baseDimmerPercent:profile.baseDimmerPercent,
-    peakDimmerPercent:35,
-    speedValue:Number(clamp(baseSpeed + 0.08, 0, 1).toFixed(3)),
+    peakDimmerPercent:42,
+    speedValue:Number(clamp(baseSpeed + 0.12, 0, 1).toFixed(3)),
   };
 };

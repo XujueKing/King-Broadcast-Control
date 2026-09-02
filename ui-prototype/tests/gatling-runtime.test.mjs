@@ -29,8 +29,8 @@ test("ordinary beats form a visible star-field pulse", () => {
   assert.equal(pulse.look, "stars");
   assert.equal(pulse.skip, false);
   assert.equal(pulse.baseDimmerPercent, kingclubGatlingProfile.baseDimmerPercent);
-  assert.equal(pulse.peakDimmerPercent, 35);
-  assert.equal(pulse.speedValue, 0.441);
+  assert.equal(pulse.peakDimmerPercent, 42);
+  assert.equal(pulse.speedValue, 0.481);
   assert.ok(pulse.peakDimmerPercent > pulse.baseDimmerPercent);
 });
 
@@ -39,7 +39,7 @@ test("odd ordinary beats create the low-energy side of the pulse", () => {
 
   assert.equal(pulse.look, "beat-shadow");
   assert.equal(pulse.skip, false);
-  assert.equal(pulse.peakDimmerPercent, 5);
+  assert.equal(pulse.peakDimmerPercent, 3);
 });
 
 test("alternating bars create light-speed and meteor looks", () => {
@@ -50,7 +50,7 @@ test("alternating bars create light-speed and meteor looks", () => {
   assert.equal(lightSpeed.peakDimmerPercent, 100);
   assert.equal(lightSpeed.speedValue, 1);
   assert.equal(meteor.look, "meteor");
-  assert.equal(meteor.peakDimmerPercent, 65);
+  assert.equal(meteor.peakDimmerPercent, 72);
   assert.ok(meteor.speedValue < lightSpeed.speedValue);
 });
 
