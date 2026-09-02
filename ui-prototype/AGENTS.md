@@ -6,6 +6,8 @@ Before making substantial visual changes, use the Product Design plugin's `get-c
 
 Runtime output rule: PGM and PVW are separate states. Only confirmed PGM content may be emitted to the `output` window. The Windows output target must exclude the monitor containing the `main` control window. When only one logical display is detected, keep the output window hidden and use C1 as the live operator preview; when a second display is detected, keep C1 visible while opening the independent output fullscreen. The output window starts from safe black. The current WebView output is a screen-routing milestone and will later be replaced by mpv without changing this safety rule.
 
+现场硬件连接默认自动恢复：启动时优先使用持久化的 Titan 与 Qu-16 地址并自动连接；已知地址失效时才扫描该地址所在的 /24 网段。已连接时禁止扫描或建立第二条 Qu-16 控制连接；Titan 候选必须通过已绑定控制台身份校验，Qu-16 扫描结果必须唯一才允许自动改绑。自动发现只恢复连接，不得自动播放歌曲、改推子或触发灯光 Playback。
+
 Runtime media milestone: the desktop app owns `%APPDATA%/club.king.broadcast-control/media/videos`, `media/audio`, and `media/images`. It rescans local video/audio folders while running. Until the bundled mpv sidecar replaces it, real MP4 playback uses the WebView2 media element in PGM/output; PVW and the operator-side PGM monitor must stay muted to prevent duplicate venue audio. The output window alone may emit the video's own audio, controlled by the independent R1 video-audio toggle.
 
 Program-video target architecture is one `libmpv` core with GPU hardware decoding and two real-time render targets for the physical PGM output and C1 confidence monitor. Two independent WebView `<video>` players are only the temporary fallback. A low-frame-rate screenshot/JPEG proxy is not an acceptable live preview and must not be reintroduced.

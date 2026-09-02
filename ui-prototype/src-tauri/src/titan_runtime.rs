@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+use crate::network_discovery;
+
 const TITAN_WEB_API_PORT: u16 = 4430;
 const TITAN_TIMEOUT: Duration = Duration::from_millis(1_500);
 
@@ -443,6 +445,24 @@ pub async fn titan_static_playbacks(host: String) -> Result<Value, String> {
 pub async fn titan_inventory(host: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         serde_json::to_value(read_inventory(&host)?).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn titan_discover(host_hint: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let hosts = network_discovery::scan_tcp_subnet(
+            &host_hint,
+            TITAN_WEB_API_PORT,
+            Duration::from_millis(180),
+        )?;
+        let statuses = hosts
+            .into_iter()
+            .filter_map(|host| read_status(&host).ok())
+            .collect::<Vec<_>>();
+        serde_json::to_value(statuses).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?

@@ -2051,6 +2051,8 @@ export function App() {
   const titanCommandQueueRef=useRef(Promise.resolve());
   const titanVideoMediaRef=useRef(null);
   const titanAutomationRef=useRef(createLightingAutomationState());
+  const titanDiscoveryRef=useRef({busy:false,lastAttempt:0});
+  const qu16DiscoveryRef=useRef({busy:false,lastAttempt:0});
   const outputVideoElementRef=useRef(null);
   const videoColorCanvasRef=useRef(null);
   const videoColorSamplingErrorRef=useRef(null);
@@ -2276,6 +2278,36 @@ export function App() {
     titanStatusProbeRef.current=probe;
     return probe.finally(()=>{if(titanStatusProbeRef.current===probe)titanStatusProbeRef.current=null;});
   },[desktopRuntime,titanHost]);
+  const discoverTitanConsole=useCallback(async()=>{
+    const hostHint=titanHost.trim();
+    const now=Date.now();
+    if(!desktopRuntime||!hostHint||titanDiscoveryRef.current.busy||now-titanDiscoveryRef.current.lastAttempt<60_000)return false;
+    titanDiscoveryRef.current={busy:true,lastAttempt:now};
+    try{
+      const candidates=await invoke("titan_discover",{hostHint});
+      const expected=loadTitanIdentity()||SITE_TITAN_IDENTITY;
+      const matches=(Array.isArray(candidates)?candidates:[]).filter(status=>titanIdentityMatches(expected,titanIdentityFromStatus(status)));
+      if(matches.length!==1){
+        if(matches.length>1)setTitanActionStatus({state:"blocked",message:"自动扫描发现多个已绑定 Titan 候选；为避免误控，未自动改绑"});
+        return false;
+      }
+      const status=matches[0];
+      const discoveredHost=String(status.host||"").trim();
+      if(!discoveredHost)return false;
+      const identity=titanIdentityFromStatus(status);
+      if(!loadTitanIdentity())window.localStorage.setItem("king.lighting.titanIdentity",JSON.stringify(identity));
+      window.localStorage.setItem("king.lighting.titanHost",discoveredHost);
+      setTitanHost(discoveredHost);
+      setTitanStatus({...status,connected:true,environmentMode:"live",message:`自动发现并连接酒吧控制台 · ${status.message}`});
+      setTitanActionStatus({state:"idle",message:`已自动发现 Titan：${discoveredHost}；未触发任何 Playback`});
+      return true;
+    }catch(error){
+      console.info("Titan 局域网自动扫描未找到已绑定控制台",error);
+      return false;
+    }finally{
+      titanDiscoveryRef.current.busy=false;
+    }
+  },[desktopRuntime,titanHost]);
   const refreshTitanInventory=useCallback(async()=>{
     const host=titanHost.trim();
     if(!desktopRuntime||!host){
@@ -2303,7 +2335,9 @@ export function App() {
       if(!immediate)window.clearTimeout(timer);
       const connected=await refreshTitanStatus();
       if(disposed||titanPollGenerationRef.current!==generation)return;
-      timer=window.setTimeout(()=>schedule(),connected?3000:20000);
+      const discovered=connected?false:await discoverTitanConsole();
+      if(disposed||titanPollGenerationRef.current!==generation)return;
+      timer=window.setTimeout(()=>schedule(),connected?3000:discovered?1000:20000);
     };
     const retryNow=()=>{
       if(disposed||document.visibilityState==="hidden")return;
@@ -2319,7 +2353,7 @@ export function App() {
       window.removeEventListener("online",retryNow);
       document.removeEventListener("visibilitychange",retryNow);
     };
-  },[refreshTitanStatus]);
+  },[discoverTitanConsole,refreshTitanStatus]);
   useEffect(()=>{
     if(!desktopRuntime)return;
     invoke("lighting_package_directories")
@@ -2637,6 +2671,31 @@ export function App() {
       if(Number.isFinite(startedSessionId))invoke("qu16_stop_metering_session",{sessionId:startedSessionId}).catch(()=>{});
     };
   },[desktopRuntime,mixerControlHost,mixerModelId]);
+  useEffect(()=>{
+    const hostHint=mixerControlHost.trim();
+    const discoveryAllowed=["reconnecting","error","disconnected"].includes(mixerMeterStatus.state);
+    if(!desktopRuntime||mixerModelId!=="allen-heath-qu16"||!hostHint||!discoveryAllowed)return undefined;
+    let disposed=false;
+    const timer=window.setTimeout(async()=>{
+      const now=Date.now();
+      if(disposed||qu16DiscoveryRef.current.busy||now-qu16DiscoveryRef.current.lastAttempt<60_000)return;
+      qu16DiscoveryRef.current={busy:true,lastAttempt:now};
+      try{
+        const candidates=await invoke("qu16_discover",{hostHint});
+        if(disposed||!Array.isArray(candidates)||candidates.length!==1)return;
+        const discoveredHost=String(candidates[0]||"").trim();
+        if(!discoveredHost||discoveredHost===hostHint)return;
+        window.localStorage.setItem("king.mixer.controlHost",discoveredHost);
+        setMixerControlHost(discoveredHost);
+        setMixerMeterStatus({state:"connecting",title:"已自动发现 Qu-16",message:`正在连接 ${discoveredHost}:${51325}`});
+      }catch(error){
+        console.info("Qu-16 局域网自动扫描未找到唯一候选",error);
+      }finally{
+        qu16DiscoveryRef.current.busy=false;
+      }
+    },8_000);
+    return ()=>{disposed=true;window.clearTimeout(timer);};
+  },[desktopRuntime,mixerControlHost,mixerMeterStatus.state,mixerModelId]);
   const writeQu16Parameters=useCallback(async(writes)=>{
     const session=qu16ControlSessionRef.current;
     if(!desktopRuntime||mixerModelId!=="allen-heath-qu16"||!session.live||!Number.isFinite(session.sessionId)||!Array.isArray(writes)||writes.length===0){

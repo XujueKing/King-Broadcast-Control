@@ -21,6 +21,7 @@ mod kingsong;
 mod libmpv_runtime;
 mod mixer_models;
 mod mpv_runtime;
+mod network_discovery;
 mod qu16_control;
 mod qu16_runtime;
 mod runtime_capability;
@@ -245,7 +246,7 @@ fn qu16_meter_ui_status(snapshot: &qu16_runtime::Qu16MeterSnapshot) -> Qu16Meter
         Qu16ConnectionState::Connecting => ("connecting", "正在连接 Qu-16"),
         Qu16ConnectionState::Syncing => ("connecting", "正在同步 Qu-16"),
         Qu16ConnectionState::Metering => ("live", "真机表计 LIVE"),
-        Qu16ConnectionState::Reconnecting => ("connecting", "Qu-16 正在重连"),
+        Qu16ConnectionState::Reconnecting => ("reconnecting", "Qu-16 正在重连"),
         Qu16ConnectionState::Error => ("error", "Qu-16 连接错误"),
     };
     let message = snapshot.error.clone().unwrap_or_else(|| {
@@ -340,6 +341,19 @@ async fn qu16_start_metering(
                 message: format!("{} · TCP {}", requested_host, qu16_runtime::QU16_TCP_PORT),
             })
         }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn qu16_discover(host_hint: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        network_discovery::scan_tcp_subnet(
+            &host_hint,
+            qu16_runtime::QU16_TCP_PORT,
+            std::time::Duration::from_millis(180),
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2187,12 +2201,14 @@ pub fn run() {
             open_mixer_driver_support,
             install_mixer_driver_from_downloads,
             qu16_start_metering,
+            qu16_discover,
             qu16_stop_metering,
             qu16_stop_metering_session,
             qu16_meter_status,
             qu16_parameter_status,
             qu16_write_parameters,
             titan_runtime::titan_status,
+            titan_runtime::titan_discover,
             titan_runtime::titan_inventory,
             titan_runtime::titan_playbacks,
             titan_runtime::titan_static_playbacks,
