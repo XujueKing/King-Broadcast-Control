@@ -42,11 +42,9 @@ const MPV_SEEK_POSITION_TOLERANCE_SECONDS: f64 = 0.25;
 const MPV_SEEK_STABLE_READS: u8 = 2;
 const RESCUE_PREVIEW_INSTANCE_OFFSET: u8 = 10;
 const RESCUE_PREVIEW_DRIFT_SECONDS: f64 = 0.5;
-const KINGCLUB_ANALOG_AUDIO_DEVICE_LABEL: &str = "扬声器 (Realtek(R) Audio)";
 const MPV_AUDIO_OUTPUT_ARGS: [&str; 6] = [
-    // The confirmed CH11/CH12 analog path and Qu-16 both run safely from a
-    // fixed 48 kHz shared-mode stream. Keeping both Decks on the same format
-    // avoids endpoint renegotiation between mixed-rate source files.
+    // Qu-16 USB runs at 48 kHz. Keeping both Decks on the same shared-mode
+    // WASAPI format avoids repeated endpoint renegotiation and driver glitches.
     "--ao=wasapi",
     "--audio-exclusive=no",
     "--audio-samplerate=48000",
@@ -297,36 +295,6 @@ fn parse_audio_devices(output: &str) -> Vec<MpvAudioDevice> {
         .collect()
 }
 
-fn select_preferred_audio_device(
-    devices: &[MpvAudioDevice],
-    requested: Option<&str>,
-) -> Option<MpvAudioDevice> {
-    if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
-        if requested.eq_ignore_ascii_case("auto") {
-            return None;
-        }
-        if let Some(device) = devices.iter().find(|device| {
-            device.id.eq_ignore_ascii_case(requested)
-                || device.label.eq_ignore_ascii_case(requested)
-        }) {
-            return Some(device.clone());
-        }
-    }
-
-    // 2026-09-03现场复核：Qu-16 USB/CH3 会产生机械音和电流音；
-    // Realtek 模拟输出进入 CH11/CH12 后失真立即消失。Never silently fall
-    // back to the USB endpoint; an engineer can still opt in explicitly with
-    // KING_MPV_AUDIO_DEVICE after that path has been repaired and revalidated.
-    devices
-        .iter()
-        .find(|device| {
-            device
-                .label
-                .eq_ignore_ascii_case(KINGCLUB_ANALOG_AUDIO_DEVICE_LABEL)
-        })
-        .cloned()
-}
-
 fn discover_preferred_audio_device(binary: &Path) -> Option<MpvAudioDevice> {
     let mut command = Command::new(binary);
     command
@@ -342,7 +310,24 @@ fn discover_preferred_audio_device(binary: &Path) -> Option<MpvAudioDevice> {
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     let devices = parse_audio_devices(&text);
     let requested = env::var("KING_MPV_AUDIO_DEVICE").ok();
-    select_preferred_audio_device(&devices, requested.as_deref())
+    if let Some(requested) = requested
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if requested.eq_ignore_ascii_case("auto") {
+            return None;
+        }
+        if let Some(device) = devices.iter().find(|device| {
+            device.id.eq_ignore_ascii_case(requested)
+                || device.label.eq_ignore_ascii_case(requested)
+        }) {
+            return Some(device.clone());
+        }
+    }
+    devices
+        .into_iter()
+        .find(|device| device.label.eq_ignore_ascii_case("Qu-16 ST3 (Qu-16)"))
 }
 
 fn preferred_output_trim_db(_audio_device: Option<&MpvAudioDevice>) -> f64 {
@@ -593,16 +578,8 @@ pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> 
             manager.audio_device.as_ref().map_or_else(
                 || "mpv 播放引擎可用 · 系统自动音频设备".to_string(),
                 |device| {
-                    let route = if device
-                        .label
-                        .eq_ignore_ascii_case(KINGCLUB_ANALOG_AUDIO_DEVICE_LABEL)
-                    {
-                        "CH11/CH12 模拟输出"
-                    } else {
-                        "人工指定输出"
-                    };
                     format!(
-                        "mpv 播放引擎可用 · {route} → {} · 输出修整 {:.0} dB",
+                        "mpv 播放引擎可用 · USB-B → {} · 输出修整 {:.0} dB",
                         device.label, manager.output_trim_db
                     )
                 },
@@ -1019,29 +996,6 @@ mod tests {
     }
 
     #[test]
-    fn onsite_default_selects_realtek_analog_and_never_falls_back_to_qu16_usb() {
-        let devices = parse_audio_devices(
-            "List of detected audio devices:\n  'auto' (Autoselect device)\n  'wasapi/realtek' (扬声器 (Realtek(R) Audio))\n  'wasapi/qu16' (Qu-16 ST3 (Qu-16))\n",
-        );
-        assert_eq!(
-            select_preferred_audio_device(&devices, None)
-                .as_ref()
-                .map(|device| device.id.as_str()),
-            Some("wasapi/realtek")
-        );
-        assert_eq!(
-            select_preferred_audio_device(&devices, Some("wasapi/qu16"))
-                .as_ref()
-                .map(|device| device.id.as_str()),
-            Some("wasapi/qu16")
-        );
-        assert!(select_preferred_audio_device(&devices, Some("auto")).is_none());
-
-        let usb_only = vec![devices[2].clone()];
-        assert!(select_preferred_audio_device(&usb_only, None).is_none());
-    }
-
-    #[test]
     fn qu16_uses_unity_output_trim_by_default() {
         let device = MpvAudioDevice {
             id: "wasapi/test".into(),
@@ -1052,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn deck_audio_output_is_fixed_to_stable_shared_mode() {
+    fn deck_audio_output_is_fixed_to_stable_qu16_shared_mode() {
         assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--ao=wasapi"));
         assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--audio-exclusive=no"));
         assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--audio-samplerate=48000"));
