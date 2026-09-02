@@ -1,5 +1,6 @@
-import test from "node:test";
 import assert from "node:assert/strict";
+import test from "node:test";
+
 import {
   gatlingPaletteForVideoFamily,
   gatlingPulseForRhythm,
@@ -22,10 +23,24 @@ test("BPM tracking preserves the accepted 128 BPM speed and clamps extremes", ()
   assert.equal(gatlingSpeedForBpm(180), 0.47);
 });
 
-test("rhythm pulses stay dark and release quickly", () => {
-  const pulse = gatlingPulseForRhythm({ type: "bar", isBar: true, bpm: 128 });
-  assert.equal(pulse.peakDimmerPercent, 12.5);
-  assert.equal(pulse.baseDimmerPercent, 10);
-  assert.equal(pulse.releaseAfterMs, 117);
-  assert.equal(pulse.speedValue, 0.361);
+test("ordinary beats stay dark but produce a visible pulse", () => {
+  const pulse = gatlingPulseForRhythm({ type:"beat", bpm:128 });
+
+  assert.equal(pulse.baseDimmerPercent, kingclubGatlingProfile.baseDimmerPercent);
+  assert.equal(pulse.peakDimmerPercent, 13.5);
+  assert.equal(pulse.releaseAfterMs, 211);
+  assert.ok(pulse.peakDimmerPercent > pulse.baseDimmerPercent);
+});
+
+test("strong beats use the venue's 15 percent safety ceiling", () => {
+  const pulse = gatlingPulseForRhythm({ type:"bar", isBar:true, bpm:156 });
+
+  assert.equal(pulse.peakDimmerPercent, 15);
+  assert.equal(pulse.releaseAfterMs, 173);
+  assert.ok(pulse.speedValue <= 0.47);
+});
+
+test("release duration remains bounded for unusual tempo metadata", () => {
+  assert.equal(gatlingPulseForRhythm({ type:"beat", bpm:300 }).releaseAfterMs, 140);
+  assert.equal(gatlingPulseForRhythm({ type:"beat", bpm:30 }).releaseAfterMs, 220);
 });

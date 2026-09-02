@@ -30,6 +30,7 @@
     "test:lighting-package": "node --test tests/lighting-package.test.mjs",
     "test:titan-simulator": "node --test tests/titan-simulator.test.mjs",
     "test:video-color": "node --test tests/video-color-runtime.test.mjs",
+    "test:gatling": "node --test tests/gatling-runtime.test.mjs",
     "test:lyrics": "node --test tests/lyrics-runtime.test.mjs",
     "test:desktop-smoke": "node --test tests/tauri-runtime-smoke.test.mjs",
     "test:desktop-output": "node --test tests/tauri-second-display.test.mjs",

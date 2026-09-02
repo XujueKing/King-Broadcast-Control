@@ -53,9 +53,14 @@ export const gatlingPulseForRhythm = (
     event?.type === "downbeat",
   );
   return {
-    peakDimmerPercent: strong ? 12.5 : 11.5,
+    // A live Titan update takes roughly one tenth of a second on the venue
+    // console.  The previous 1.5%-2.5% pulse often returned to the 10% base
+    // level before the ceiling wash was perceptible.  Keep the ambience dark
+    // and within the backend's 15% safety ceiling, but give each beat enough
+    // contrast and dwell time to remain visible in the room.
+    peakDimmerPercent: strong ? 15 : 13.5,
     baseDimmerPercent: profile.baseDimmerPercent,
-    releaseAfterMs: Math.round(clamp(beatMs * 0.25, 90, 160)),
+    releaseAfterMs: Math.round(clamp(beatMs * 0.45, 140, 220)),
     speedValue: gatlingSpeedForBpm(bpm, profile),
   };
 };
