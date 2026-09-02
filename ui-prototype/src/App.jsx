@@ -71,13 +71,17 @@ import {
 import { prewarmPersistentVideoThumbnails } from "./video-thumbnail-cache.js";
 import { defaultMixerModelId, mixerModelById, mixerModels } from "./mixer-models/index.js";
 import {
-  nextConfiguredId,
   rhythmEventMatchesRule,
   rhythmRuleOptions,
   selectDominantDeck,
 } from "./rhythm-automation.js";
 import { createLightingAutomationState, lightingCueIsAuthorized, planLightingCue } from "./lighting-automation.js";
-import { lightingPresetForVideoColor, sampleVideoColor } from "./video-color-runtime.js";
+import { sampleVideoColor } from "./video-color-runtime.js";
+import {
+  gatlingPaletteForVideoFamily,
+  gatlingPulseForRhythm,
+  kingclubGatlingProfile,
+} from "./gatling-runtime.js";
 import { createLightingPackage, normalizeLightingPackage } from "./lighting-package.js";
 import {
   clearTitanSimulator,
@@ -214,6 +218,16 @@ const loadRhythmRule = (key, fallback) => {
     return fallback;
   }
 };
+const loadLightSelection = () => {
+  try {
+    const saved=window.localStorage.getItem("king.lighting.homeMode");
+    if(saved==="auto")return null;
+    const numeric=Number(saved);
+    return Number.isInteger(numeric)&&numeric>=0&&numeric<=9?numeric:0;
+  } catch {
+    return 0;
+  }
+};
 const loadMixerNumber = (key, fallback) => {
   try {
     const value = Number(window.localStorage.getItem(key));
@@ -224,7 +238,7 @@ const loadMixerNumber = (key, fallback) => {
 };
 // 首版先以本地示例预设展示；名称、时长与循环方式后续由“灯光管理”页面配置并保存。
 const lights = [
-  { id: 0, label: "绿色律动", duration: "01:20", loop: true },
+  { id: 0, label: "暗红加特林", duration: "视频色彩 · 音乐节拍", loop: true },
   { id: 1, label: "紫色激光", duration: "00:48", loop: false },
   { id: 2, label: "暖场", duration: "02:00", loop: true },
   { id: 3, label: "全场闪烁", duration: "00:16", loop: false },
@@ -297,12 +311,6 @@ const titanPlaybackLabel = (playback) => {
     .filter(Boolean).join(" · ");
   const userNumber = playback.userNumbers?.length ? `U${playback.userNumbers.join("/")}` : "";
   return [playback.legend||`Playback ${playback.titanId}`,userNumber,location].filter(Boolean).join(" · ");
-};
-const videoLightingPreset = (media, mappings, { allowUnmapped = false } = {}) => {
-  const preferred = ({"激光":1,"舞台":5,"氛围":2,"节日":3,"宣传":0})[media?.category];
-  if (Number.isInteger(preferred) && (allowUnmapped || mappings[preferred])) return preferred;
-  const mapped = Object.keys(mappings).map(Number).filter(Number.isInteger).sort((a,b)=>a-b);
-  return mapped[0] ?? null;
 };
 const fixtureControls = [
   { id: "beam", label: "光束", color: { r: 32, g: 232, b: 154 } },
@@ -2026,7 +2034,7 @@ export function App() {
   const [videoAudioEnabled, setVideoAudioEnabled] = useState(false);
   const [mediaType, setMediaType] = useState("video");
   const [mediaCategory, setMediaCategory] = useState("全部");
-  const [light, setLight] = useState(0);
+  const [light, setLight] = useState(loadLightSelection);
   const [autoLightPreset, setAutoLightPreset] = useState(0);
   const [lightRhythmRule, setLightRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.lighting","bar"));
   const [videoRhythmRule, setVideoRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.video","off"));
@@ -2049,14 +2057,15 @@ export function App() {
   const titanActiveHandleRef=useRef({scene:null,accent:null});
   const titanSimulationRef=useRef(titanSimulation);
   const titanCommandQueueRef=useRef(Promise.resolve());
-  const titanVideoMediaRef=useRef(null);
+  const gatlingPulseTimerRef=useRef(null);
+  const gatlingBaselineKeyRef=useRef("");
   const titanAutomationRef=useRef(createLightingAutomationState());
   const titanDiscoveryRef=useRef({busy:false,lastAttempt:0});
   const qu16DiscoveryRef=useRef({busy:false,lastAttempt:0});
   const outputVideoElementRef=useRef(null);
   const videoColorCanvasRef=useRef(null);
   const videoColorSamplingErrorRef=useRef(null);
-  const videoColorAutomationRef=useRef({family:null,stableSamples:0});
+  const videoColorAutomationRef=useRef({family:null,stableSamples:0,lastAppliedFamily:null});
   const [lightPlaybackModes, setLightPlaybackModes] = useState(loadLightPlaybackModes);
   const [fixtureColorEditor, setFixtureColorEditor] = useState(null);
   const [fixtureColors, setFixtureColors] = useState(() => Object.fromEntries(fixtureControls.map((fixture) => [fixture.id, fixture.color])));
@@ -2475,8 +2484,60 @@ export function App() {
     titanCommandQueueRef.current=command;
     return command;
   },[desktopRuntime,lightingEnabled,refreshTitanPlaybacks,titanEffectRegistry,titanMappingShowName,titanMappings,titanStatus.connected,titanStatus.host,titanStatus.showName]);
+  const updateGatling=useCallback(({paletteTitanId=null,dimmerPercent=null,speedValue=null,source="manual"}={})=>{
+    if(!lightingEnabled){
+      setTitanActionStatus({state:"paused",message:"KING 灯光联动已暂停；加特林保持当前状态"});
+      return Promise.resolve(false);
+    }
+    const liveConnection=Boolean(desktopRuntime&&titanStatus.connected&&titanStatus.host);
+    if(!liveConnection){
+      setTitanActionStatus({state:"simulation",message:"离线预演：暗红加特林未向 Titan 发送命令"});
+      return Promise.resolve(false);
+    }
+    if(titanStatus.deviceName!==SITE_TITAN_IDENTITY.deviceName||titanStatus.showName!==kingclubGatlingProfile.showName){
+      setTitanActionStatus({state:"blocked",message:`加特林联动仅绑定 ${SITE_TITAN_IDENTITY.deviceName} / Show ${kingclubGatlingProfile.showName}`});
+      return Promise.resolve(false);
+    }
+    const sourceLabel=source==="video-color"?"主视频取色":source==="rhythm"?"音乐节拍":source==="rhythm-release"?"节拍回落":"暗红常规";
+    setTitanActionStatus({state:"busy",message:`正在更新加特林 · ${sourceLabel}`});
+    const command=titanCommandQueueRef.current.catch(()=>undefined).then(async()=>{
+      const result=await invoke("titan_update_gatling",{
+        host:titanStatus.host,
+        expectedShowName:kingclubGatlingProfile.showName,
+        paletteTitanId,
+        dimmerPercent,
+        speedValue,
+      });
+      setTitanActionStatus({state:"live",message:`${result?.message||"暗场加特林已更新"} · ${sourceLabel}`});
+      return true;
+    }).catch((error)=>{
+      setTitanActionStatus({state:"error",message:`加特林控制失败：${String(error)}`});
+      return false;
+    });
+    titanCommandQueueRef.current=command;
+    return command;
+  },[desktopRuntime,lightingEnabled,titanStatus.connected,titanStatus.deviceName,titanStatus.host,titanStatus.showName]);
+  useEffect(()=>{
+    if(!lightingEnabled||light!==null||!desktopRuntime||!titanStatus.connected||!titanStatus.host){
+      gatlingBaselineKeyRef.current="";
+      return;
+    }
+    const key=`${titanStatus.host}|${titanStatus.showName}`;
+    if(gatlingBaselineKeyRef.current===key)return;
+    gatlingBaselineKeyRef.current=key;
+    updateGatling({
+      paletteTitanId:kingclubGatlingProfile.palettes.red,
+      dimmerPercent:kingclubGatlingProfile.baseDimmerPercent,
+      speedValue:kingclubGatlingProfile.baseSpeedValue,
+      source:"baseline",
+    });
+  },[desktopRuntime,light,lightingEnabled,titanStatus.connected,titanStatus.host,titanStatus.showName,updateGatling]);
   useEffect(()=>{
     if(lightingEnabled)return;
+    if(gatlingPulseTimerRef.current){
+      window.clearTimeout(gatlingPulseTimerRef.current);
+      gatlingPulseTimerRef.current=null;
+    }
     const clearedSimulation=clearTitanSimulator(titanSimulationRef.current);
     titanSimulationRef.current=clearedSimulation;
     setTitanSimulation(clearedSimulation);
@@ -2957,6 +3018,9 @@ export function App() {
     window.localStorage.setItem("king.rhythm.lighting", lightRhythmRule);
     window.localStorage.setItem("king.rhythm.video", videoRhythmRule);
   }, [lightRhythmRule, videoRhythmRule]);
+  useEffect(() => {
+    window.localStorage.setItem("king.lighting.homeMode",light===null?"auto":String(light));
+  },[light]);
   useEffect(() => {
     window.localStorage.setItem("king.lighting.playbackModes", JSON.stringify(lightPlaybackModes));
   }, [lightPlaybackModes]);
@@ -4054,27 +4118,34 @@ export function App() {
     stagedMedia !== outputMedia || (stagedTransform ?? defaultMediaTransform) !== outputTransform
   );
   useEffect(() => {
-    const mappedLightIds = Object.keys(titanMappings).map(Number).filter(Number.isInteger).sort((a,b)=>a-b);
-    const configuredLightIds = mappedLightIds.length ? mappedLightIds : lights.filter((preset)=>preset.label).map((preset)=>preset.id);
     const handleRhythmAutomation = (event) => {
       const rhythmEvent = event.detail;
       const dominantDeck = selectDominantDeck(playingDecks, crossfade);
       if (!dominantDeck || rhythmEvent?.deck !== dominantDeck) return;
 
       if (lightingEnabled && light === null && rhythmEventMatchesRule(lightRhythmRule, rhythmEvent)) {
-        const next = nextConfiguredId(configuredLightIds, autoLightPreset);
-        if (next !== null) {
-          triggerTitanPlayback(next,"rhythm").then((triggered)=>{
-            if(!triggered)return;
-            setAutoLightPreset(next);
-            window.dispatchEvent(new CustomEvent("king:lighting-cue", { detail:{
-              presetId:next,
-              source:"rhythm",
-              rule:lightRhythmRule,
-              rhythm:rhythmEvent,
-            } }));
-          });
-        }
+        const pulse=gatlingPulseForRhythm(rhythmEvent);
+        if(gatlingPulseTimerRef.current)window.clearTimeout(gatlingPulseTimerRef.current);
+        updateGatling({
+          dimmerPercent:pulse.peakDimmerPercent,
+          speedValue:pulse.speedValue,
+          source:"rhythm",
+        }).then((triggered)=>{
+          if(!triggered)return;
+          setAutoLightPreset(0);
+          gatlingPulseTimerRef.current=window.setTimeout(()=>{
+            gatlingPulseTimerRef.current=null;
+            updateGatling({dimmerPercent:pulse.baseDimmerPercent,source:"rhythm-release"});
+          },pulse.releaseAfterMs);
+          window.dispatchEvent(new CustomEvent("king:lighting-cue", { detail:{
+            presetId:0,
+            source:"rhythm",
+            rule:lightRhythmRule,
+            rhythm:rhythmEvent,
+            speedValue:pulse.speedValue,
+            peakDimmerPercent:pulse.peakDimmerPercent,
+          } }));
+        });
       }
 
       if (rhythmEventMatchesRule(videoRhythmRule, rhythmEvent) && availableVideos.length) {
@@ -4102,22 +4173,11 @@ export function App() {
     };
     window.addEventListener("king:rhythm", handleRhythmAutomation);
     return () => window.removeEventListener("king:rhythm", handleRhythmAutomation);
-  }, [autoLightPreset, availableVideos, crossfade, light, lightingEnabled, lightRhythmRule, mediaTransforms, outputMedia, playingDecks, stagedMedia, titanMappings, triggerTitanPlayback, videoRhythmRule]);
-  useEffect(()=>{
-    if(!lightingEnabled||light!==null||outputBaseMedia?.type!=="video")return;
-    const presetId=videoLightingPreset(outputBaseMedia,titanMappings,{allowUnmapped:!titanStatus.connected});
-    if(presetId===null||titanVideoMediaRef.current===outputBaseMedia.id)return;
-    titanVideoMediaRef.current=outputBaseMedia.id;
-    triggerTitanPlayback(presetId,"video").then((triggered)=>{
-      if(!triggered)return;
-      setAutoLightPreset(presetId);
-      window.dispatchEvent(new CustomEvent("king:lighting-cue",{detail:{presetId,source:"video",mediaId:outputBaseMedia.id,category:outputBaseMedia.category||""}}));
-    });
-  },[autoLightPreset,light,lightingEnabled,outputBaseMedia,titanMappings,titanStatus.connected,triggerTitanPlayback]);
+  }, [availableVideos, crossfade, light, lightingEnabled, lightRhythmRule, mediaTransforms, outputMedia, playingDecks, stagedMedia, updateGatling, videoRhythmRule]);
   useEffect(()=>{
     if(!lightingEnabled||light!==null||outputBaseMedia?.type!=="video")return undefined;
     videoColorSamplingErrorRef.current=null;
-    videoColorAutomationRef.current={family:null,stableSamples:0};
+    videoColorAutomationRef.current={family:null,stableSamples:0,lastAppliedFamily:null};
     if(!videoColorCanvasRef.current)videoColorCanvasRef.current=document.createElement("canvas");
     const sample=()=>{
       try{
@@ -4137,21 +4197,26 @@ export function App() {
   useEffect(()=>{
     const handleVideoColor=(event)=>{
       if(!lightingEnabled||light!==null||outputBaseMedia?.type!=="video"||event.detail?.mediaId!==outputBaseMedia.id)return;
-      const presetId=lightingPresetForVideoColor(event.detail,titanMappings,{allowUnmapped:!titanStatus.connected});
-      if(presetId===null)return;
-      const tracker=videoColorAutomationRef.current;
-      if(tracker.family===event.detail.family)tracker.stableSamples+=1;
-      else videoColorAutomationRef.current={family:event.detail.family,stableSamples:1};
-      if(videoColorAutomationRef.current.stableSamples<2)return;
-      triggerTitanPlayback(presetId,"video-color").then((triggered)=>{
+      let tracker=videoColorAutomationRef.current;
+      if(tracker.family===event.detail.family)tracker={...tracker,stableSamples:tracker.stableSamples+1};
+      else tracker={family:event.detail.family,stableSamples:1,lastAppliedFamily:tracker.lastAppliedFamily};
+      videoColorAutomationRef.current=tracker;
+      if(tracker.stableSamples<2||tracker.lastAppliedFamily===event.detail.family)return;
+      videoColorAutomationRef.current={...tracker,lastAppliedFamily:event.detail.family};
+      const paletteTitanId=gatlingPaletteForVideoFamily(event.detail.family);
+      updateGatling({
+        paletteTitanId,
+        dimmerPercent:kingclubGatlingProfile.baseDimmerPercent,
+        source:"video-color",
+      }).then((triggered)=>{
         if(!triggered)return;
-        setAutoLightPreset(presetId);
-        window.dispatchEvent(new CustomEvent("king:lighting-cue",{detail:{presetId,source:"video-color",mediaId:outputBaseMedia.id,color:event.detail}}));
+        setAutoLightPreset(0);
+        window.dispatchEvent(new CustomEvent("king:lighting-cue",{detail:{presetId:0,source:"video-color",mediaId:outputBaseMedia.id,color:event.detail,paletteTitanId}}));
       });
     };
     window.addEventListener("king:video-color",handleVideoColor);
     return()=>window.removeEventListener("king:video-color",handleVideoColor);
-  },[light,lightingEnabled,outputBaseMedia,titanMappings,titanStatus.connected,triggerTitanPlayback]);
+  },[light,lightingEnabled,outputBaseMedia,updateGatling]);
   const connectLedOutput = async () => {
     if (!window.__TAURI_INTERNALS__) return;
     setLedOutputStatus((current)=>current.previewMode
@@ -4910,9 +4975,9 @@ export function App() {
         </section>
         <section ref={lightPanelRef} className={`panel light-panel ${lightingEnabled ? "lighting-on" : "lighting-off"}`}>
           <div className="panel-title compact"><LightbulbFilament weight="fill"/><div className="titan-panel-identity"><b>{titanStatus.connected?titanStatus.deviceName:"Avolites Titan"}</b><small className={titanStatus.connected?"titan-live":"titan-offline"}>{titanStatus.connected?`Titan ${titanStatus.softwareVersion} · ${titanStatus.showName} · ${titanPlaybacks.length} Cue/Playback`:titanStatus.message||"离线模拟 · 不发送现场灯光命令"}</small></div><label className="rhythm-rule-control lighting-rhythm-rule" title="自动模式只跟随当前实际占主导声音的 Deck"><Lightning weight="fill"/><select aria-label="灯光节拍联动规则" value={lightRhythmRule} onChange={(event)=>setLightRhythmRule(event.target.value)}>{rhythmRuleOptions.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label><button type="button" className="lighting-power-toggle" aria-pressed={lightingEnabled} title={lightingEnabled ? "暂停 KING 灯光联动；不会修改 Titan Show" : "恢复 KING 灯光联动"} onClick={()=>setLightingEnabled((enabled)=>!enabled)}><span className="live-dot"/>{lightingEnabled ? "灯光联动" : "联动暂停"}</button></div>
-          <div className="light-grid">{lights.map((lightPreset)=>{const titanId=Number(titanMappings[lightPreset.id]);const mappedPlayback=titanPlaybacks.find((playback)=>playback.titanId===titanId);const registeredEffect=titanEffectRegistry.find((effect)=>Number(effect.presetId)===lightPreset.id);const configured=Boolean(lightPreset.label||mappedPlayback||registeredEffect);const displayName=registeredEffect?.kingName||lightPreset.label||mappedPlayback?.legend||`Titan 效果 ${lightPreset.id}`;const isActive=effectiveLight===lightPreset.id;const simulatedActive=!titanStatus.connected&&isTitanPresetSimulated(titanSimulation,lightPreset.id);const mode=lightPlaybackModes[lightPreset.id]??"once";return <div className={`light-preset ${configured?"configured":"empty"} ${isActive?"active":""} ${mappedPlayback?.active?"titan-active":""} ${simulatedActive?"titan-simulated":""} ${light===null&&isActive?"rhythm-active":""}`} key={lightPreset.id}><button type="button" className="light-preset-main" disabled={!configured} onClick={()=>{setLight(lightPreset.id);triggerTitanPlayback(lightPreset.id,"manual")}} aria-label={configured?`触发 ${displayName}`:`${lightPreset.id} 号灯光预设未配置`} title={mappedPlayback?`${displayName} · TitanId ${mappedPlayback.titanId}`:displayName}><span className="light-number">{lightPreset.id}</span>{configured&&<span className="light-name">{displayName}</span>}{configured&&<span className="light-duration">{mappedPlayback?.active?"TITAN LIVE":simulatedActive?"SIMULATION":lightPreset.duration||"已绑定"}</span>}</button>{configured&&<button type="button" className="light-mode-toggle" onClick={()=>setLightPlaybackModes((current)=>({...current,[lightPreset.id]:mode==="loop"?"once":"loop"}))} aria-label={`${displayName}${mode==="loop"?"循环播放":"单次播放"}`} title={mode==="loop"?"循环播放：点击改为单次":"单次播放：点击改为循环"}>{mode==="loop"?<ArrowsClockwise weight="bold"/>:<span className="light-once">1</span>}</button>}</div>})}</div>
+          <div className="light-grid">{lights.map((lightPreset)=>{const titanId=Number(titanMappings[lightPreset.id]);const mappedPlayback=titanPlaybacks.find((playback)=>playback.titanId===titanId);const registeredEffect=titanEffectRegistry.find((effect)=>Number(effect.presetId)===lightPreset.id);const configured=Boolean(lightPreset.label||mappedPlayback||registeredEffect);const displayName=lightPreset.id===0?lightPreset.label:registeredEffect?.kingName||lightPreset.label||mappedPlayback?.legend||`Titan 效果 ${lightPreset.id}`;const isActive=effectiveLight===lightPreset.id;const simulatedActive=!titanStatus.connected&&isTitanPresetSimulated(titanSimulation,lightPreset.id);const mode=lightPlaybackModes[lightPreset.id]??"once";return <div className={`light-preset ${configured?"configured":"empty"} ${isActive?"active":""} ${mappedPlayback?.active?"titan-active":""} ${simulatedActive?"titan-simulated":""} ${light===null&&isActive?"rhythm-active":""}`} key={lightPreset.id}><button type="button" className="light-preset-main" disabled={!configured} onClick={()=>{if(lightPreset.id===0){setAutoLightPreset(0);setLight(null);}else{setLight(lightPreset.id);triggerTitanPlayback(lightPreset.id,"manual");}}} aria-label={lightPreset.id===0?"启用暗红加特林视频色彩与音乐节拍联动":configured?`触发 ${displayName}`:`${lightPreset.id} 号灯光预设未配置`} title={lightPreset.id===0?"暗红 10% 常规底色；颜色跟随主视频，速度和亮度轻微跟随主导 Deck":mappedPlayback?`${displayName} · TitanId ${mappedPlayback.titanId}`:displayName}><span className="light-number">{lightPreset.id}</span>{configured&&<span className="light-name">{displayName}</span>}{configured&&<span className="light-duration">{lightPreset.id===0&&light===null?"AUTO LIVE":mappedPlayback?.active?"TITAN LIVE":simulatedActive?"SIMULATION":lightPreset.duration||"已绑定"}</span>}</button>{configured&&lightPreset.id!==0&&<button type="button" className="light-mode-toggle" onClick={()=>setLightPlaybackModes((current)=>({...current,[lightPreset.id]:mode==="loop"?"once":"loop"}))} aria-label={`${displayName}${mode==="loop"?"循环播放":"单次播放"}`} title={mode==="loop"?"循环播放：点击改为单次":"单次播放：点击改为循环"}>{mode==="loop"?<ArrowsClockwise weight="bold"/>:<span className="light-once">1</span>}</button>}</div>})}</div>
           <div className="quick-actions">
-            <button type="button" className={light===null?"auto active":"auto"} aria-pressed={light===null} onClick={()=>setLight(null)}>自动</button>
+            <button type="button" className={light===null?"auto active":"auto"} aria-pressed={light===null} onClick={()=>{setAutoLightPreset(0);setLight(null);}} title="暗红加特林：主视频定颜色，主导 Deck 定速度和节拍起伏">自动</button>
             {fixtureControls.map((fixture)=>{const color=fixtureColors[fixture.id];const colorValue=`rgb(${color.r}, ${color.g}, ${color.b})`;return <button type="button" key={fixture.id} className="fixture-control" style={{"--fixture-color":colorValue,"--fixture-text":isLightColor(color)?"#07100e":"#ffffff"}} onDoubleClick={(event)=>openFixtureColorPicker(fixture.id,event)} title="双击打开 RGB 调色板"><span className="fixture-color-dot"/>{fixture.label}</button>})}
           </div>
           {fixtureColorEditor&&(()=>{const color=fixtureColors[fixtureColorEditor.id];const hsv=rgbToHsv(color);const hue=fixtureColorEditor.hue;return <div className="fixture-color-editor" style={{left:fixtureColorEditor.left}} role="dialog" aria-label="RGB 调色板"><div className="fixture-color-editor-head"><b>{fixtureControls.find((fixture)=>fixture.id===fixtureColorEditor.id)?.label} 调色板</b><button type="button" onClick={()=>setFixtureColorEditor(null)}>关闭</button></div><div className="fixture-picker-body" style={{display:"grid",gridTemplateColumns:"minmax(0, 1fr) 18px 64px",gap:"8px",alignItems:"stretch",justifyItems:"stretch"}}><div className="fixture-sv-field" style={{width:"100%",height:"155px",background:`linear-gradient(to bottom, transparent, #000), linear-gradient(to right, #fff, hsl(${hue}, 100%, 50%))`}} onPointerDown={updatePickerSV} onPointerMove={(event)=>event.buttons&&updatePickerSV(event)}><i className="fixture-sv-cursor" style={{left:`calc(${hsv.s*100}% - 6px)`,top:`calc(${(1-hsv.v)*100}% - 6px)`}}/></div><div className="fixture-hue-field" style={{width:"18px",height:"155px",background:"linear-gradient(to bottom, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)"}} onPointerDown={updatePickerHue} onPointerMove={(event)=>event.buttons&&updatePickerHue(event)}><i className="fixture-hue-cursor" style={{top:`calc(${hue/3.6}% - 4px)`}}/></div><div className="fixture-picker-preview" style={{width:"64px",height:"155px",backgroundColor:`rgb(${color.r}, ${color.g}, ${color.b})`,color:isLightColor(color)?"#07100e":"#ffffff",textShadow:isLightColor(color)?"none":"0 1px 1px #000"}}><span>R {color.r}</span><span>G {color.g}</span><span>B {color.b}</span></div></div></div>})()}

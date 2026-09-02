@@ -80,6 +80,26 @@ struct TitanPlaybackAction {
     message: String,
 }
 
+const KINGCLUB_GATLING_SHOW: &str = "2024.12.28";
+const KINGCLUB_GATLING_GROUP_TITAN_ID: u64 = 17_790;
+const KINGCLUB_GATLING_FIXTURE_TITAN_ID: u64 = 17_636;
+const KINGCLUB_GATLING_SPEED_CONTROL_ID: u64 = 1_935;
+const KINGCLUB_GATLING_SPEED_FUNCTION_ID: u64 = 1;
+const KINGCLUB_GATLING_PALETTES: [u64; 8] = [
+    33_187, 33_207, 33_214, 33_219, 33_227, 33_234, 33_240, 33_249,
+];
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TitanGatlingAction {
+    ok: bool,
+    fixture_titan_id: u64,
+    palette_titan_id: Option<u64>,
+    dimmer_percent: Option<f64>,
+    speed_value: Option<f64>,
+    message: String,
+}
+
 fn validate_host(host: &str) -> Result<&str, String> {
     let host = host.trim();
     if host.is_empty() {
@@ -414,6 +434,139 @@ fn release_playback(
     })
 }
 
+fn validate_gatling_levels(
+    palette_titan_id: Option<u64>,
+    dimmer_percent: Option<f64>,
+    speed_value: Option<f64>,
+) -> Result<(), String> {
+    if palette_titan_id.is_some_and(|id| !KINGCLUB_GATLING_PALETTES.contains(&id)) {
+        return Err("加特林颜色不在现场已核对的 Colour 70-77 白名单中".to_string());
+    }
+    if dimmer_percent.is_some_and(|level| !level.is_finite() || !(5.0..=15.0).contains(&level)) {
+        return Err("加特林自动亮度必须保持在暗场 5%-15% 范围".to_string());
+    }
+    if speed_value.is_some_and(|speed| !speed.is_finite() || !(0.22..=0.47).contains(&speed)) {
+        return Err("加特林自动速度超出现场限定范围".to_string());
+    }
+    Ok(())
+}
+
+fn selected_fixture_ids(host: &str) -> Result<Vec<u64>, String> {
+    let handles = http_get_json(host, "/titan/handles/Fixtures")?;
+    let handles = handles
+        .as_array()
+        .ok_or_else(|| "Titan Fixture 列表格式无效".to_string())?;
+    Ok(handles
+        .iter()
+        .filter(|handle| {
+            handle["type"].as_str() == Some("fixtureHandle")
+                && handle["Selected"].as_bool() == Some(true)
+        })
+        .filter_map(|handle| handle["titanId"].as_u64())
+        .collect())
+}
+
+fn verified_site_handle(
+    host: &str,
+    path: &str,
+    titan_id: u64,
+    handle_type: &str,
+) -> Result<(), String> {
+    let handles = read_handle_summaries(host, path)?;
+    if handles
+        .iter()
+        .any(|handle| handle.titan_id == Some(titan_id) && handle.handle_type == handle_type)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "TitanId {titan_id} 不在当前 Show 的 {handle_type} 白名单中"
+        ))
+    }
+}
+
+fn update_gatling(
+    host: &str,
+    expected_show_name: &str,
+    palette_titan_id: Option<u64>,
+    dimmer_percent: Option<f64>,
+    speed_value: Option<f64>,
+) -> Result<TitanGatlingAction, String> {
+    validate_gatling_levels(palette_titan_id, dimmer_percent, speed_value)?;
+    if expected_show_name.trim() != KINGCLUB_GATLING_SHOW {
+        return Err("加特林现场配置只绑定 Show 2024.12.28".to_string());
+    }
+    let status = read_status(host)?;
+    if status.show_name != expected_show_name {
+        return Err(format!(
+            "Titan Show 身份不匹配：需要 {expected_show_name}，当前为 {}",
+            status.show_name
+        ));
+    }
+    verified_site_handle(
+        host,
+        "/titan/handles/Groups",
+        KINGCLUB_GATLING_GROUP_TITAN_ID,
+        "groupHandle",
+    )?;
+    verified_site_handle(
+        host,
+        "/titan/handles/Fixtures",
+        KINGCLUB_GATLING_FIXTURE_TITAN_ID,
+        "fixtureHandle",
+    )?;
+    if let Some(palette_id) = palette_titan_id {
+        verified_site_handle(host, "/titan/handles/Colours", palette_id, "paletteHandle")?;
+    }
+
+    http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear")?;
+    let select_path = format!(
+        "/titan/script/2/Group/RecallGroup?handle_titanId={KINGCLUB_GATLING_GROUP_TITAN_ID}"
+    );
+    http_get(host, &select_path)?;
+    let selected = selected_fixture_ids(host)?;
+    if selected != [KINGCLUB_GATLING_FIXTURE_TITAN_ID] {
+        let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
+        return Err(format!(
+            "加特林 Group 59 当前选择了非预期灯具 {:?}；已拒绝输出",
+            selected
+        ));
+    }
+
+    let operation = (|| {
+        if let Some(palette_id) = palette_titan_id {
+            let path = format!(
+                "/titan/script/2/Palette/ApplyPalette?handle_titanId={palette_id}&usePaletteTimes=false"
+            );
+            http_get(host, &path)?;
+        }
+        if let Some(level) = dimmer_percent {
+            let path = format!(
+                "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level={level:.3}"
+            );
+            http_get(host, &path)?;
+        }
+        if let Some(speed) = speed_value {
+            let path = format!(
+                "/titan/script/2/Programmer/Editor/Fixtures/SetControlValueById?controlId={KINGCLUB_GATLING_SPEED_CONTROL_ID}&functionId={KINGCLUB_GATLING_SPEED_FUNCTION_ID}&value={speed:.3}&programmer=true&createRestorePoint=false"
+            );
+            http_get(host, &path)?;
+        }
+        Ok::<(), String>(())
+    })();
+    let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
+    operation?;
+
+    Ok(TitanGatlingAction {
+        ok: true,
+        fixture_titan_id: KINGCLUB_GATLING_FIXTURE_TITAN_ID,
+        palette_titan_id,
+        dimmer_percent,
+        speed_value,
+        message: "暗场加特林已更新".to_string(),
+    })
+}
+
 #[tauri::command]
 pub async fn titan_status(host: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -504,6 +657,28 @@ pub async fn titan_release_playback(
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn titan_update_gatling(
+    host: String,
+    expected_show_name: String,
+    palette_titan_id: Option<u64>,
+    dimmer_percent: Option<f64>,
+    speed_value: Option<f64>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        serde_json::to_value(update_gatling(
+            &host,
+            &expected_show_name,
+            palette_titan_id,
+            dimmer_percent,
+            speed_value,
+        )?)
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,5 +753,13 @@ mod tests {
     fn rejects_non_titan_paths() {
         assert!(http_get("127.0.0.1", "/other/path").is_err());
         assert!(http_get("127.0.0.1", "/titan/get/Titan/DeviceInfo\r\nInjected: yes").is_err());
+    }
+
+    #[test]
+    fn gatling_automation_is_restricted_to_dark_safe_ranges() {
+        assert!(validate_gatling_levels(Some(33_207), Some(10.0), Some(0.361)).is_ok());
+        assert!(validate_gatling_levels(Some(1), Some(10.0), Some(0.361)).is_err());
+        assert!(validate_gatling_levels(Some(33_207), Some(20.0), Some(0.361)).is_err());
+        assert!(validate_gatling_levels(Some(33_207), Some(10.0), Some(0.8)).is_err());
     }
 }
