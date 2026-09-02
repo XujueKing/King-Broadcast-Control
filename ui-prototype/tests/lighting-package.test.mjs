@@ -72,6 +72,10 @@ test("venue dark-red gatling preset remains manual-only and restart-stable", () 
   assert.equal(normalized.mappings[0], 71835);
   assert.equal(normalized.presentation.playbackModes[0], "loop");
   assert.equal(effect.kingName, "暗红加特林·常规");
+  assert.equal(effect.fixtureProfile, "gatling-9");
+  assert.equal(effect.pattern, "chase");
+  assert.equal(effect.speed, 0.2);
+  assert.equal(effect.direction, "forward");
   assert.equal(effect.safeAuto, false);
   assert.equal(normalized.safety.executeOnImport, false);
 });

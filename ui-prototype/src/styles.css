@@ -3629,3 +3629,22 @@ button:disabled{color:#626d72}
 .settings-ai-runtime-toggle:hover:not(:disabled){border-color:#91c6d8;background:#202b30}
 .settings-ai-runtime-toggle:disabled{opacity:.45;cursor:default}
 @media(max-width:1100px){.settings-ai-runtime{grid-template-columns:1fr 160px}.settings-ai-runtime-state{display:none}}
+
+/* Nine-pixel visual twin for the venue's Gatling tubes. This previews
+   semantic color and motion only; Titan remains the sole DMX authority. */
+.titan-control-rack>div{grid-template-columns:minmax(190px,1.45fr) minmax(76px,.62fr) minmax(88px,.7fr) minmax(115px,.85fr) minmax(76px,.62fr) minmax(190px,1.25fr);align-items:stretch}
+.gatling-preview-card{min-width:0;display:grid;grid-template-columns:minmax(100px,1fr) 82px;align-items:center;gap:6px;padding:4px 5px;border:1px solid #45545b;border-radius:3px;background:linear-gradient(135deg,#090d0f,#151d21)}
+.gatling-preview-card>label{min-width:0;display:grid;gap:2px}.gatling-preview-card>label>span{color:#75878f;font-size:6px}.gatling-preview-card select{height:25px!important;font-size:7px!important}
+.gatling-preview-card.generic .gatling-tube-bank{filter:grayscale(1);opacity:.3}
+.gatling-tube-bank{display:grid;gap:3px;padding:4px;border:1px solid #26343a;border-radius:3px;background:radial-gradient(ellipse at 50% 50%,color-mix(in srgb,var(--gatling-color) 12%,transparent),#030506 72%);transform:perspective(260px) rotateX(3deg)}
+.gatling-tube{display:grid;grid-template-columns:repeat(9,minmax(3px,1fr));gap:1px;height:4px;padding:1px;border-radius:3px;background:#141b1e;box-shadow:0 1px 2px #000}
+.gatling-tube i{display:block;border-radius:2px;background:var(--gatling-color);opacity:calc(.08 + var(--gatling-energy) * .16);box-shadow:0 0 2px color-mix(in srgb,var(--gatling-color) 25%,transparent);animation:gatling-chase var(--gatling-duration) linear infinite;animation-delay:var(--gatling-delay)}
+.gatling-tube-bank.direction-reverse i{animation-direction:reverse}.gatling-tube-bank.direction-bounce i{animation-direction:alternate}
+.gatling-tube-bank.pattern-solid i{animation:none;opacity:calc(.22 + var(--gatling-energy) * .7);box-shadow:0 0 5px color-mix(in srgb,var(--gatling-color) 70%,transparent)}
+.gatling-tube-bank.pattern-pulse i{animation-name:gatling-pulse;animation-delay:0s}
+.gatling-tube-bank.pattern-rainbow i{background:hsl(var(--gatling-hue) 92% 58%);box-shadow:0 0 4px hsl(var(--gatling-hue) 92% 58%);animation-name:gatling-rainbow}
+.gatling-speed>span{display:flex;justify-content:space-between}.gatling-speed>span b{color:#8ed8ef;font-size:7px}.gatling-speed input{width:100%;height:31px;margin:0;accent-color:var(--gatling-color)}
+@keyframes gatling-chase{0%,58%,100%{opacity:calc(.06 + var(--gatling-energy) * .12);transform:scaleX(.88)}8%,30%{opacity:calc(.35 + var(--gatling-energy) * .65);transform:scaleX(1.1);box-shadow:0 0 7px var(--gatling-color)}}
+@keyframes gatling-pulse{0%,100%{opacity:calc(.08 + var(--gatling-energy) * .12)}50%{opacity:calc(.3 + var(--gatling-energy) * .7);box-shadow:0 0 8px var(--gatling-color)}}
+@keyframes gatling-rainbow{0%,58%,100%{opacity:.16;filter:hue-rotate(0deg)}8%,30%{opacity:calc(.45 + var(--gatling-energy) * .55);filter:hue-rotate(70deg);transform:scaleX(1.08)}}
+@media(prefers-reduced-motion:reduce){.gatling-tube i{animation:none!important;opacity:calc(.22 + var(--gatling-energy) * .6)}}

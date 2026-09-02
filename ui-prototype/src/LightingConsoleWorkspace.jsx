@@ -27,6 +27,21 @@ const layerLabels = {
 
 const effectForPlayback = (registry, titanId) => registry.find((effect) => Number(effect.titanHandle) === Number(titanId)) ?? {};
 
+const previewColors = {
+  red:"#d92932",
+  orange:"#ff7a32",
+  amber:"#ffb03b",
+  yellow:"#f7df55",
+  green:"#54e39d",
+  cyan:"#58d6ff",
+  blue:"#5790ff",
+  purple:"#ad6bff",
+  pink:"#ff6fbd",
+  white:"#eef8ff",
+};
+
+const motionForSpeed = (speed) => speed <= 0 ? "none" : speed < .34 ? "slow" : speed < .67 ? "medium" : "fast";
+
 const staticPlaybackObservations = [
   "按住：加特林关闭",
   "按住：染色关闭",
@@ -141,7 +156,13 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
     ?? playbackRows[0]
     ?? null;
   const previewEffect = previewPlayback ? effectForPlayback(effectRegistry, previewPlayback.titanId) : {};
-  const previewColor = ({ red: "#ff4f52", orange: "#ff9f43", yellow: "#f7df55", green: "#54e39d", cyan: "#58d6ff", blue: "#5790ff", purple: "#ad6bff", pink: "#ff6fbd", white: "#eef8ff" })[previewEffect.colorFamily] || "#65d9ff";
+  const previewColor = previewColors[previewEffect.colorFamily] || "#65d9ff";
+  const gatlingProfile = previewEffect.fixtureProfile === "gatling-9";
+  const gatlingPattern = previewEffect.pattern || "chase";
+  const gatlingSpeed = Number.isFinite(Number(previewEffect.speed)) ? Math.max(0, Math.min(1, Number(previewEffect.speed))) : .2;
+  const gatlingDirection = previewEffect.direction || "forward";
+  const gatlingDuration = 5.2 - gatlingSpeed * 4.65;
+  const gatlingEnergy = Number.isFinite(Number(previewEffect.energy)) ? Math.max(.08, Math.min(1, Number(previewEffect.energy))) : .2;
   const inventoryReady = titanInventory?.authoritative === true;
   const inventoryBusy = titanInventory?.state === "scanning";
   const inventoryMessage = inventoryReady
@@ -240,10 +261,20 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
     <section className="titan-control-rack" aria-label="B区效果调节">
       <header><span><SlidersHorizontal weight="fill"/><b>现场效果调节</b><small>只修改 KING 语义配置，不会立即 Fire Playback</small></span><em>{previewPlayback ? previewEffect.kingName || previewPlayback.legend || `Playback ${previewPlayback.titanId}` : "等待选择 Titan Playback"}</em></header>
       <div>
-        <label className="titan-floor-target"><span>图纸定位</span><b>{selectedReferencePoint.zone}</b><small>{selectedReferenceType.label}</small></label>
+        <div className={`gatling-preview-card ${gatlingProfile ? "enabled" : "generic"}`} style={{"--gatling-color":previewColor,"--gatling-duration":`${gatlingDuration}s`,"--gatling-energy":gatlingEnergy}}>
+          <div className={`gatling-tube-bank pattern-${gatlingPattern} direction-${gatlingDirection}`} aria-label={`九节加特林灯管预演，${Math.round(gatlingSpeed*100)}% 速度`}>
+            {Array.from({length:6},(_,tubeIndex)=><div className="gatling-tube" key={tubeIndex}>{Array.from({length:9},(_,segmentIndex)=>{
+              const phase=segmentIndex+tubeIndex*.42;
+              const rainbowHue=(segmentIndex*38+tubeIndex*17)%360;
+              return <i key={segmentIndex} style={{"--gatling-delay":`${-(phase*gatlingDuration/9)}s`,"--gatling-hue":rainbowHue}}/>;
+            })}</div>)}
+          </div>
+          <label><span>灯具模型</span><select disabled={!previewPlayback} value={gatlingProfile?"gatling-9":""} onChange={(event)=>previewPlayback&&onEffectChange(previewPlayback,{fixtureProfile:event.target.value||null})}><option value="">通用效果</option><option value="gatling-9">加特林九节</option></select></label>
+        </div>
         <label><span>颜色族</span><select disabled={!previewPlayback} value={previewEffect.colorFamily ?? ""} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { colorFamily:event.target.value || null })}><option value="">颜色未知</option><option value="cyan">青蓝</option><option value="blue">蓝色</option><option value="green">绿色</option><option value="amber">琥珀</option><option value="red">红色</option><option value="purple">紫色</option><option value="pink">粉色</option><option value="white">白色</option></select></label>
-        <label><span>能量</span><select disabled={!previewPlayback} value={previewEffect.energy ?? ""} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { energy:event.target.value === "" ? null : Number(event.target.value) })}><option value="">能量未知</option><option value="0.2">低 20%</option><option value="0.5">中 50%</option><option value="0.8">高 80%</option><option value="1">峰值 100%</option></select></label>
-        <label><span>运动</span><select disabled={!previewPlayback} value={previewEffect.motion ?? ""} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { motion:event.target.value || null })}><option value="">运动未知</option><option value="none">静态</option><option value="slow">慢速</option><option value="medium">中速</option><option value="fast">快速</option></select></label>
+        <label><span>灯管效果</span><select disabled={!previewPlayback||!gatlingProfile} value={gatlingPattern} onChange={(event)=>previewPlayback&&onEffectChange(previewPlayback,{pattern:event.target.value})}><option value="solid">常亮</option><option value="chase">九节流水</option><option value="pulse">整体呼吸</option><option value="rainbow">幻彩流水</option></select></label>
+        <label className="gatling-speed"><span>速度 <b>{Math.round(gatlingSpeed*100)}%</b></span><input type="range" min="0" max="100" step="1" disabled={!previewPlayback||!gatlingProfile} value={Math.round(gatlingSpeed*100)} onChange={(event)=>{const speed=Number(event.target.value)/100;previewPlayback&&onEffectChange(previewPlayback,{speed,motion:motionForSpeed(speed)})}}/></label>
+        <label><span>方向</span><select disabled={!previewPlayback||!gatlingProfile} value={gatlingDirection} onChange={(event)=>previewPlayback&&onEffectChange(previewPlayback,{direction:event.target.value})}><option value="forward">正向</option><option value="reverse">反向</option><option value="bounce">往返</option></select></label>
         <div className="titan-control-flags"><label><input type="checkbox" disabled={!previewPlayback} checked={previewEffect.beatSync === true} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { beatSync:event.target.checked })}/>节拍同步</label><label><input type="checkbox" disabled={!previewPlayback} checked={previewEffect.continuous === true} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { continuous:event.target.checked })}/>持续效果</label><label><input type="checkbox" disabled={!previewPlayback || previewEffect.layer === "event"} checked={previewEffect.safeAuto === true} onChange={(event) => previewPlayback && onEffectChange(previewPlayback, { safeAuto:event.target.checked })}/>允许自动</label></div>
       </div>
     </section>

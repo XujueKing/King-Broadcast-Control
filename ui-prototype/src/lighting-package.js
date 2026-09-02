@@ -3,6 +3,9 @@ export const KINGLIGHT_VERSION = 1;
 
 const allowedLayers = new Set(["scene", "accent", "event"]);
 const allowedMotion = new Set(["none", "slow", "medium", "fast"]);
+const allowedFixtureProfiles = new Set(["gatling-9"]);
+const allowedPatterns = new Set(["solid", "chase", "pulse", "rainbow"]);
+const allowedDirections = new Set(["forward", "reverse", "bounce"]);
 
 const finiteUnit = (value) => {
   const numeric = Number(value);
@@ -45,6 +48,10 @@ const normalizeEffect = (effect) => {
     colorFamily: typeof effect?.colorFamily === "string" ? effect.colorFamily.slice(0, 24) : "",
     energy: finiteUnit(effect?.energy),
     motion: allowedMotion.has(effect?.motion) ? effect.motion : null,
+    fixtureProfile: allowedFixtureProfiles.has(effect?.fixtureProfile) ? effect.fixtureProfile : null,
+    pattern: allowedPatterns.has(effect?.pattern) ? effect.pattern : null,
+    speed: finiteUnit(effect?.speed),
+    direction: allowedDirections.has(effect?.direction) ? effect.direction : null,
     strobe: Boolean(effect?.strobe),
     beatSync: Boolean(effect?.beatSync),
     continuous: Boolean(effect?.continuous),
