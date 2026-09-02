@@ -1002,7 +1002,7 @@ export function MediaOutputScreen({ media, track, lyrics = null, transform = def
   return <div ref={screenRef} className={`led-screen ${baseMedia.type === "image" && !baseMedia.src ? "black-output" : ""}`}>
     <div className="led-physical-canvas" style={style}>
     {baseMedia.src&&(isPlayableVideoSource(baseMedia.src)
-      ? <video ref={videoRef} className={`media-source fit-${transform.fit}`} src={baseMedia.src} autoPlay loop playsInline muted={!allowAudio||baseMedia.muted!==false} draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>
+      ? <video ref={videoRef} className={`media-source fit-${transform.fit}`} src={baseMedia.src} crossOrigin="anonymous" autoPlay loop playsInline muted={!allowAudio||baseMedia.muted!==false} draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>
       : <img className={`media-source fit-${transform.fit}`} src={baseMedia.src} alt="" draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>)}
     {media.type === "text"&&<div className={`led-text-canvas ${editable?"is-editable":""}`} onPointerDown={editable?(event)=>{if(event.target===event.currentTarget)onElementSelect?.(null)}:undefined} onPointerMove={moveElementDrag} onPointerUp={endElementDrag} onPointerCancel={endElementDrag}>
       {editable && !(media.elements ?? []).length && <div className="text-empty-editor-hint"><b>新图文画面</b><small>请从右侧选择预设模板后开始编辑</small></div>}
@@ -2036,7 +2036,10 @@ export function App() {
   const [mediaCategory, setMediaCategory] = useState("全部");
   const [light, setLight] = useState(loadLightSelection);
   const [autoLightPreset, setAutoLightPreset] = useState(0);
-  const [lightRhythmRule, setLightRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.lighting","bar"));
+  // Per-bar automation depends on reliable downbeat metadata. Real club tracks
+  // with low-confidence analysis still expose useful beat events, so default to
+  // every beat and let the operator explicitly choose a sparser rule.
+  const [lightRhythmRule, setLightRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.lighting","beat"));
   const [videoRhythmRule, setVideoRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.video","off"));
   const automationVideoIndexRef = useRef(-1);
   const [lightingEnabled, setLightingEnabled] = useState(true);
