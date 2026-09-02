@@ -8,6 +8,8 @@ Runtime output rule: PGM and PVW are separate states. Only confirmed PGM content
 
 现场硬件连接默认自动恢复：启动时优先使用持久化的 Titan 与 Qu-16 地址并自动连接；已知地址失效时才扫描该地址所在的 /24 网段。已连接时禁止扫描或建立第二条 Qu-16 控制连接；Titan 候选必须通过已绑定控制台身份校验，Qu-16 扫描结果必须唯一才允许自动改绑。自动发现只恢复连接，不得自动播放歌曲、改推子或触发灯光 Playback。
 
+现场电脑音乐默认输出使用已复核无失真的 `扬声器 (Realtek(R) Audio)`，经模拟线进入 Qu-16 CH11/CH12；Qu-16 USB/CH3 播放链在 2026-09-03 现场出现机械音和电流音，CH3 保持静音，软件不得在重启后自动选择该 USB 端点。只有维修人员修复并重新验收后，才可通过 `KING_MPV_AUDIO_DEVICE` 显式覆盖输出设备。
+
 首页灯光 `0` 固定为现场确认的“暗红加特林”常规模式：仅允许控制 Show `2024.12.28` 中 Group `59` 所选的 Fixture `42/17636`，基础亮度 10%，颜色只取 Colour `70-77` 的已核对白名单。操作员明确启用自动模式后，PGM 主视频的稳定主色决定加特林色板，当前实际占主导声音的 Deck 节拍/BPM 决定受限速度与 10%-12.5% 的短促亮度起伏；黑屏、无稳定色或无有效节拍时保持暗红基线。该模式不得轮换整套 Playback，不得联动 280 光束、三色摇头或 LED 排灯，也不得突破暗场亮度和速度限制。
 
 Runtime media milestone: the desktop app owns `%APPDATA%/club.king.broadcast-control/media/videos`, `media/audio`, and `media/images`. It rescans local video/audio folders while running. Until the bundled mpv sidecar replaces it, real MP4 playback uses the WebView2 media element in PGM/output; PVW and the operator-side PGM monitor must stay muted to prevent duplicate venue audio. The output window alone may emit the video's own audio, controlled by the independent R1 video-audio toggle.
