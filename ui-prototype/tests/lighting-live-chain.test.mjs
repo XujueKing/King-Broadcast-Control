@@ -11,9 +11,17 @@ test("PGM video opts into anonymous CORS so live frames can be sampled", () => {
   );
 });
 
-test("lighting rhythm defaults to every beat when no operator preference exists", () => {
+test("desktop startup always restores automatic PGM colour and beat lighting", () => {
   assert.match(
     appSource,
-    /loadRhythmRule\("king\.rhythm\.lighting","beat"\)/,
+    /const \[light, setLight\] = useState\(null\)/,
+  );
+  assert.match(
+    appSource,
+    /const \[lightRhythmRule, setLightRhythmRule\] = useState\("beat"\)/,
+  );
+  assert.match(
+    appSource,
+    /const \[lightingEnabled, setLightingEnabled\] = useState\(true\)/,
   );
 });

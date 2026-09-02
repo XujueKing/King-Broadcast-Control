@@ -218,16 +218,6 @@ const loadRhythmRule = (key, fallback) => {
     return fallback;
   }
 };
-const loadLightSelection = () => {
-  try {
-    const saved=window.localStorage.getItem("king.lighting.homeMode");
-    if(saved==="auto")return null;
-    const numeric=Number(saved);
-    return Number.isInteger(numeric)&&numeric>=0&&numeric<=9?numeric:0;
-  } catch {
-    return 0;
-  }
-};
 const loadMixerNumber = (key, fallback) => {
   try {
     const value = Number(window.localStorage.getItem(key));
@@ -2034,12 +2024,15 @@ export function App() {
   const [videoAudioEnabled, setVideoAudioEnabled] = useState(false);
   const [mediaType, setMediaType] = useState("video");
   const [mediaCategory, setMediaCategory] = useState("全部");
-  const [light, setLight] = useState(loadLightSelection);
+  // Venue startup is deterministic: always return to automatic lighting so a
+  // stale manual preset cannot disable PGM colour and music-beat following.
+  // Operators can still select a manual preset for the current session.
+  const [light, setLight] = useState(null);
   const [autoLightPreset, setAutoLightPreset] = useState(0);
   // Per-bar automation depends on reliable downbeat metadata. Real club tracks
   // with low-confidence analysis still expose useful beat events, so default to
   // every beat and let the operator explicitly choose a sparser rule.
-  const [lightRhythmRule, setLightRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.lighting","beat"));
+  const [lightRhythmRule, setLightRhythmRule] = useState("beat");
   const [videoRhythmRule, setVideoRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.video","off"));
   const automationVideoIndexRef = useRef(-1);
   const [lightingEnabled, setLightingEnabled] = useState(true);
