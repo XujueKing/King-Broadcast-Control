@@ -116,6 +116,21 @@ export const getAdjacentPlayableTrack = (trackCount,currentIndex,excludedIndex,d
 const normalizedPlaybackQueue = (queue) => [...new Set((Array.isArray(queue) ? queue : [])
   .filter((index) => Number.isInteger(index) && index >= 0))];
 
+export const resolvePlaybackChainForDeck = ({
+  deckNumber,
+  currentIndex,
+  queueSources,
+  queueIndexes,
+}) => {
+  const otherDeck=deckNumber===1?2:1;
+  for(const ownerDeck of [deckNumber,otherDeck]){
+    const source=queueSources?.[ownerDeck]??null;
+    const queue=normalizedPlaybackQueue(queueIndexes?.[ownerDeck]);
+    if(source&&queue.includes(currentIndex))return {ownerDeck,source,queue};
+  }
+  return {ownerDeck:null,source:null,queue:[]};
+};
+
 export const getNextPlayableTrackInQueue = (queue,currentIndex,excludedIndex,shuffle=false,random=Math.random) => {
   const ordered=normalizedPlaybackQueue(queue);
   const candidates=ordered.filter((index)=>index!==currentIndex&&index!==excludedIndex);

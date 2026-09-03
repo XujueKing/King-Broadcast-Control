@@ -18,6 +18,7 @@ import {
   parseDuration,
   planDeckAutoTransition,
   planDeckOperatorArbitration,
+  resolvePlaybackChainForDeck,
   resetDeckVocalModeForTrackChange,
 } from "../src/media-runtime.js";
 
@@ -102,6 +103,36 @@ test("automatic DJ transition preloads and crossfades the next source-playlist s
   assert.deepEqual(planDeckAutoTransition({queue,currentIndex:729,mode:"sequence",remainingSeconds:AUTO_DJ_CROSSFADE_SECONDS,preparedTargetIndex:126}),{action:"crossfade",nextIndex:126});
   assert.deepEqual(planDeckAutoTransition({queue,currentIndex:126,mode:"repeat-one",remainingSeconds:1}),{action:"none",nextIndex:null});
   assert.deepEqual(planDeckAutoTransition({queue,currentIndex:126,mode:"sequence",remainingSeconds:1,otherDeckPlaying:true}),{action:"none",nextIndex:null});
+});
+
+test("automatic DJ keeps the chain that owns the playing track when Deck queue state diverges",()=>{
+  const afro={kind:"playlist",libraryKey:"2",playlistId:"playlist:七夕"};
+  const weekday={kind:"playlist",libraryKey:"2",playlistId:"playlist:周四"};
+  const resolved=resolvePlaybackChainForDeck({
+    deckNumber:2,
+    currentIndex:487,
+    queueSources:{1:afro,2:weekday},
+    queueIndexes:{1:[486,487,488],2:[0,1,2]},
+  });
+  assert.deepEqual(resolved,{ownerDeck:1,source:afro,queue:[486,487,488]});
+  assert.deepEqual(
+    planDeckAutoTransition({
+      queue:resolved.queue,
+      currentIndex:487,
+      mode:"sequence",
+      remainingSeconds:AUTO_DJ_PRELOAD_SECONDS,
+    }),
+    {action:"preload",nextIndex:488},
+  );
+});
+
+test("automatic DJ fails closed instead of jumping to an unrelated list",()=>{
+  assert.deepEqual(resolvePlaybackChainForDeck({
+    deckNumber:2,
+    currentIndex:99,
+    queueSources:{1:{kind:"playlist"},2:{kind:"playlist"}},
+    queueIndexes:{1:[1,2],2:[3,4]},
+  }),{ownerDeck:null,source:null,queue:[]});
 });
 
 test("operator arbitration keeps playing or target-CUE Decks independent",()=>{

@@ -36,6 +36,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const MPV_START_TIMEOUT: Duration = Duration::from_secs(5);
 const MPV_SEEK_SETTLE_TIMEOUT: Duration = Duration::from_millis(900);
+const MPV_LOAD_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+const MPV_LOAD_STABLE_READS: u8 = 2;
 const MPV_SEEK_FADE_STEPS: u32 = 6;
 const MPV_SEEK_FADE_STEP_DELAY: Duration = Duration::from_millis(20);
 const MPV_SEEK_POSITION_TOLERANCE_SECONDS: f64 = 0.25;
@@ -599,11 +601,42 @@ pub fn load_deck(manager: &MpvManager, deck: u8, path: &Path) -> Result<MpvDeckS
         .lock()
         .map_err(|_| "无法锁定 mpv 状态".to_string())?;
     let instance = ensure_instance(&mut manager, deck)?;
+    // A loadfile command can briefly expose stale/partially decoded buffers on
+    // Qu-16 USB/WASAPI. Fail closed: mute and pause before replacing the file,
+    // then wait until mpv reports the requested local path as stable.
+    send_command(&instance.pipe_path, json!(["set_property", "volume", 0.0]))?;
+    send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
     send_command(
         &instance.pipe_path,
         json!(["loadfile", canonical_path.to_string_lossy(), "replace"]),
     )?;
     send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+    let expected_path = normalized_mpv_path(&canonical_path.to_string_lossy());
+    let settle_deadline = Instant::now() + MPV_LOAD_SETTLE_TIMEOUT;
+    let mut stable_reads = 0_u8;
+    while Instant::now() < settle_deadline {
+        let loaded_path = property(&instance.pipe_path, "path")
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned));
+        let duration = property_f64(&instance.pipe_path, "duration");
+        let stable = loaded_path
+            .as_deref()
+            .is_some_and(|value| normalized_mpv_path(value) == expected_path)
+            && duration.is_finite()
+            && duration > 0.0;
+        stable_reads = if stable {
+            stable_reads.saturating_add(1)
+        } else {
+            0
+        };
+        if stable_reads >= MPV_LOAD_STABLE_READS {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if stable_reads < MPV_LOAD_STABLE_READS {
+        return Err("mpv 装载未在安全窗口内稳定；Deck 已保持静音暂停".into());
+    }
     instance.loaded_path = Some(canonical_path);
     deck_state_for_instance(deck, instance)
 }
@@ -726,6 +759,15 @@ fn property_f64(pipe_path: &str, name: &str) -> f64 {
         .ok()
         .and_then(|value| value.as_f64())
         .unwrap_or(0.0)
+}
+
+fn normalized_mpv_path(path: &str) -> String {
+    let without_extended_prefix = path
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| path.strip_prefix(r"\\?\").map(str::to_owned))
+        .unwrap_or_else(|| path.to_owned());
+    without_extended_prefix.replace('/', r"\").to_lowercase()
 }
 
 fn safe_seek_instance(
@@ -1014,6 +1056,18 @@ mod tests {
         assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--gapless-audio=weak"));
         assert!(MPV_AUDIO_OUTPUT_ARGS.contains(&"--audio-buffer=0.5"));
         assert!(!MPV_AUDIO_OUTPUT_ARGS.contains(&"--gapless-audio=yes"));
+    }
+
+    #[test]
+    fn mpv_path_comparison_ignores_windows_extended_length_prefix() {
+        assert_eq!(
+            normalized_mpv_path(r"\\?\C:\Music\Track.flac"),
+            normalized_mpv_path(r"C:\Music\Track.flac")
+        );
+        assert_eq!(
+            normalized_mpv_path(r"\\?\UNC\server\share\Track.flac"),
+            normalized_mpv_path(r"\\server\share\Track.flac")
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ import {
   parseDuration,
   planDeckAutoTransition,
   planDeckOperatorArbitration,
+  resolvePlaybackChainForDeck,
   resetDeckVocalModeForTrackChange,
 } from "./media-runtime.js";
 import { collectRhythmEvents } from "./rhythm-runtime.js";
@@ -3870,8 +3871,10 @@ export function App() {
     const targetDeck=sourceDeck===1?2:1;
     const targetTrack=tracks[targetTrackIndex];
     if(!targetTrack?.path)return false;
+    const queueSource=targetQueueSource??deckPlaybackQueueSources[sourceDeck]??null;
+    if(!queueSource)return false;
     setDeckAutomationOwner(targetDeck,"automatic");
-    const transition={phase:"preloading",sourceDeck,targetDeck,sourceTrackIndex,targetTrackIndex,crossfadeSeconds,targetStartsSilent:true};
+    const transition={phase:"preloading",sourceDeck,targetDeck,sourceTrackIndex,targetTrackIndex,crossfadeSeconds,targetStartsSilent:true,queueSource};
     mpvAutoTransitionRef.current=transition;
     try{
       await invoke("mpv_deck_set_paused",{deck:targetDeck,paused:true});
@@ -3879,10 +3882,11 @@ export function App() {
       mpvAutoplayAfterLoadRef.current[targetDeck]=false;
       mpvLoadedPathsRef.current[targetDeck]=null;
       mpvEofHandledRef.current[targetDeck]=false;
+      deckStartupSelectionAppliedRef.current[targetDeck]=true;
       resetDeckForTrackChange(targetDeck);
       setDeckPlaybackQueueSources((current)=>({
         ...current,
-        [targetDeck]:targetQueueSource??current[sourceDeck],
+        [targetDeck]:queueSource,
       }));
       transition.loadPromise=invoke("mpv_deck_load",{deck:targetDeck,path:targetTrack.path});
       const state=await transition.loadPromise;
@@ -4017,15 +4021,27 @@ export function App() {
     const preparedTargetIndex=transition.sourceDeck===deckNumber&&transition.phase==="ready"
       ? transition.targetTrackIndex
       : null;
+    const playbackChain=resolvePlaybackChainForDeck({
+      deckNumber,
+      currentIndex:trackIndex,
+      queueSources:deckPlaybackQueueSources,
+      queueIndexes:deckPlaybackTrackIndexes,
+    });
     const plan=planDeckAutoTransition({
-      queue:deckPlaybackTrackIndexes[deckNumber],
+      queue:playbackChain.queue,
       currentIndex:trackIndex,
       mode:deckPlaybackModes[deckNumber],
       remainingSeconds:Math.max(0,state.duration-state.timePos),
       preparedTargetIndex,
       otherDeckPlaying:Boolean(playingDecks[targetDeck]),
     });
-    if(plan.action==="preload")await prepareMpvAutoTransition(deckNumber,trackIndex,plan.nextIndex);
+    if(plan.action==="preload")await prepareMpvAutoTransition(
+      deckNumber,
+      trackIndex,
+      plan.nextIndex,
+      AUTO_DJ_CROSSFADE_SECONDS,
+      playbackChain.source,
+    );
     else if(plan.action==="crossfade")await beginMpvAutoTransition(deckNumber);
   };
   const finishMpvDeck = async (deckNumber, trackIndex) => {
@@ -4044,8 +4060,17 @@ export function App() {
         return;
       }
       if(mode==="sequence"||mode==="shuffle") {
-        const nextTrack=getNextPlayableTrackInQueue(deckPlaybackTrackIndexes[deckNumber],trackIndex,-1,mode==="shuffle");
+        const playbackChain=resolvePlaybackChainForDeck({
+          deckNumber,
+          currentIndex:trackIndex,
+          queueSources:deckPlaybackQueueSources,
+          queueIndexes:deckPlaybackTrackIndexes,
+        });
+        const nextTrack=getNextPlayableTrackInQueue(playbackChain.queue,trackIndex,-1,mode==="shuffle");
         if(nextTrack!==null) {
+          if(playbackChain.source) {
+            setDeckPlaybackQueueSources((current)=>({...current,[deckNumber]:playbackChain.source}));
+          }
           mpvEofHandledRef.current[deckNumber]=false;
           mpvAutoplayAfterLoadRef.current[deckNumber]=true;
           mpvLoadedPathsRef.current[deckNumber]=null;
