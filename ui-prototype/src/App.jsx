@@ -2572,13 +2572,21 @@ export function App() {
     return gatlingUpdateQueueRef.current.push(()=>{
       setTitanActionStatus({state:"busy",message:`正在更新加特林 · ${sourceLabel}`});
       const command=titanCommandQueueRef.current.catch(()=>undefined).then(async()=>{
-        const result=await invoke("titan_update_gatling",{
-          host:titanStatus.host,
-          expectedShowName:kingclubGatlingProfile.showName,
-          paletteTitanId,
-          dimmerPercent,
-          speedValue,
-        });
+        const result=source==="rhythm"
+          ? await invoke("titan_pulse_gatling",{
+              host:titanStatus.host,
+              expectedShowName:kingclubGatlingProfile.showName,
+              peakDimmerPercent:dimmerPercent,
+              baseDimmerPercent:kingclubGatlingProfile.baseDimmerPercent,
+              pulseMillis:70,
+            })
+          : await invoke("titan_update_gatling",{
+              host:titanStatus.host,
+              expectedShowName:kingclubGatlingProfile.showName,
+              paletteTitanId,
+              dimmerPercent,
+              speedValue,
+            });
         setTitanActionStatus({state:"live",message:`${result?.message||"暗场加特林已更新"} · ${sourceLabel}`});
         return true;
       }).catch((error)=>{
@@ -3142,16 +3150,13 @@ export function App() {
     setAudioAnalyses(audioAnalysesRef.current);
     return analysis;
   };
-  useEffect(() => {
-    for (const [deckNumber, trackIndex] of [[1, deck1], [2, deck2]]) {
-      const track = tracks[trackIndex];
+  const dispatchDeckRhythmEvents=useCallback((deckNumber,track,currentSeconds,playing)=>{
       const trackKey = audioAnalysisKey(track);
-      const analysis = audioAnalyses[trackKey];
-      const currentSeconds = Number(deckProgress[deckNumber]) || 0;
+      const analysis = audioAnalysesRef.current[trackKey];
       const cursor = rhythmCursorRef.current[deckNumber];
-      if (!trackKey || cursor.trackKey !== trackKey || !playingDecks[deckNumber]) {
+      if (!trackKey || cursor.trackKey !== trackKey || !playing) {
         rhythmCursorRef.current[deckNumber] = { trackKey, seconds:currentSeconds };
-        continue;
+        return;
       }
       const events = collectRhythmEvents(analysis, cursor.seconds, currentSeconds, {lookAheadSeconds:0.16});
       rhythmCursorRef.current[deckNumber] = { trackKey, seconds:currentSeconds };
@@ -3169,8 +3174,18 @@ export function App() {
           energy:rhythmEnergyAt(analysis,rhythmEvent.atSeconds),
         } }));
       }
+  },[]);
+  useEffect(() => {
+    if(mpvEnabled)return;
+    for (const [deckNumber, trackIndex] of [[1, deck1], [2, deck2]]) {
+      dispatchDeckRhythmEvents(
+        deckNumber,
+        tracks[trackIndex],
+        Number(deckProgress[deckNumber])||0,
+        Boolean(playingDecks[deckNumber]),
+      );
     }
-  }, [deckProgress, deck1, deck2, playingDecks, tracks, audioAnalyses]);
+  }, [deckProgress, deck1, deck2, playingDecks, tracks, mpvEnabled, dispatchDeckRhythmEvents]);
   useEffect(() => {
     writeDeckOutputVolumes(crossfade,masterVolume);
   },[crossfade,masterVolume,tracks,writeDeckOutputVolumes]);
@@ -4290,6 +4305,12 @@ export function App() {
           if(!path||mpvLoadedPathsRef.current[deckNumber]!==path)continue;
           const state=await invoke("mpv_deck_state",{deck:deckNumber});
           if(disposed)return;
+          dispatchDeckRhythmEvents(
+            deckNumber,
+            tracks[trackIndex],
+            Math.max(0,Number(state.timePos)||0),
+            !state.paused,
+          );
           applyMpvDeckState(state);
           await advanceMpvAutoTransition(deckNumber,trackIndex,state);
           const reachedEnd=Boolean(state.eofReached)||(state.duration>0&&state.timePos>=state.duration-.06);
@@ -4309,7 +4330,7 @@ export function App() {
     poll();
     const timer=window.setInterval(poll,160);
     return()=>{disposed=true;window.clearInterval(timer)};
-  },[mpvEnabled,deck1,deck2,deckOnePath,deckTwoPath,deckPlaybackModes,tracks.length,deckPlaybackTrackIndexes,playingDecks,deckCue.deck]);
+  },[mpvEnabled,deck1,deck2,deckOnePath,deckTwoPath,deckPlaybackModes,tracks.length,deckPlaybackTrackIndexes,playingDecks,deckCue.deck,dispatchDeckRhythmEvents]);
   const activeMediaType = mediaTypes.find(type => type.id === mediaType) ?? mediaTypes[0];
   const activeMediaCategories = mediaCategories[mediaType] ?? [];
   const availableVideos = useMemo(() => videoAssets.length

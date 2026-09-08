@@ -4,6 +4,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs},
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -86,6 +87,7 @@ const KINGCLUB_GATLING_GROUP_TITAN_ID: u64 = 17_790;
 const KINGCLUB_GATLING_FIXTURE_TITAN_ID: u64 = 17_636;
 const KINGCLUB_GATLING_SPEED_CONTROL_ID: u64 = 1_935;
 const KINGCLUB_GATLING_SPEED_FUNCTION_ID: u64 = 1;
+const KINGCLUB_GATLING_TARGET_TTL: Duration = Duration::from_secs(10);
 const KINGCLUB_GATLING_PALETTES: [u64; 8] = [
     33_187, 33_207, 33_214, 33_219, 33_227, 33_234, 33_240, 33_249,
 ];
@@ -112,6 +114,21 @@ struct TitanGatlingAction {
     dimmer_percent: Option<f64>,
     speed_value: Option<f64>,
     message: String,
+}
+
+#[derive(Clone)]
+struct GatlingPulseTarget {
+    host: String,
+    show_name: String,
+    fixture_location: String,
+    validated_at: Instant,
+    last_level: f64,
+}
+
+static GATLING_PULSE_TARGET: OnceLock<Mutex<Option<GatlingPulseTarget>>> = OnceLock::new();
+
+fn gatling_pulse_target_cache() -> &'static Mutex<Option<GatlingPulseTarget>> {
+    GATLING_PULSE_TARGET.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Debug, Serialize)]
@@ -648,6 +665,16 @@ fn update_gatling(
     let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
     operation?;
 
+    if let Ok(mut cached) = gatling_pulse_target_cache().lock() {
+        *cached = Some(GatlingPulseTarget {
+            host: host.to_string(),
+            show_name: expected_show_name.to_string(),
+            fixture_location: location,
+            validated_at: Instant::now(),
+            last_level: dimmer_percent.unwrap_or(4.0),
+        });
+    }
+
     Ok(TitanGatlingAction {
         ok: true,
         fixture_titan_id: KINGCLUB_GATLING_FIXTURE_TITAN_ID,
@@ -655,6 +682,110 @@ fn update_gatling(
         dimmer_percent,
         speed_value,
         message: "暗场加特林已更新".to_string(),
+    })
+}
+
+fn validated_gatling_pulse_target(
+    host: &str,
+    expected_show_name: &str,
+) -> Result<GatlingPulseTarget, String> {
+    let status = read_status(host)?;
+    if status.show_name != expected_show_name {
+        return Err(format!(
+            "Titan Show 身份不匹配：需要 {expected_show_name}，当前为 {}",
+            status.show_name
+        ));
+    }
+
+    if let Ok(cached) = gatling_pulse_target_cache().lock() {
+        if let Some(target) = cached.as_ref() {
+            if target.host == host
+                && target.show_name == expected_show_name
+                && target.validated_at.elapsed() < KINGCLUB_GATLING_TARGET_TTL
+            {
+                return Ok(target.clone());
+            }
+        }
+    }
+
+    let fixtures = read_handle_summaries(host, "/titan/handles/Fixtures")?;
+    let fixture = beam_fixture_handle(&fixtures, KINGCLUB_GATLING_FIXTURE_TITAN_ID)?;
+    let target = GatlingPulseTarget {
+        host: host.to_string(),
+        show_name: expected_show_name.to_string(),
+        fixture_location: fixture_handle_location(fixture)?,
+        validated_at: Instant::now(),
+        last_level: 4.0,
+    };
+    if let Ok(mut cached) = gatling_pulse_target_cache().lock() {
+        *cached = Some(target.clone());
+    }
+    Ok(target)
+}
+
+fn set_fixture_location_level(
+    host: &str,
+    fixture_location: &str,
+    value_percent: f64,
+    old_value_percent: f64,
+) -> Result<(), String> {
+    let value = value_percent / 100.0;
+    let old_value = old_value_percent / 100.0;
+    let path = format!(
+        "/titan/script/2/Fixtures/PresetLevelHandle?handle_location={fixture_location}&value={value:.3}&oldValue={old_value:.3}"
+    );
+    http_get(host, &path)?;
+    Ok(())
+}
+
+fn pulse_gatling(
+    host: &str,
+    expected_show_name: &str,
+    peak_dimmer_percent: f64,
+    base_dimmer_percent: f64,
+    pulse_millis: u64,
+) -> Result<TitanGatlingAction, String> {
+    validate_gatling_levels(None, Some(peak_dimmer_percent), None)?;
+    validate_gatling_levels(None, Some(base_dimmer_percent), None)?;
+    if expected_show_name.trim() != KINGCLUB_GATLING_SHOW {
+        return Err("加特林现场配置只绑定 Show 2024.12.28".to_string());
+    }
+    let target = validated_gatling_pulse_target(host, expected_show_name)?;
+    set_fixture_location_level(
+        host,
+        &target.fixture_location,
+        peak_dimmer_percent,
+        target.last_level,
+    )?;
+    std::thread::sleep(Duration::from_millis(pulse_millis.clamp(40, 140)));
+    if let Err(error) = set_fixture_location_level(
+        host,
+        &target.fixture_location,
+        base_dimmer_percent,
+        peak_dimmer_percent,
+    ) {
+        let _ = set_fixture_location_level(
+            host,
+            &target.fixture_location,
+            base_dimmer_percent,
+            peak_dimmer_percent,
+        );
+        return Err(error);
+    }
+    if let Ok(mut cached) = gatling_pulse_target_cache().lock() {
+        if let Some(current) = cached.as_mut() {
+            if current.host == host && current.show_name == expected_show_name {
+                current.last_level = base_dimmer_percent;
+            }
+        }
+    }
+    Ok(TitanGatlingAction {
+        ok: true,
+        fixture_titan_id: KINGCLUB_GATLING_FIXTURE_TITAN_ID,
+        palette_titan_id: None,
+        dimmer_percent: Some(peak_dimmer_percent),
+        speed_value: None,
+        message: "加特林已跟随音乐短促闪动".to_string(),
     })
 }
 
@@ -1046,6 +1177,28 @@ pub async fn titan_update_gatling(
             palette_titan_id,
             dimmer_percent,
             speed_value,
+        )?)
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn titan_pulse_gatling(
+    host: String,
+    expected_show_name: String,
+    peak_dimmer_percent: f64,
+    base_dimmer_percent: f64,
+    pulse_millis: u64,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        serde_json::to_value(pulse_gatling(
+            &host,
+            &expected_show_name,
+            peak_dimmer_percent,
+            base_dimmer_percent,
+            pulse_millis,
         )?)
         .map_err(|error| error.to_string())
     })

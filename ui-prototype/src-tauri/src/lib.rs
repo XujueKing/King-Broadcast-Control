@@ -2232,6 +2232,7 @@ pub fn run() {
             titan_runtime::titan_fire_playback,
             titan_runtime::titan_release_playback,
             titan_runtime::titan_update_gatling,
+            titan_runtime::titan_pulse_gatling,
             titan_runtime::titan_update_beam,
             titan_runtime::titan_run_beam_show,
             vocal_runtime_status,
