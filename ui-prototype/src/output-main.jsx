@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emitTo, listen } from "@tauri-apps/api/event";
 import { MediaOutputScreen } from "./App.jsx";
 import { applyPreferredLyricsFont, registerCustomFonts } from "./font-runtime.js";
 import "./styles.css";
@@ -37,7 +37,7 @@ function OutputApp() {
   },[]);
 
   return <main className="output-window-root" aria-label="KING CLUB LED 节目输出">
-    <MediaOutputScreen media={program.media} lyrics={program.lyrics} transform={program.transform} allowAudio/>
+    <MediaOutputScreen media={program.media} lyrics={program.lyrics} transform={program.transform} playback={program.playback} onVideoEnded={(ended)=>emitTo("main","program-video-ended",ended).catch(error=>console.error("视频顺播通知失败",error))} allowAudio/>
   </main>;
 }
 

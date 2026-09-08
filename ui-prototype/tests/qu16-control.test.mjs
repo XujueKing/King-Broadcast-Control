@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import {
   QU16_MASTER_TARGETS,
   QU16_MIX_LABELS,
@@ -19,6 +20,16 @@ import {
 } from "../src/qu16-control.js";
 import { qu16SurfaceSourceAt } from "../src/qu16-surface-map.js";
 import qu16Model from "../src/mixer-models/allen-heath-qu16/model.json" with { type:"json" };
+
+const mixerConsoleSource=await readFile(new URL("../src/MixerConsole.jsx",import.meta.url),"utf8");
+
+test("mixer workspace exposes a live readback CH1 FX1 reverb control",()=>{
+  assert.match(mixerConsoleSource,/const reverbKey="send:ch-1:FX 1"/);
+  assert.match(mixerConsoleSource,/CH1\/CH2 话筒混响/);
+  assert.match(mixerConsoleSource,/parameterSnapshot\?\.connected/);
+  assert.match(mixerConsoleSource,/parameterSnapshot\?\.synced/);
+  assert.match(mixerConsoleSource,/onWriteParameters\?\.\(\[\{key:reverbKey,value:uiToMidiValue\(next\)\}\]\)/);
+});
 
 test("physical slots 8 and 9 remain layer-specific",()=>{
   assert.equal(qu16SurfaceSourceAt("lower",8).id,"ch-8");

@@ -6,6 +6,7 @@ import {
   midiToUiValue,
   qu16IntentToWrite,
   qu16MasterTargetId,
+  uiToMidiValue,
 } from "./qu16-control.js";
 import { qu16SurfaceInputSources, qu16SurfaceLayerDefinitions } from "./qu16-surface-map.js";
 import qu16Brandbar from "./assets/hardware/allen-heath-qu16/qu16-brandbar-clean.png";
@@ -1130,8 +1131,56 @@ export const MixerWorkspace = memo(function MixerWorkspace({ model, meterSnapsho
         ? "表计 LIVE · 控制本地"
         : effectiveMeterSnapshot?.connected?"表计超时 · 控制本地":controlStatus?.title??meterStatus?.title??"控制本地";
   const badgeTitle=[meterStatus?.message,controlStatus?.message].filter(Boolean).join(" · ");
+  const reverbKey="send:ch-1:FX 1";
+  const pendingReverb=parameterSnapshot?.pendingDetails?.[reverbKey]??null;
+  const observedReverbRaw=Number(parameterSnapshot?.parameters?.[reverbKey]);
+  const pendingReverbRaw=Number(pendingReverb?.expectedValue);
+  const reverbRaw=Number.isInteger(pendingReverbRaw)?pendingReverbRaw:observedReverbRaw;
+  const observedReverbValue=Number.isInteger(reverbRaw)&&reverbRaw>=0&&reverbRaw<=127?midiToUiValue(reverbRaw):null;
+  const [reverbDraft,setReverbDraft]=useState(null);
+  const [reverbWriteState,setReverbWriteState]=useState("idle");
+  const reverbDraftRef=useRef(null);
+  const reverbReady=controlMode==="hardware-live"
+    && Boolean(parameterSnapshot?.connected)
+    && Boolean(parameterSnapshot?.synced)
+    && observedReverbValue!==null;
+  const reverbValue=reverbDraft??observedReverbValue??0;
+  useEffect(()=>{
+    if(!pendingReverb&&reverbDraft!==null&&observedReverbValue===reverbDraft){
+      reverbDraftRef.current=null;
+      setReverbDraft(null);
+      setReverbWriteState("confirmed");
+    }
+  },[observedReverbValue,pendingReverb,reverbDraft]);
+  useEffect(()=>()=>{reverbDraftRef.current=null},[]);
+  const commitReverb=async()=>{
+    const next=reverbDraftRef.current;
+    if(!reverbReady||next===null||next===observedReverbValue)return;
+    setReverbWriteState("writing");
+    const result=await onWriteParameters?.([{key:reverbKey,value:uiToMidiValue(next)}]);
+    if(!result?.accepted){
+      reverbDraftRef.current=null;
+      setReverbDraft(null);
+      setReverbWriteState("error");
+      return;
+    }
+    setReverbWriteState("pending");
+  };
+  const updateReverbDraft=(event)=>{
+    const next=Number(event.target.value);
+    reverbDraftRef.current=next;
+    setReverbDraft(next);
+    setReverbWriteState("dirty");
+  };
+  const reverbTitle=!reverbReady
+    ? "等待 Qu-16 完成真机参数同步"
+    : reverbWriteState==="error"
+      ? "CH1 混响写入失败，已恢复真机读数"
+      : pendingReverb||reverbWriteState==="pending"
+        ? `CH1/CH2 → FX1 ${reverbValue}% · 已发送，等待真机回读`
+        : `CH1/CH2 → FX1 ${reverbValue}% · 真机回读`;
   return <section className="mixer-workspace" aria-label={`${model.displayName} 调音台工作区`} data-control-mode={controlMode}>
-    <header><SlidersHorizontal weight="fill"/><div><b>{model.displayName}</b><small>音频 USB-B {model.audio.usbOutputs}×{model.audio.usbReturns} · 控制 Ethernet TCP {model.control.tcpPort}</small></div><span className={`mixer-model-badge ${live||controlMode==="hardware-live"?"live":""}`} title={badgeTitle}>{badgeLabel}</span><button type="button" className={`mixer-output-restore ${outputRestoreStatus?.state??"idle"}`} disabled={controlMode!=="hardware-live"||outputRestoreStatus?.busy} title={outputRestoreStatus?.message??"恢复 8/26 ST3 → LR 主输出基准"} onClick={onRestoreOutputBaseline}>{outputRestoreStatus?.busy?"恢复中…":"恢复 8/26 主输出"}</button></header>
+    <header><SlidersHorizontal weight="fill"/><div><b>{model.displayName}</b><small>音频 USB-B {model.audio.usbOutputs}×{model.audio.usbReturns} · 控制 Ethernet TCP {model.control.tcpPort}</small></div><span className={`mixer-model-badge ${live||controlMode==="hardware-live"?"live":""}`} title={badgeTitle}>{badgeLabel}</span><label className={`mixer-ch1-reverb ${pendingReverb||reverbWriteState==="pending"?"pending":""} ${reverbWriteState==="error"?"error":""}`} title={reverbTitle}><span>CH1/CH2 话筒混响</span><input style={{"--reverb-level":`${reverbValue}%`}} type="range" min="0" max="100" step="1" value={reverbValue} disabled={!reverbReady} aria-label="CH1/CH2 话筒混响大小" aria-valuetext={`${reverbValue}%`} onChange={updateReverbDraft} onPointerUp={commitReverb} onPointerCancel={commitReverb} onKeyUp={commitReverb} onBlur={commitReverb}/><em>{reverbReady?`${reverbValue}%`:"--"}</em></label><button type="button" className={`mixer-output-restore ${outputRestoreStatus?.state??"idle"}`} disabled={controlMode!=="hardware-live"||outputRestoreStatus?.busy} title={outputRestoreStatus?.message??"恢复 8/26 ST3 → LR 主输出基准"} onClick={onRestoreOutputBaseline}>{outputRestoreStatus?.busy?"恢复中…":"恢复 8/26 主输出"}</button></header>
     <div className="mixer-workspace-body"><MixerConsole model={model} meterSnapshot={effectiveMeterSnapshot} parameterSnapshot={parameterSnapshot} controlMode={controlMode} onWriteParameters={onWriteParameters}/></div>
   </section>;
 });

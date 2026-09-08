@@ -43,6 +43,7 @@ vocal-engine/models/
 
 # Venue-local recovery copies and candidate desktop binaries
 hardware-backups/
+/artifacts/desktop-checkpoints/
 
 # Local UI design-QA captures
 ui-prototype/implementation-*.png

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectRhythmEvents } from "../src/rhythm-runtime.js";
+import { collectRhythmEvents, effectiveRhythmBpm, rhythmEnergyAt } from "../src/rhythm-runtime.js";
 
 const analysis = {
   beats:[0.5, 1, 1.5, 2, 2.5],
@@ -37,9 +37,54 @@ test("irregular detector output is regularized to the analysed BPM grid", () => 
   assert.equal(Number((events[1].atSeconds - events[0].atSeconds).toFixed(5)), 0.46875);
 });
 
+test("bounded long-mix analysis extends the BPM grid through the full duration", () => {
+  const analysis = {
+    bpm:120,
+    durationSeconds:3600,
+    beats:[0,0.5,1,1.5,2],
+    downbeats:[0],
+    bars:[0],
+  };
+  assert.deepEqual(collectRhythmEvents(analysis, 1800.1, 1800.6), [{
+    type:"beat",
+    beatIndex:3601,
+    atSeconds:1800.5,
+    isDownbeat:false,
+    isBar:false,
+    regularized:true,
+  }]);
+});
+
 test("look-ahead emits the next grid marker for Titan latency compensation", () => {
   const events = collectRhythmEvents(analysis, 0.3, 0.4, { lookAheadSeconds:0.16 });
 
   assert.equal(events.length, 1);
   assert.equal(events[0].atSeconds, 0.5);
+});
+
+test("samples local waveform energy without opening another audio stream", () => {
+  const energyAnalysis={durationSeconds:4,peaks:[0,20,80,100,40]};
+  assert.equal(rhythmEnergyAt(energyAnalysis,2),.667);
+  assert.equal(rhythmEnergyAt(energyAnalysis,-5),.1);
+  assert.equal(rhythmEnergyAt({},2),0);
+});
+
+test("low-confidence double-time slow songs use their musical half-time grid", () => {
+  const slowSong = {
+    bpm:167.88483,
+    bpmConfidence:.2819,
+    durationSeconds:337,
+    beats:[0,.357,.714,1.071,1.428],
+    downbeats:[0],
+  };
+
+  assert.equal(Number(effectiveRhythmBpm(slowSong).toFixed(3)), 83.942);
+  const events=collectRhythmEvents(slowSong,10,10.6);
+  assert.equal(events.length,1);
+  assert.ok(events[0].regularized);
+});
+
+test("confident fast songs and operator corrections keep their original BPM", () => {
+  assert.equal(effectiveRhythmBpm({bpm:168,bpmConfidence:.8}),168);
+  assert.equal(effectiveRhythmBpm({bpm:168,bpmConfidence:1,correction:{bpm:168}}),168);
 });

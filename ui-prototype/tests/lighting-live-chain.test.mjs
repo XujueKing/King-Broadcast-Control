@@ -7,7 +7,7 @@ const appSource = await readFile(new URL("../src/App.jsx", import.meta.url), "ut
 test("PGM video opts into anonymous CORS so live frames can be sampled", () => {
   assert.match(
     appSource,
-    /<video ref=\{videoRef\}[^>]*crossOrigin="anonymous"/,
+    /<video\b[^>]*ref=\{videoRef\}[^>]*crossOrigin="anonymous"/,
   );
 });
 
@@ -24,8 +24,17 @@ test("desktop startup always restores automatic PGM colour and beat lighting", (
     appSource,
     /const \[lightingEnabled, setLightingEnabled\] = useState\(true\)/,
   );
+  assert.match(appSource, /const \[beamShowArmed,setBeamShowArmed\]=useState\(false\)/);
+  assert.match(appSource, /beamShowArmed\?beamShowControllerRef\.current\.next\(rhythmEvent\):null/);
+  assert.match(appSource, /光束点缀未布防/);
   assert.match(appSource, /invoke\("titan_update_beam"/);
-  assert.match(appSource, /shutterOpen:true/);
+  assert.match(appSource, /invoke\("titan_run_beam_show"/);
+  assert.match(appSource, /shutterOpen:false/);
+  assert.match(appSource, /source:"safety-off"/);
+  assert.match(appSource, /rhythmEnergyAt\(analysis,rhythmEvent\.atSeconds\)/);
+  assert.match(appSource, /beamShowControllerRef\.current\.next\(rhythmEvent\)/);
+  assert.match(appSource, /panValue:kingclubBeamProfile\.fixedPanValue/);
+  assert.match(appSource, /tiltValue:kingclubBeamProfile\.fixedTiltValue/);
   assert.match(appSource, /new CustomEvent\("king:beam-cue"/);
 });
 

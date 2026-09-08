@@ -1,45 +1,37 @@
-# Design QA - A1-A25 beam floor map
+# Design QA - A/B/C venue fixture map
 
-- Source visual truth: `C:\Users\leadb\Downloads\_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=1625640261098080533&skey=@crypt_c8087f27_325bd37307729b3670359ab785106299&mmweb_appid=wx_webfilehelper.jpg`
-- Source pixels: 1330 x 1650
-- Implementation screenshot: pending native desktop restart
-- Intended viewport: 2559 x 1596 desktop window
-- CSS size / density: pending native capture
-- State: Avolites Tiger Touch Pro page, live Patch loaded
+- Source visual truth: `C:\Users\leadb\Downloads\_cgi-bin_mmwebwx-bin_webwxgetmsgimg__&MsgID=1375692281528341712&skey=@crypt_c8087f27_325bd37307729b3670359ab785106299&mmweb_appid=wx_webfilehelper.jpg`
+- Source pixels: 1352 x 1634
+- Installed desktop full screenshot: `C:\Users\leadb\AppData\Local\Temp\king-light-layout-qa.png` (2561 x 1601)
+- Installed desktop focused screenshot: `C:\Users\leadb\AppData\Local\Temp\king-light-layout-focus-qa.png` (1127 x 1353)
+- Desktop CSS viewport: 1707 x 1067 at 1.5 device scale
+- State: installed `king-broadcast-control.exe`, Avolites Tiger Touch Pro page, live Patch loaded
 
 ## Full-view comparison evidence
 
-The source plan was opened at original resolution. The 25 red marker centres were measured from the source and converted to normalized percentages. The updated native desktop build has not been installed or restarted, so a rendered full-view comparison is not yet available.
+The source plan and installed desktop screenshot were opened together at original detail. The desktop page preserves the existing graphite control-shell hierarchy while the left venue-plan panel reproduces the source's three visual groups: red circular A1-A25, green circular B1-B12, and blue rectangular C1-C12. The complete page remains within the native fullscreen viewport with no clipped controls.
 
 ## Focused region comparison evidence
 
-Blocked with the same native-capture dependency. Source rows and code coordinates were checked for A1-A25 continuity, uniqueness, and row order; this is structural verification, not visual QA.
+The source plan and the focused installed venue-plan capture were opened together at original detail. All 49 markers follow the same north/middle/south row groupings and column relationships as the reference. A1, A2, A4, and A13 remain readable while also carrying distinct observation styling. The selection row and three-item legend fit without horizontal overflow.
 
 ## Findings
 
-- [P1] Native rendering has not yet been visually compared.
-  - Location: Avolites page, left venue-plan panel.
-  - Evidence: source is available, but the running installed desktop executable is still the previous build.
-  - Impact: label size, overlap, and alignment against the floor outline remain unverified.
-  - Fix: restart into the newly built desktop executable, capture the Avolites page at 2559 x 1596, compare it with the source, and correct any visible drift.
+- No P1 or P2 visible fidelity issues remain in the venue-plan panel.
+- The SVG floor outline intentionally keeps the product's existing dark venue-map treatment; fixture coordinates and group geometry, rather than the source raster's white drafting background, are the matched surfaces.
+- The live Patch banner overlaps only the empty northwest service-room area and does not cover B1/A1/C1.
 
 ## Required fidelity surfaces
 
-- Fonts and typography: blocked pending native capture.
-- Spacing and layout rhythm: blocked pending native capture.
-- Colors and visual tokens: existing dark application tokens retained; rendered result pending capture.
-- Image quality and asset fidelity: existing vector floor outline retained; marker coordinates derive from the supplied raster source.
-- Copy and content: A1-A25 labels and the unbound-TitanId warning are present in source and covered by tests.
+- Fonts and typography: passed; existing product typography retained and all A/B/C labels remain legible.
+- Spacing and layout rhythm: passed; three fixture types remain separated and preserve reference row order.
+- Colors and visual tokens: passed; A red, B green, and C blue group identity is visible without changing the surrounding graphite theme.
+- Image quality and asset fidelity: passed; existing vector floor outline remains crisp at 1.5 device scale.
+- Copy and content: passed; 25/12/12 counts, field observations, and the unbound-TitanId warning are visible.
 
 ## Comparison history
 
-- Pass 1: source inspected and marker centres measured; native implementation capture unavailable before restart.
+- Pass 1: previous A-only build was blocked before native capture.
+- Pass 2: installed desktop build captured at 2561 x 1601 and focused at 1127 x 1353; source and both captures compared at original detail; no P1/P2 mismatch found.
 
-## Implementation checklist
-
-- Restart the native desktop application into the new build.
-- Open the Avolites page with the same Patch-loaded state.
-- Capture and compare the full venue-plan panel.
-- Fix any P1/P2 marker overlap or alignment drift.
-
-final result: blocked
+final result: passed

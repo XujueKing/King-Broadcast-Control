@@ -58,7 +58,21 @@ impl AudioImporter {
                 }
             }
         };
-        prepare_encrypted_audio(audio_root)
+        let mut status = prepare_encrypted_audio(audio_root);
+        let lyrics = sync_playable_lyrics(audio_root);
+        if lyrics.synced > 0 || lyrics.ambiguous > 0 || lyrics.failed > 0 {
+            let lyric_message = format!(
+                "酷狗歌词：新增 {} 首、待确认 {} 首、失败 {} 首",
+                lyrics.synced, lyrics.ambiguous, lyrics.failed
+            );
+            if status.message.is_empty() {
+                status.message = lyric_message;
+            } else {
+                status.message.push_str("；");
+                status.message.push_str(&lyric_message);
+            }
+        }
+        status
     }
 }
 
@@ -238,6 +252,70 @@ fn is_kugou_lyrics_suffix(value: &str) -> bool {
         && is_hex(parts[2], 8)
 }
 
+fn strip_kugou_lyrics_suffix(value: &str) -> &str {
+    let Some((before_zero, zero)) = value.rsplit_once('-') else {
+        return value;
+    };
+    let Some((before_id, id)) = before_zero.rsplit_once('-') else {
+        return value;
+    };
+    let Some((display, hash)) = before_id.rsplit_once('-') else {
+        return value;
+    };
+    if is_kugou_lyrics_suffix(&format!("{hash}-{id}-{zero}")) {
+        display
+    } else {
+        value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LyricsIdentity {
+    artist: Option<String>,
+    title: String,
+    full: String,
+}
+
+fn normalize_lyrics_component(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric())
+        .collect()
+}
+
+fn lyrics_identity(value: &str) -> LyricsIdentity {
+    let display = strip_kugou_lyrics_suffix(value).trim();
+    let (artist, title) = display
+        .split_once(" - ")
+        .map(|(artist, title)| (Some(artist.trim()), title.trim()))
+        .unwrap_or((None, display));
+    LyricsIdentity {
+        artist: artist
+            .map(normalize_lyrics_component)
+            .filter(|value| !value.is_empty()),
+        title: normalize_lyrics_component(title),
+        full: normalize_lyrics_component(display),
+    }
+}
+
+fn artist_parts(value: &str) -> Vec<String> {
+    value
+        .split(['、', ',', '，', '&', '＆', '/', ';', '；'])
+        .map(normalize_lyrics_component)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn artists_overlap(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let left = artist_parts(left);
+    let right = artist_parts(right);
+    left.iter().any(|part| right.contains(part))
+}
+
 fn lyrics_match_score(source_stem: &str, candidate: &Path) -> Option<usize> {
     let candidate_stem = candidate.file_stem()?.to_string_lossy();
     if candidate_stem.eq_ignore_ascii_case(source_stem) {
@@ -252,9 +330,96 @@ fn lyrics_match_score(source_stem: &str, candidate: &Path) -> Option<usize> {
     None
 }
 
+fn fuzzy_lyrics_match_score(source_stem: &str, candidate: &Path) -> Option<usize> {
+    if let Some(score) = lyrics_match_score(source_stem, candidate) {
+        return Some(score);
+    }
+    let candidate_stem = candidate.file_stem()?.to_string_lossy();
+    let source = lyrics_identity(source_stem);
+    let candidate = lyrics_identity(&candidate_stem);
+    if source.title.is_empty() || candidate.title.is_empty() {
+        return None;
+    }
+    if source.full == candidate.full {
+        return Some(10);
+    }
+    if source.title != candidate.title {
+        return None;
+    }
+    match (&source.artist, &candidate.artist) {
+        (Some(source_artist), Some(candidate_artist))
+            if artists_overlap(source_artist, candidate_artist) =>
+        {
+            Some(20)
+        }
+        (None, Some(_)) | (None, None) => Some(30),
+        (Some(_), None) => Some(35),
+        _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LyricsMatch {
+    Found(PathBuf),
+    Ambiguous,
+    Missing,
+}
+
+fn lyrics_extension_priority(path: &Path) -> usize {
+    if path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lrc"))
+    {
+        0
+    } else {
+        1
+    }
+}
+
+fn select_lyrics_candidate(
+    source: &Path,
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> LyricsMatch {
+    let Some(source_stem) = source.file_stem().map(|value| value.to_string_lossy()) else {
+        return LyricsMatch::Missing;
+    };
+    let mut scored = candidates
+        .into_iter()
+        .filter(|path| path.is_file())
+        .filter_map(|path| fuzzy_lyrics_match_score(&source_stem, &path).map(|score| (score, path)))
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| {
+                lyrics_extension_priority(&left.1).cmp(&lyrics_extension_priority(&right.1))
+            })
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    let Some((best_score, best_path)) = scored.first() else {
+        return LyricsMatch::Missing;
+    };
+    let best_identity = best_path
+        .file_stem()
+        .map(|value| lyrics_identity(&value.to_string_lossy()));
+    let conflicts = scored
+        .iter()
+        .take_while(|(score, _)| score == best_score)
+        .filter_map(|(_, path)| {
+            path.file_stem()
+                .map(|value| lyrics_identity(&value.to_string_lossy()))
+        })
+        .any(|identity| best_identity.as_ref().is_some_and(|best| identity != *best));
+    if conflicts {
+        LyricsMatch::Ambiguous
+    } else {
+        LyricsMatch::Found(best_path.clone())
+    }
+}
+
 fn find_lyrics_sidecar(source: &Path) -> Option<PathBuf> {
-    let source_stem = source.file_stem()?.to_string_lossy();
-    let mut candidates = fs::read_dir(source.parent()?)
+    let candidates = fs::read_dir(source.parent()?)
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -265,10 +430,143 @@ fn find_lyrics_sidecar(source: &Path) -> Option<PathBuf> {
                     extension.eq_ignore_ascii_case("lrc") || extension.eq_ignore_ascii_case("krc")
                 })
         })
-        .filter_map(|path| lyrics_match_score(&source_stem, &path).map(|score| (score, path)))
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    candidates.into_iter().next().map(|(_, path)| path)
+    match select_lyrics_candidate(source, candidates) {
+        LyricsMatch::Found(path) => Some(path),
+        LyricsMatch::Ambiguous | LyricsMatch::Missing => None,
+    }
+}
+
+fn decode_text_bytes(bytes: &[u8]) -> Result<String, String> {
+    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        return String::from_utf8(bytes[3..].to_vec()).map_err(|error| error.to_string());
+    }
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        let words = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&words).map_err(|error| error.to_string());
+    }
+    if bytes.starts_with(&[0xfe, 0xff]) {
+        let words = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&words).map_err(|error| error.to_string());
+    }
+    if let Ok(value) = String::from_utf8(bytes.to_vec()) {
+        return Ok(value);
+    }
+    let (value, _, had_errors) = encoding_rs::GBK.decode(bytes);
+    if had_errors {
+        Err("歌词既不是 UTF-8/UTF-16，也不能按 GBK 解码".into())
+    } else {
+        Ok(value.into_owned())
+    }
+}
+
+fn parse_kugou_lyrics_path(contents: &str) -> Option<PathBuf> {
+    contents.lines().find_map(|line| {
+        let (key, value) = line.trim().trim_start_matches('\u{feff}').split_once('=')?;
+        if key.trim().eq_ignore_ascii_case("LyricPath") {
+            let value = value.trim().trim_matches('"');
+            (!value.is_empty()).then(|| PathBuf::from(value))
+        } else {
+            None
+        }
+    })
+}
+
+fn kugou_lyrics_directory() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("KING_KUGOU_LYRIC_PATH") {
+        let path = PathBuf::from(path);
+        return path.is_dir().then_some(path);
+    }
+    let app_data = std::env::var_os("APPDATA").map(PathBuf::from)?;
+    let ini = app_data.join("KuGou8").join("KuGou.ini");
+    let contents = decode_text_bytes(&fs::read(ini).ok()?).ok()?;
+    let path = parse_kugou_lyrics_path(&contents)?;
+    path.is_dir().then_some(path)
+}
+
+fn collect_lyrics_files(directory: &Path) -> Vec<PathBuf> {
+    fs::read_dir(directory)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|extension| {
+                        extension.eq_ignore_ascii_case("lrc")
+                            || extension.eq_ignore_ascii_case("krc")
+                    })
+        })
+        .collect()
+}
+
+fn collect_playable_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_playable_files(&path, files)?;
+        } else if path.is_file() && is_playable_extension(&path) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct LyricsSyncSummary {
+    synced: usize,
+    ambiguous: usize,
+    failed: usize,
+}
+
+fn sync_playable_lyrics(audio_root: &Path) -> LyricsSyncSummary {
+    let kugou_directory = kugou_lyrics_directory();
+    sync_playable_lyrics_with_cache(audio_root, kugou_directory.as_deref())
+}
+
+fn sync_playable_lyrics_with_cache(
+    audio_root: &Path,
+    kugou_directory: Option<&Path>,
+) -> LyricsSyncSummary {
+    let mut summary = LyricsSyncSummary::default();
+    let mut audio_files = Vec::new();
+    if collect_playable_files(audio_root, &mut audio_files).is_err() {
+        summary.failed += 1;
+        return summary;
+    }
+    let kugou_candidates = kugou_directory
+        .map(collect_lyrics_files)
+        .unwrap_or_default();
+    for audio in audio_files {
+        if audio.with_extension("lrc").is_file() {
+            continue;
+        }
+        let mut candidates = audio.parent().map(collect_lyrics_files).unwrap_or_default();
+        candidates.extend(kugou_candidates.iter().cloned());
+        match select_lyrics_candidate(&audio, candidates) {
+            LyricsMatch::Found(source) => {
+                match install_lyrics_file(&source, &audio.with_extension("lrc")) {
+                    Ok(true) => summary.synced += 1,
+                    Ok(false) => {}
+                    Err(_) => summary.failed += 1,
+                }
+            }
+            LyricsMatch::Ambiguous => summary.ambiguous += 1,
+            LyricsMatch::Missing => {}
+        }
+    }
+    summary
 }
 
 fn strip_krc_word_timing(value: &str) -> String {
@@ -342,11 +640,10 @@ fn decode_krc_bytes(bytes: &[u8]) -> Result<String, String> {
     Ok(lrc)
 }
 
-fn sync_lyrics_sidecar(source: &Path, decoded: &Path) -> Result<(), String> {
-    let Some(source_lyrics) = find_lyrics_sidecar(source) else {
-        return Ok(());
-    };
-    let destination = decoded.with_extension("lrc");
+fn install_lyrics_file(source_lyrics: &Path, destination: &Path) -> Result<bool, String> {
+    if destination.is_file() {
+        return Ok(false);
+    }
     if source_lyrics
         .extension()
         .and_then(OsStr::to_str)
@@ -357,9 +654,23 @@ fn sync_lyrics_sidecar(source: &Path, decoded: &Path) -> Result<(), String> {
         fs::write(&destination, lrc.as_bytes())
             .map_err(|error| format!("写入同名 LRC 失败：{error}"))?;
     } else {
-        fs::copy(&source_lyrics, &destination)
-            .map_err(|error| format!("复制同名 LRC 失败：{error}"))?;
+        let bytes = fs::read(source_lyrics).map_err(|error| format!("读取 LRC 失败：{error}"))?;
+        let lrc = decode_text_bytes(&bytes).map_err(|error| format!("解码 LRC 失败：{error}"))?;
+        fs::write(destination, lrc.as_bytes())
+            .map_err(|error| format!("写入同名 LRC 失败：{error}"))?;
     }
+    Ok(true)
+}
+
+fn sync_lyrics_sidecar(source: &Path, decoded: &Path) -> Result<(), String> {
+    let destination = decoded.with_extension("lrc");
+    if destination.is_file() {
+        return Ok(());
+    }
+    let Some(source_lyrics) = find_lyrics_sidecar(source) else {
+        return Ok(());
+    };
+    install_lyrics_file(&source_lyrics, &destination)?;
     Ok(())
 }
 
@@ -656,6 +967,97 @@ mod tests {
         assert!(lrc.contains("[ar:GGWVP]"));
         assert!(lrc.contains("[00:00.58]这最后"));
         assert!(!lrc.contains('<'));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reads_the_configured_kugou_lyrics_directory() {
+        let contents = "[LyricConfigSection]\r\nLockLyrics=0\r\nLyricPath=D:\\KuGou\\Lyric\\\r\n";
+        assert_eq!(
+            parse_kugou_lyrics_path(contents),
+            Some(PathBuf::from(r"D:\KuGou\Lyric\"))
+        );
+    }
+
+    #[test]
+    fn matches_title_only_audio_to_unique_artist_prefixed_kugou_lyrics() {
+        let root =
+            std::env::temp_dir().join(format!("king-kugou-title-match-{}", std::process::id()));
+        let audio_root = root.join("audio");
+        let cache = root.join("lyrics");
+        fs::create_dir_all(&audio_root).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        let audio = audio_root.join("爱如潮水 (Live).flac");
+        fs::write(&audio, b"fLaC audio marker").unwrap();
+        fs::write(
+            cache.join(
+                "GAI周延 - 爱如潮水 (Live)-952334ab58bae217283d0157c962323a-146867915-00000000.krc",
+            ),
+            encode_test_krc("[ar:GAI周延]\r\n[1000,2000]<0,500,0>爱<500,500,0>如潮水\r\n"),
+        )
+        .unwrap();
+
+        let summary = sync_playable_lyrics_with_cache(&audio_root, Some(&cache));
+
+        assert_eq!(summary.synced, 1);
+        assert_eq!(summary.ambiguous, 0);
+        assert!(fs::read_to_string(audio.with_extension("lrc"))
+            .unwrap()
+            .contains("[00:01.00]爱如潮水"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_ambiguous_title_only_lyrics() {
+        let root =
+            std::env::temp_dir().join(format!("king-kugou-ambiguous-{}", std::process::id()));
+        let audio_root = root.join("audio");
+        let cache = root.join("lyrics");
+        fs::create_dir_all(&audio_root).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        let audio = audio_root.join("答案.flac");
+        fs::write(&audio, b"fLaC audio marker").unwrap();
+        for (artist, hash) in [
+            ("歌手甲", "11111111111111111111111111111111"),
+            ("歌手乙", "22222222222222222222222222222222"),
+        ] {
+            fs::write(
+                cache.join(format!("{artist} - 答案-{hash}-123456789-00000000.krc")),
+                encode_test_krc("[1000,2000]<0,500,0>答<500,500,0>案\r\n"),
+            )
+            .unwrap();
+        }
+
+        let summary = sync_playable_lyrics_with_cache(&audio_root, Some(&cache));
+
+        assert_eq!(summary.synced, 0);
+        assert_eq!(summary.ambiguous, 1);
+        assert!(!audio.with_extension("lrc").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn never_overwrites_an_existing_lrc() {
+        let root =
+            std::env::temp_dir().join(format!("king-kugou-preserve-lrc-{}", std::process::id()));
+        let audio_root = root.join("audio");
+        let cache = root.join("lyrics");
+        fs::create_dir_all(&audio_root).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        let audio = audio_root.join("歌手 - 歌名.flac");
+        let lrc = audio.with_extension("lrc");
+        fs::write(&audio, b"fLaC audio marker").unwrap();
+        fs::write(&lrc, "[00:01.00]用户歌词\r\n").unwrap();
+        fs::write(
+            cache.join("歌手 - 歌名-33333333333333333333333333333333-123456789-00000000.krc"),
+            encode_test_krc("[1000,2000]<0,500,0>缓存歌词\r\n"),
+        )
+        .unwrap();
+
+        let summary = sync_playable_lyrics_with_cache(&audio_root, Some(&cache));
+
+        assert_eq!(summary.synced, 0);
+        assert_eq!(fs::read_to_string(&lrc).unwrap(), "[00:01.00]用户歌词\r\n");
         fs::remove_dir_all(root).unwrap();
     }
 

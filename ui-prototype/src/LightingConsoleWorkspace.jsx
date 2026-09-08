@@ -12,7 +12,7 @@ import {
   SlidersHorizontal,
   UploadSimple,
 } from "@phosphor-icons/react";
-import { venueBeamPoints } from "./venue-beam-layout.js";
+import { venueFixturePoints } from "./venue-beam-layout.js";
 
 const layerLabels = {
   "": "未分类",
@@ -52,10 +52,12 @@ const staticPlaybackObservations = [
 ];
 
 const fixtureReferenceTypes = {
-  beam: { label:"现场光束灯", count:25, Icon:LightbulbFilament },
+  beam: { label:"A组 · 光束灯", count:25, Icon:LightbulbFilament },
+  "moving-wash": { label:"B组 · 摇头三色", count:12, Icon:Lightning },
+  "led-bar": { label:"C组 · LED排灯", count:12, Icon:SlidersHorizontal },
 };
 
-const fixtureReferencePoints = venueBeamPoints;
+const fixtureReferencePoints = venueFixturePoints;
 
 export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
   titanHost,
@@ -191,11 +193,11 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
     </section>
 
     <section className="titan-stage-simulator" style={{ "--titan-preview-color": previewColor }}>
-      <header><span><b>A区 · 酒吧平面与灯位</b><small>现场光束位置图 · A1–A25 指挥编号</small></span><em>{previewPlayback ? `${previewEffect.kingName || previewPlayback.legend || `Playback ${previewPlayback.titanId}`} · ${layerLabels[previewEffect.layer || ""]}` : "等待效果配置"}</em></header>
+      <header><span><b>A区 · 酒吧平面与灯位</b><small>现场三类灯位 · A1–A25 / B1–B12 / C1–C12</small></span><em>{previewPlayback ? `${previewEffect.kingName || previewPlayback.legend || `Playback ${previewPlayback.titanId}`} · ${layerLabels[previewEffect.layer || ""]}` : "等待效果配置"}</em></header>
       <div className={`titan-venue-plan ${inventoryReady ? "inventory-ready" : "inventory-blocked"}`}>
         <div className="titan-plan-canvas">
           <img src="/assets/king-club-floor-outline.svg" alt="KING CLUB 一楼 SVG 平面轮廓"/>
-          <div className="titan-floor-points" aria-label="现场光束灯 A1 到 A25 位置">
+          <div className="titan-floor-points" aria-label="现场 A、B、C 三组灯具位置">
             {fixtureReferencePoints.map((point) => {
               const type = fixtureReferenceTypes[point.type];
               const FixtureIcon = type.Icon;
@@ -204,8 +206,8 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
                 key={point.id}
                 className={`titan-floor-point type-${point.type} status-${point.status} ${selectedFloorPoint === point.id ? "selected" : ""}`}
                 style={{ left:`${point.x}%`, top:`${point.y}%` }}
-                aria-label={`${point.label} · ${point.zone} · ${type.label}`}
-                title={`${point.label} · ${point.zone} · TitanId 待逐台定位绑定`}
+                aria-label={`${point.label} · ${point.zone} · ${type.label} · ${point.observation}`}
+                title={`${point.label} · ${point.zone} · ${point.observation} · TitanId 待逐台定位绑定`}
                 onClick={() => setSelectedFloorPoint(point.id)}
               ><span>{point.label}</span><FixtureIcon weight="fill"/></button>;
             })}
@@ -217,7 +219,7 @@ export const LightingConsoleWorkspace = memo(function LightingConsoleWorkspace({
             <small>{inventoryReady ? `${titanInventory.fixtureCount} 个 Fixture / ${titanInventory.groupCount} 个 Group 已可用于坐标绑定。` : `图中位置只依据设计图，不写入 Titan；缓存 Show：${titanInventory?.cachedShowName || "--"}。`}</small>
           </div>
         </div>
-        <div className="titan-plan-selection"><MapPin weight="fill"/><span><b>{selectedReferencePoint.label} · {selectedReferencePoint.zone}</b><small>{selectedReferenceType.label} · 现场指挥编号 · TitanId 待逐台定位绑定</small></span></div>
+        <div className={`titan-plan-selection status-${selectedReferencePoint.status}`}><MapPin weight="fill"/><span><b>{selectedReferencePoint.label} · {selectedReferencePoint.zone}</b><small>{selectedReferenceType.label} · {selectedReferencePoint.observation} · {selectedReferencePoint.titanId ? `TitanId ${selectedReferencePoint.titanId}` : "TitanId 待逐台定位绑定"}</small></span><em>{selectedReferencePoint.status === "verified" ? "已绑定" : selectedReferencePoint.status === "unverified" ? "待确认" : "现场异常"}</em></div>
         <div className="titan-floor-legend">{Object.entries(fixtureReferenceTypes).map(([id, type]) => { const LegendIcon = type.Icon; return <span key={id} className={`type-${id}`}><LegendIcon weight="fill"/><b>{type.label}</b><small>{type.count}</small></span>; })}</div>
         <div className="titan-stage-scale"><span>平面图 A区</span><small>真机地址以 Titan Fixture Patch 为唯一依据</small></div>
       </div>

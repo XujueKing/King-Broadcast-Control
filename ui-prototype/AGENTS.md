@@ -8,7 +8,7 @@ Runtime output rule: PGM and PVW are separate states. Only confirmed PGM content
 
 现场硬件连接默认自动恢复：启动时优先使用持久化的 Titan 与 Qu-16 地址并自动连接；已知地址失效时才扫描该地址所在的 /24 网段。已连接时禁止扫描或建立第二条 Qu-16 控制连接；Titan 候选必须通过已绑定控制台身份校验，Qu-16 扫描结果必须唯一才允许自动改绑。自动发现只恢复连接，不得自动播放歌曲、改推子或触发灯光 Playback。
 
-首页灯光 `0` 固定为现场确认的“暗红加特林”常规模式：仅允许控制 Show `2024.12.28` 中 Group `59` 所选的 Fixture `42/17636`，基础亮度 10%，颜色只取 Colour `70-77` 的已核对白名单。操作员明确启用自动模式后，PGM 主视频的稳定主色决定加特林色板，当前实际占主导声音的 Deck 节拍/BPM 决定受限速度与 10%-12.5% 的短促亮度起伏；黑屏、无稳定色或无有效节拍时保持暗红基线。该模式不得轮换整套 Playback，不得联动 280 光束、三色摇头或 LED 排灯，也不得突破暗场亮度和速度限制。
+首页灯光 `0` 固定为现场确认的“暗红加特林 + A组光束”常规自动模式：仅允许控制 Show `2024.12.28` 中 Group `59` 所选的 Fixture `42/17636` 及已核验的 A1-A25 光束白名单；禁止直接使用包含额外未知灯具的 Group `57` 输出。加特林基础亮度 10%，颜色只取 Colour `70-77` 的已核对白名单；操作员明确启用自动模式后，PGM 主视频的稳定主色决定加特林色板，当前实际占主导声音的 Deck 节拍/BPM 决定加特林速度与短促亮度起伏。A组光束不是常驻环境灯：光束点缀必须通过独立布防开关启用且该开关不得跨重启保存；未布防、停止播放或关闭联动时必须调光归零并关闭快门。布防后只在歌曲开始至少16拍且波形能量达到门槛的重拍小节触发一次六拍短秀，按“南区第二排→南区第一排→中区第二排→中区第一排→北区第二排→北区第一排”逐排亮起；整段只使用一次固定约90度落点，不持续 Pan/Tilt，每排最多保持一拍，结束立即熄回并至少冷却128拍。光束只作偶发点缀，禁止持续巡航、连续触发和每拍甩头。黑屏、无稳定色或无有效节拍时只保留暗红加特林常规基线。该模式不得轮换整套 Playback，三色摇头和 LED 排灯在完成逐台映射前不得自动加入。
 
 Runtime media milestone: the desktop app owns `%APPDATA%/club.king.broadcast-control/media/videos`, `media/audio`, and `media/images`. It rescans local video/audio folders while running. Until the bundled mpv sidecar replaces it, real MP4 playback uses the WebView2 media element in PGM/output; PVW and the operator-side PGM monitor must stay muted to prevent duplicate venue audio. The output window alone may emit the video's own audio, controlled by the independent R1 video-audio toggle.
 
@@ -62,6 +62,8 @@ Runtime editions are hardware-capability based, not separate source branches. At
 
 KGM/KGMA/VPR 必须由独立 `audio_importer` 在曲库扫描阶段识别和本地解码，默认保留用户原文件，将产物统一写入 `media/audio/.king-imported/<源相对目录>/`，音频使用可读的原歌曲名，不得再创建不可读的版本哈希歌曲目录。成功导入后即使用户手工删除源 KGMA，已转换音频和歌词也必须保留；程序不得自动删除用户源文件。KRC/LRC 可晚于歌曲放入，扫描时必须按完全同名或酷狗哈希尾缀自动配对，并在统一产物目录生成与音频完全同名的 UTF-8 LRC。不得把解码逻辑写进 MPV。产物扩展名必须按文件头重新判断，禁止信任解码器的默认 `.mp3`。解码器固定版本和 SHA-256，安装包离线携带；每次曲库扫描不得联网。
 
+歌词自动发现不能假定歌曲文件与歌词文件完全同名。曲库扫描必须读取本机 `%APPDATA%/KuGou8/KuGou.ini` 的 `LyricPath` 并离线索引该目录，同时搜索歌曲所在目录；匹配前去掉酷狗哈希尾缀并拆分歌手、标题及 Live/DJ 等版本标记。只有标题一致且歌手一致/重叠，或无歌手歌曲对应唯一标题候选时才允许自动生成同名 UTF-8 LRC；同分重名候选必须保留为待确认，禁止猜配。用户已有的同名 LRC 永远不得覆盖。
+
 KGMA 解码产物不是永久“仅播放”特例：全功能 NVIDIA 机器必须像普通歌曲一样自动进入人声/伴奏制作队列；无 NVIDIA 播放机不得运行 AI，但必须按音频内容指纹复用高性能机器已完成的 vocals/no_vocals，不能因解码产物移动目录而丢失原唱/伴唱绑定。
 
 When LRC data only provides sentence start timestamps, the current lyric must never remain visible indefinitely until the next timestamp. Estimate a natural singing duration from the text: continuous lyrics may remain until the next timestamp, but when the next line is separated by a clear instrumental gap, move the completed line upward, shrink it, and fade it out on the existing 720 ms lyric timeline. Keep the lyric area empty during the gap and introduce the next line only at its own timestamp. The final lyric must expire by the same rule.
@@ -74,7 +76,7 @@ Newly produced v6 song assets must also contain a compact 48 kHz/128-frame `refe
 
 顶部品牌标题固定为“AI Broadcast Control 2027”。NVIDIA 全功能版状态使用 NVIDIA 官方完整横版标志，不使用闪电图标或手写 NVIDIA 文字；状态区域保持透明底色。
 
-全功能版 AI 制作采用非破坏性三级调度：正在播放歌曲为 0 级、已装入 Deck 的待播歌曲为 1 级、其余曲库为 2 级。播放开始不得杀死 Worker/MOSS 或暂停整队；Worker 始终保持 Windows Idle 优先级、并发 1，当前任务完成后再按级别领取下一首。
+全功能版 AI 制作采用播放优先的非破坏性调度：任一 Deck 有声播放时必须立即停止 Worker/MOSS 并释放 GPU，设置页显示“播放保护 · 制作已暂停”；两个 Deck 都停止后才自动恢复制作。操作员从停止状态开始播放时，必须先等待 AI 进程树停止成功，再允许 mpv 出声；保护失败必须阻止开播并提示，禁止先出声再异步停 Worker。被中断任务必须保留为可重试队列，不能丢失已发布成品。无人播放时，已装入 Deck 的待播歌曲为 1 级、其余曲库为 2 级；Worker 保持 Windows Idle 优先级、并发 1。现场已确认在 BS-RoFormer/MOSS 制作期间继续播放会出现机械音/电流音，禁止只依赖进程低优先级同时运行。
 
 开业播放期间必须允许操作员在“设置”中手动关闭整个 AI 歌曲制作后台。该开关持久化到桌面应用数据；关闭时立即停止并保持停止 MOSS 8B、分轨/歌词 Worker，释放 GPU/显存，但不得影响 mpv、Deck、Qu-16、歌单、已制作伴唱/歌词或 Vocal Engine 播放能力。重启后继续保持关闭，只有操作员明确重新开启才恢复制作。
 
@@ -215,3 +217,17 @@ R1 视频素材卡片的鼠标悬停和键盘聚焦只允许显示普通交互�
 底部“视频管理”和“灯光管理”合并为统一的“演出编排”，音乐管理只保留歌曲项目入口和旧版单关联兼容；Avolites Tiger Touch Pro 仍作为独立硬件映射/控制栏目。演出编排采用用户确认的双监看方案：上半区为 PVW/PGM、Deck 预载/播放状态、Crossfader 跟随和唯一灯光主控；下半区为歌曲锁定波形、段落、V1/V2、图片、文字、灯光多轨时间线。进入编辑器、选择素材或试听时间线不得自动播放歌曲、上屏或触发 Titan。
 
 演出编排项目按歌曲稳定身份独立持久化，格式标识为 `club.king.show-project`、当前版本为 `1`。每个轨道和片段必须有稳定 ID；歌曲音轨锁定不可移动/删除；V1/V2 视频片段可跨轨拖动，图片、文字和灯光只能进入对应类型轨道。所有裁切更新必须约束源出点大于源入点、时间线时长大于零且不超过歌曲时长。保存、恢复和编辑只更新项目数据，禁止隐式调用 Deck 播放、PGM Take 或 Titan Fire。
+
+2026-09-03 现场灯位图以用户提供的三组编号为准：A1–A25 为光束灯，B1–B12 为摇头三色，C1–C12 为 LED 排灯；所有字母编号仅用于场内指挥，在逐台 Locate 完成前 `titanId` 必须保持空。当前已确认的 A 组异常是 A1 弱光花、A2 与 A13 有待机光但无花、A4 全黑且无待机灯；未报告的灯只能显示“待现场确认”，不得推断为正常。更新平面登记不得触发 Playback、写入 DMX 或改变 Qu-16/音频状态。
+
+2026-09-03 加特林现场修正：Fixture `42/17636` 当前只确认 Colour `71/33207` 红色与 Colour `73/33219` 蓝色有效；Colour `72/33214` 会令加特林熄灭，禁止自动调用。其它色板逐项验收前，PGM 红/橙/黄归并为红，绿/青/蓝/紫归并为蓝，中性色回到红色基线。节拍分析不得再降到 `8 kHz`；真实曲目《Active》因此被误判为 `84.5 BPM`，约 `22.05 kHz` 与 BPM 融合实测恢复为 `112.9 BPM`。
+
+慢歌灯光必须按听感半拍而不是检测器双倍 BPM 工作：当分析 BPM ≥145 且置信度低于0.55时，自动按半速驱动灯光并在 Deck 显示半速值。100 BPM 以下的加特林采用暗场约4%-12%的星点、微闪、呼吸与绽放曲线，内部速度限制在约0.12-0.22，允许每拍有小幅动作但禁止大幅硬切或套用快歌强闪。自动常规模式中快歌加特林也必须保持暗场，普通拍约14%、强小节最高约30%。Titan 加特林更新必须采用“单批在途、只保留最新一拍”的合并队列；禁止逐拍积压网络命令，光束短秀不得排在陈旧加特林命令之后延迟触发。慢歌从第8拍后可在中等能量小节穿插一次六排南到北温柔光束，至少冷却32拍；常规歌曲至少冷却64拍，仍禁止连续巡航或常亮。
+
+首页视频素材网格必须分批渲染，冷启动最多挂载48个素材卡片，只有滚动接近底部或操作员明确点击“加载更多”时才追加下一批；未挂载素材不得创建 DOM、监听器或缩略图任务。已挂载但尚未接近可视区域的卡片继续遵守 IntersectionObserver 可视区门控，禁止恢复全库预热。
+
+本地音视频目录自动扫描间隔不得短于30秒，且前一次扫描未结束时禁止重叠启动下一次扫描。AI 制作任务登记必须同时满足本机支持 AI 且持久化运行开关明确为开启；开关为关闭、未完成读取或运行中被关闭时，禁止继续登记、哈希或排队新歌曲。
+
+2026-09-06 视频与音乐默认使用顺序自动播放模式并在列表末尾回到首项。音乐保持各 Deck 的真实来源分类，不受 L 区浏览影响；视频在首次 Take 时捕获所选分类的有序队列，之后切换分类、编辑 PVW 不得改变 PGM 队列。桌面输出窗口是视频结束事件的唯一时钟，事件必须校验当前素材和递增 token，避免旧事件或重复事件连续跳片。视频自身声音默认静音；默认顺播模式不等于获准开机即向主扩出声，音乐仍先装载今日首曲等待操作员播放。
+
+mpv 同步 IPC、装载和定位等待必须在后台阻塞线程执行，不得阻塞 Tauri 主线程或异步调度器。淡化音量写入仅返回写入确认，禁止每步额外拉取全部播放状态；IPC 读失败不得伪装成暂停、零进度或播完。切换原唱/伴奏必须先归零并暂停，校验新路径完成装载和精确定位稳定后再恢复。故障诊断只订阅播放器事件，不得增加音频输出或录制现场；真实播放器集成测试强制使用 null 输出，禁止送入现场音响。

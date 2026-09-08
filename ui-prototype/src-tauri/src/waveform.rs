@@ -50,7 +50,8 @@ pub struct RhythmCorrection {
     pub beats_per_bar: u8,
 }
 
-const ANALYSIS_VERSION: &str = "v4";
+const ANALYSIS_VERSION: &str = "v7";
+const MAX_RHYTHM_ANALYSIS_SECONDS: usize = 3 * 60;
 
 impl WaveformCache {
     fn get(&self, key: &str) -> Option<AudioAnalysis> {
@@ -389,7 +390,11 @@ fn decode_audio_analysis(path: &Path, sample_count: usize) -> Result<AudioAnalys
         let specification = *decoded.spec();
         if sample_rate == 0 {
             sample_rate = specification.rate;
-            rhythm_factor = (sample_rate / 8_000).max(1) as usize;
+            // 8 kHz removed too much hi-hat/snare transient detail and caused
+            // low-confidence tempo errors on real club tracks (for example
+            // 113 BPM being detected as 84.5 BPM). Keep at least ~22.05 kHz
+            // for rhythm analysis while still reducing 44.1/48/96 kHz input.
+            rhythm_factor = (sample_rate / 22_050).max(1) as usize;
         }
         let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, specification);
         samples.copy_interleaved_ref(decoded);
@@ -399,7 +404,11 @@ fn decode_audio_analysis(path: &Path, sample_count: usize) -> Result<AudioAnalys
             rhythm_accumulator += mono;
             rhythm_accumulator_count += 1;
             if rhythm_accumulator_count == rhythm_factor {
-                rhythm_samples.push(rhythm_accumulator / rhythm_accumulator_count as f32);
+                let rhythm_sample_limit =
+                    (sample_rate as usize / rhythm_factor) * MAX_RHYTHM_ANALYSIS_SECONDS;
+                if rhythm_samples.len() < rhythm_sample_limit {
+                    rhythm_samples.push(rhythm_accumulator / rhythm_accumulator_count as f32);
+                }
                 rhythm_accumulator = 0.0;
                 rhythm_accumulator_count = 0;
             }
@@ -425,7 +434,12 @@ fn decode_audio_analysis(path: &Path, sample_count: usize) -> Result<AudioAnalys
         let rms = (block_square_sum / block_frames as f32).sqrt();
         block_peaks.push((rms * 0.84 + block_peak * 0.16).clamp(0.0, 1.0));
     }
-    if rhythm_accumulator_count > 0 {
+    let rhythm_sample_limit = if sample_rate > 0 {
+        (sample_rate as usize / rhythm_factor) * MAX_RHYTHM_ANALYSIS_SECONDS
+    } else {
+        0
+    };
+    if rhythm_accumulator_count > 0 && rhythm_samples.len() < rhythm_sample_limit {
         rhythm_samples.push(rhythm_accumulator / rhythm_accumulator_count as f32);
     }
     let peaks = resample_peaks(&block_peaks, sample_count);
@@ -434,6 +448,9 @@ fn decode_audio_analysis(path: &Path, sample_count: usize) -> Result<AudioAnalys
         let mut rhythm_config = stratum_dsp::AnalysisConfig::default();
         // Beat/Bar 时间必须与 mpv 的原文件 time-pos 共用绝对时间轴，不能裁掉片头静音。
         rhythm_config.enable_silence_trimming = false;
+        // Fuse the legacy onset estimate with the tempogram. This improves
+        // low-confidence genre material without opening another audio stream.
+        rhythm_config.enable_bpm_fusion = true;
         stratum_dsp::analyze_audio(&rhythm_samples, rhythm_sample_rate, rhythm_config).ok()
     } else {
         None

@@ -20,8 +20,9 @@ import {
   resolvePlaybackChainForDeck,
   resetDeckVocalModeForTrackChange,
 } from "./media-runtime.js";
-import { collectRhythmEvents } from "./rhythm-runtime.js";
+import { collectRhythmEvents, effectiveRhythmBpm, rhythmEnergyAt } from "./rhythm-runtime.js";
 import { reconcileStableAssets } from "./media-scan-stability.js";
+import { captureVideoQueue, nextProgramVideo } from "./video-playback.js";
 import { lyricAtTime, parseLrc, selectLyricsDeck } from "./lyrics-runtime.js";
 import { applyPreferredLyricsFont, mergeFontFamilies, registerCustomFonts } from "./font-runtime.js";
 import {
@@ -69,7 +70,14 @@ import {
   updatePlaylistLibrary,
   updatePlaylistTracks,
 } from "./playlist-management.js";
-import { prewarmPersistentVideoThumbnails } from "./video-thumbnail-cache.js";
+import { getPersistentVideoThumbnail } from "./video-thumbnail-cache.js";
+import {
+  MEDIA_SCAN_INTERVAL_MS,
+  VIDEO_GRID_INITIAL_LIMIT,
+  nextVideoRenderLimit,
+  shouldExtendVideoGrid,
+  shouldQueueAudioAiAnalysis,
+} from "./ui-performance.js";
 import { defaultMixerModelId, mixerModelById, mixerModels } from "./mixer-models/index.js";
 import {
   rhythmEventMatchesRule,
@@ -79,11 +87,12 @@ import {
 import { createLightingAutomationState, lightingCueIsAuthorized, planLightingCue } from "./lighting-automation.js";
 import { sampleVideoColor } from "./video-color-runtime.js";
 import {
+  createLatestOnlyAsyncQueue,
   gatlingPaletteForVideoFamily,
   gatlingPulseForRhythm,
   kingclubGatlingProfile,
 } from "./gatling-runtime.js";
-import { beamPulseForRhythm, kingclubBeamProfile } from "./beam-runtime.js";
+import { createBeamShowController, kingclubBeamProfile } from "./beam-runtime.js";
 import { createLightingPackage, normalizeLightingPackage } from "./lighting-package.js";
 import {
   clearTitanSimulator,
@@ -381,11 +390,44 @@ const formatDateTime = (date) => {
 
 function MediaThumbnail({ item }) {
   const playableVideo = isPlayableVideoSource(item.src);
-  const thumbnailUrl = playableVideo ? item.thumbnailSrc ?? "" : item.src;
+  const suppliedThumbnailUrl = playableVideo ? item.thumbnailSrc ?? "" : item.src;
+  const [thumbnailUrl, setThumbnailUrl] = useState(suppliedThumbnailUrl);
+  const frameRef = useRef(null);
   const duration = item.duration ?? "--:--";
 
+  useEffect(() => {
+    let disposed = false;
+    let observer = null;
+    setThumbnailUrl(suppliedThumbnailUrl);
+    if (!playableVideo || suppliedThumbnailUrl || !item.path) return undefined;
+
+    const loadThumbnail = () => {
+      void getPersistentVideoThumbnail(item)
+        .then((url) => {
+          if (!disposed && url) setThumbnailUrl(url);
+        })
+        .catch((error) => console.error(`生成视频缩略图失败：${item.name ?? item.path}`, error));
+    };
+
+    if (typeof IntersectionObserver === "undefined") {
+      loadThumbnail();
+      return () => { disposed = true; };
+    }
+
+    observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer?.disconnect();
+      loadThumbnail();
+    }, { rootMargin:"160px" });
+    if (frameRef.current) observer.observe(frameRef.current);
+    return () => {
+      disposed = true;
+      observer?.disconnect();
+    };
+  }, [item.path, item.sizeBytes, item.modifiedUnixMs, item.name, playableVideo, suppliedThumbnailUrl]);
+
   return <>
-    <div className={`media-thumbnail-frame ${thumbnailUrl ? "ready" : "pending"}`}>
+    <div ref={frameRef} className={`media-thumbnail-frame ${thumbnailUrl ? "ready" : "pending"}`}>
       {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" decoding="async"/> : <b aria-hidden="true"/>}
     </div>
     <span>{duration}</span>
@@ -693,6 +735,8 @@ function DeckSignalMeter({ number, side, peaks, progress, durationSeconds, playi
   return <div ref={rootRef} className={`waveform deck-signal-meter deck-signal-meter-${side} ${playing?"is-live":""}`} data-motion-paused={motionPaused?"true":"false"} role="meter" aria-label={`Deck ${number} 实时输出电平`} aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span ref={fillRef}/></div>;
 }
 
+const AI_RESCUE_FEATURE_ENABLED=false;
+
 function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, onPrevious, onReplay, onNext, active, side, level, progress, onSeek, playbackMode, onPlaybackModeChange, automationOwner, lyricsEnabled, lyricsAvailable, vocalMode, accompanimentAvailable, aiRescueEnabled, aiReferenceStatus, onAiRescueToggle, onLyricsToggle, onVocalToggle, cueActive, cueAvailable, cueBusy, cueMessage, onCueToggle, meterMotionPaused }) {
   const demoWaveformPeaks = useMemo(() => buildWaveformPeaks(track.title, WAVEFORM_PEAK_COUNT), [track.title]);
   const dragRef = useRef(null);
@@ -705,13 +749,16 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
   const durationSeconds = parseDuration(track.duration);
   const displayedProgress = Math.min(durationSeconds, Math.max(0, seekPreview ?? progress));
   const waveformPeaks = analysis?.peaks?.length ? analysis.peaks : track.path ? [] : demoWaveformPeaks;
-  const analyzedBpm = Number(analysis?.bpm) > 0 ? Number(analysis.bpm).toFixed(1).replace(/\.0$/, "") : track.bpm;
+  const effectiveBpm = effectiveRhythmBpm(analysis);
+  const analyzedBpm = effectiveBpm > 0 ? effectiveBpm.toFixed(1).replace(/\.0$/, "") : track.bpm;
   const aiReferenceBusy = ["checking","binding"].includes(aiReferenceStatus?.state);
   const aiReferenceReady = Boolean(aiReferenceStatus?.ready);
   const aiReferenceBound = Boolean(aiReferenceStatus?.bound);
-  const aiRescueActive = vocalMode==="accompaniment"&&aiReferenceReady&&aiRescueEnabled;
+  const aiRescueActive = AI_RESCUE_FEATURE_ENABLED&&vocalMode==="accompaniment"&&aiReferenceReady&&aiRescueEnabled;
   const showCover = Boolean(track.coverSrc)&&!coverFailed;
-  const aiRescueTitle = vocalMode!=="accompaniment"
+  const aiRescueTitle = !AI_RESCUE_FEATURE_ENABLED
+    ? "补音功能暂时关闭；伴唱只播放纯伴奏"
+    : vocalMode!=="accompaniment"
     ? "先开启伴唱模式，再使用 AI 补音"
     : aiReferenceBusy
       ? aiReferenceStatus?.message||"正在检查歌手补音参考"
@@ -728,7 +775,7 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
       ?? analysis?.bars?.[0]
       ?? displayedProgress;
     setRhythmDraft({
-      bpm:String(Number(analysis?.correction?.bpm ?? analysis?.bpm ?? 120).toFixed(2)).replace(/0+$/, "").replace(/\.$/, ""),
+      bpm:String(Number(analysis?.correction?.bpm ?? (effectiveBpm || 120)).toFixed(2)).replace(/0+$/, "").replace(/\.$/, ""),
       firstDownbeatSeconds:Number(firstDownbeat).toFixed(3),
       beatsPerBar:String(analysis?.correction?.beatsPerBar ?? 4),
     });
@@ -852,7 +899,7 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
     ><WaveformCanvas key={track.title} peaks={waveformPeaks} beats={analysis?.beats} downbeats={analysis?.downbeats} bars={analysis?.bars} bpm={analysis?.bpm} progress={displayedProgress} durationSeconds={durationSeconds} side={side} seeking={seekPreview!==null} />{track.path&&!analysis&&<span className="waveform-pending">波形与节拍分析中</span>}</div>
     <div className="time-row"><span>{formatDuration(displayedProgress)}</span><span>{track.duration}</span></div>
     <div className="deck-bottom-controls">
-      <div className="transport" role="group" aria-label={`Deck ${number} 曲目控制`}><button type="button" className="track-step previous" aria-label={`Deck ${number} 装载上一首并暂停`} title="装载上一首（暂停）" onClick={onPrevious}><SkipBack weight="fill" /></button><button type="button" className="track-step replay" aria-label={`Deck ${number} 从头重放当前歌曲`} title="从头重放" onClick={onReplay}><ArrowCounterClockwise weight="bold" /></button><button type="button" className={`vocal-rescue-toggle ${aiRescueActive?"active":""} ${aiReferenceReady?"ready":"missing"} ${aiReferenceBusy?"busy":""}`} aria-label={`Deck ${number} ${aiRescueActive?"关闭":"打开"} AI 补音`} aria-pressed={aiRescueActive} disabled={vocalMode!=="accompaniment"||!aiReferenceReady||aiReferenceBusy} onClick={onAiRescueToggle} title={aiRescueTitle}>{aiReferenceBusy?"准备":aiReferenceReady?"补音✓":"补音"}</button><button type="button" className="track-step next" aria-label={`Deck ${number} 装载下一首并暂停`} title="装载下一首（暂停）" onClick={onNext}><SkipForward weight="fill" /></button><button type="button" className={`deck-extra-toggle lyrics-toggle ${lyricsEnabled?"active":""} ${!lyricsAvailable?"missing":""}`} aria-label={`Deck ${number} ${lyricsAvailable?(lyricsEnabled?"关闭":"打开"):"未找到"}歌词`} aria-pressed={lyricsEnabled&&lyricsAvailable} onClick={onLyricsToggle} title={lyricsAvailable?(lyricsEnabled?"关闭歌词":"打开歌词"):"未找到同名 LRC 歌词文件"}>{lyricsAvailable?"词":"无词"}</button></div>
+      <div className="transport" role="group" aria-label={`Deck ${number} 曲目控制`}><button type="button" className="track-step previous" aria-label={`Deck ${number} 装载上一首并暂停`} title="装载上一首（暂停）" onClick={onPrevious}><SkipBack weight="fill" /></button><button type="button" className="track-step replay" aria-label={`Deck ${number} 从头重放当前歌曲`} title="从头重放" onClick={onReplay}><ArrowCounterClockwise weight="bold" /></button><button type="button" className={`vocal-rescue-toggle ${aiRescueActive?"active":""} ${aiReferenceReady?"ready":"missing"} ${aiReferenceBusy?"busy":""}`} aria-label={`Deck ${number} AI 补音暂时关闭`} aria-pressed={aiRescueActive} disabled={!AI_RESCUE_FEATURE_ENABLED||vocalMode!=="accompaniment"||!aiReferenceReady||aiReferenceBusy} onClick={onAiRescueToggle} title={aiRescueTitle}>{AI_RESCUE_FEATURE_ENABLED?(aiReferenceBusy?"准备":aiReferenceReady?"补音✓":"补音"):"补音停"}</button><button type="button" className="track-step next" aria-label={`Deck ${number} 装载下一首并暂停`} title="装载下一首（暂停）" onClick={onNext}><SkipForward weight="fill" /></button><button type="button" className={`deck-extra-toggle lyrics-toggle ${lyricsEnabled?"active":""} ${!lyricsAvailable?"missing":""}`} aria-label={`Deck ${number} ${lyricsAvailable?(lyricsEnabled?"关闭":"打开"):"未找到"}歌词`} aria-pressed={lyricsEnabled&&lyricsAvailable} onClick={onLyricsToggle} title={lyricsAvailable?(lyricsEnabled?"关闭歌词":"打开歌词"):"未找到同名 LRC 歌词文件"}>{lyricsAvailable?"词":"无词"}</button></div>
       <div className="deck-playback-modes" role="group" aria-label={`Deck ${number} 播放模式`}>{playbackModes.map(([id,label,Icon])=><button type="button" key={id} className={playbackMode===id?"active":""} aria-label={label} aria-pressed={playbackMode===id} onClick={()=>onPlaybackModeChange(id)} title={label}><Icon weight={playbackMode===id?"fill":"regular"}/></button>)}<button type="button" className="active vocal-toggle" aria-label={`Deck ${number} 当前${vocalMode==="original"?"原唱":"伴唱"}，点击切换`} aria-pressed={vocalMode==="accompaniment"} disabled={!accompanimentAvailable} onClick={onVocalToggle} title={!accompanimentAvailable?"伴唱音轨尚未生成":vocalMode==="original"?"当前原唱，点击切换为伴唱（保持 Deck 当前音量）":"当前伴唱（保持 Deck 当前音量），点击切换为原唱"}>{vocalMode==="original"?"原唱":"伴唱"}</button></div>
     </div>
     {rhythmEditorOpen&&<div className={`rhythm-editor rhythm-editor-${side}`} role="dialog" aria-label={`Deck ${number} 节拍网格校正`}>
@@ -883,7 +930,7 @@ const LED_LOGICAL_HEIGHT = 2304;
 // true proportional representation instead of a second, independently sized UI.
 const LED_TEXT_UNIT_SCALE = 3.2;
 
-export function MediaOutputScreen({ media, track, lyrics = null, transform = defaultMediaTransform, allowAudio = false, videoRef = null, editable = false, selectedElementId = null, selectedElementIds = [], onElementSelect, onElementChange, onEditStart }) {
+export function MediaOutputScreen({ media, track, lyrics = null, transform = defaultMediaTransform, allowAudio = false, videoRef = null, playback = null, onVideoEnded, editable = false, selectedElementId = null, selectedElementIds = [], onElementSelect, onElementChange, onEditStart }) {
   const screenRef = useRef(null);
   const overlayDragRef = useRef(null);
   const inlineEditorRef = useRef(null);
@@ -994,7 +1041,7 @@ export function MediaOutputScreen({ media, track, lyrics = null, transform = def
   return <div ref={screenRef} className={`led-screen ${baseMedia.type === "image" && !baseMedia.src ? "black-output" : ""}`}>
     <div className="led-physical-canvas" style={style}>
     {baseMedia.src&&(isPlayableVideoSource(baseMedia.src)
-      ? <video ref={videoRef} className={`media-source fit-${transform.fit}`} src={baseMedia.src} crossOrigin="anonymous" autoPlay loop playsInline muted={!allowAudio||baseMedia.muted!==false} draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>
+      ? <video key={`${baseMedia.id}:${playback?.token??"preview"}`} ref={videoRef} className={`media-source fit-${transform.fit}`} src={baseMedia.src} crossOrigin="anonymous" autoPlay loop={!playback||playback.mode!=="sequence"} onEnded={()=>onVideoEnded?.({mediaId:baseMedia.id,token:playback?.token})} playsInline muted={!allowAudio||baseMedia.muted!==false} draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>
       : <img className={`media-source fit-${transform.fit}`} src={baseMedia.src} alt="" draggable="false" style={{left:`${50+transform.x}%`,top:`${50+transform.y}%`,transform:`translate(-50%,-50%) scale(${transform.scaleX},${transform.scaleY})`}}/>)}
     {media.type === "text"&&<div className={`led-text-canvas ${editable?"is-editable":""}`} onPointerDown={editable?(event)=>{if(event.target===event.currentTarget)onElementSelect?.(null)}:undefined} onPointerMove={moveElementDrag} onPointerUp={endElementDrag} onPointerCancel={endElementDrag}>
       {editable && !(media.elements ?? []).length && <div className="text-empty-editor-hint"><b>新图文画面</b><small>请从右侧选择预设模板后开始编辑</small></div>}
@@ -1432,7 +1479,7 @@ function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitor
     </header>
     <section className={`settings-ai-runtime ${aiRuntimeEnabled?"enabled":"disabled"}`} aria-label="AI 歌曲制作运行开关">
       <div className="settings-ai-runtime-identity"><Lightning weight="fill"/><span><b>AI 歌曲制作</b><small>控制 MOSS 8B、分轨和歌词制作后台；不影响 Deck、mpv、Qu-16 或已制作歌曲</small></span></div>
-      <div className="settings-ai-runtime-state" role="status"><i/><span><b>{!aiRuntimeAvailable?"本机为播放版":aiRuntimeEnabled?(audioAiWorker.running?"制作后台运行中":"制作后台启动中"):"开业模式 · AI 已关闭"}</b><small>{!aiRuntimeAvailable?"本机不会启动 MOSS 与制作 Worker":audioAiWorker.message||(aiRuntimeEnabled?"正在读取后台状态":"MOSS 与 Worker 均未运行")}</small></span></div>
+      <div className="settings-ai-runtime-state" role="status"><i/><span><b>{!aiRuntimeAvailable?"本机为播放版":aiRuntimeEnabled?(audioAiWorker.running?"制作后台运行中":audioAiWorker.playbackProtected?"播放保护 · 制作已暂停":"制作后台启动中"):"开业模式 · AI 已关闭"}</b><small>{!aiRuntimeAvailable?"本机不会启动 MOSS 与制作 Worker":audioAiWorker.message||(aiRuntimeEnabled?"正在读取后台状态":"MOSS 与 Worker 均未运行")}</small></span></div>
       <button type="button" className="settings-ai-runtime-toggle" role="switch" aria-checked={aiRuntimeEnabled} disabled={!aiRuntimeAvailable||aiRuntimeBusy} onClick={()=>onAiRuntimeEnabledChange(!aiRuntimeEnabled)}><span/><b>{aiRuntimeBusy?"处理中":aiRuntimeEnabled?"关闭 AI 制作":"开启 AI 制作"}</b></button>
     </section>
     <section className="settings-mixer-model" aria-label="调音台型号设置">
@@ -1592,7 +1639,7 @@ export function App() {
   },[]);
   const [deckLyricsEnabled, setDeckLyricsEnabled] = useState({ 1: true, 2: true });
   const [deckVocalModes, setDeckVocalModes] = useState({ 1: "original", 2: "original" });
-  const [deckAiRescueEnabled, setDeckAiRescueEnabled] = useState({ 1: true, 2: true });
+  const [deckAiRescueEnabled, setDeckAiRescueEnabled] = useState({ 1: false, 2: false });
   const [selectedVocalProfileId,setSelectedVocalProfileId]=useState(loadSelectedVocalProfileId);
   const [deckReferenceStatus,setDeckReferenceStatus]=useState({
     1:createDeckReferenceStatus(),
@@ -1626,6 +1673,12 @@ export function App() {
   const [runtimeCapability, setRuntimeCapability] = useState({ mode:desktopRuntime?"detecting":"player", hasNvidia:false, aiProcessingAvailable:false, message:desktopRuntime?"正在识别硬件":"浏览器播放版" });
   const [audioAiJobs, setAudioAiJobs] = useState([]);
   const [audioAiWorker, setAudioAiWorker] = useState({ enabled:null, running:false, message:"正在读取 AI 制作状态" });
+  const audioAiQueueAllowed = shouldQueueAudioAiAnalysis(
+    runtimeCapability.aiProcessingAvailable,
+    audioAiWorker.enabled,
+  );
+  const audioAiQueueAllowedRef = useRef(audioAiQueueAllowed);
+  audioAiQueueAllowedRef.current = audioAiQueueAllowed;
   const [aiRuntimeBusy,setAiRuntimeBusy]=useState(false);
   const [manualAiPendingPaths, setManualAiPendingPaths] = useState([]);
   const [songPackageDirectories, setSongPackageDirectories] = useState({ inboxDirectory:"", outboxDirectory:"" });
@@ -1834,7 +1887,8 @@ export function App() {
   useEffect(() => {
     if (!desktopRuntime) return;
     const deck = selectDominantDeck(playingDecks,crossfade) ?? (crossfade < 50 ? 1 : 2);
-    const enabled = deckVocalModes[deck] === "accompaniment"
+    const enabled = AI_RESCUE_FEATURE_ENABLED
+      && deckVocalModes[deck] === "accompaniment"
       && Boolean(deckAiRescueEnabled[deck])
       && Boolean(deckReferenceStatus[deck]?.bound);
     invoke("vocal_set_rescue_enabled",{enabled})
@@ -2005,6 +2059,12 @@ export function App() {
   const [imageLibraryDirectory, setImageLibraryDirectory] = useState("");
   const [selectedImage, setSelectedImage] = useState(blackScreenImage.id);
   const [outputMedia, setOutputMedia] = useState({ ...blackScreenImage, type:"image" });
+  const [videoPlayback,setVideoPlayback]=useState({mode:"sequence",queueIds:[],mediaId:null,token:0});
+  const videoPlaybackRef=useRef(videoPlayback);
+  const updateVideoPlayback=useCallback((next)=>{
+    videoPlaybackRef.current=next;
+    setVideoPlayback(next);
+  },[]);
   const [hoverMedia, setHoverMedia] = useState(null);
   const [stagedMedia, setStagedMedia] = useState(null);
   const [stagedTransform, setStagedTransform] = useState(null);
@@ -2026,6 +2086,7 @@ export function App() {
   const [videoAudioEnabled, setVideoAudioEnabled] = useState(false);
   const [mediaType, setMediaType] = useState("video");
   const [mediaCategory, setMediaCategory] = useState("全部");
+  const [videoRenderLimit, setVideoRenderLimit] = useState(VIDEO_GRID_INITIAL_LIMIT);
   // Venue startup is deterministic: always return to automatic lighting so a
   // stale manual preset cannot disable PGM colour and music-beat following.
   // Operators can still select a manual preset for the current session.
@@ -2038,6 +2099,10 @@ export function App() {
   const [videoRhythmRule, setVideoRhythmRule] = useState(()=>loadRhythmRule("king.rhythm.video","off"));
   const automationVideoIndexRef = useRef(-1);
   const [lightingEnabled, setLightingEnabled] = useState(true);
+  // Beam movement is separately armed and intentionally never persisted. A
+  // restart may restore the safe Gatling environment, but must not launch a
+  // focused beam show before the floor and furniture are confirmed clear.
+  const [beamShowArmed,setBeamShowArmed]=useState(false);
   const [titanHost,setTitanHost]=useState(()=>window.localStorage.getItem("king.lighting.titanHost")||"192.168.1.154");
   const [titanStatus,setTitanStatus]=useState({connected:false,environmentMode:"detecting",host:"",port:4430,deviceName:"Avolites Titan",softwareVersion:"--",showName:"--",message:"正在识别酒吧灯光控制台"});
   const [titanInventory,setTitanInventory]=useState({state:"idle",authoritative:false,fixtureCount:0,groupCount:0,playbackCount:0,fixtures:[],groups:[],liveShowName:"",cachedShowName:"",blockedReason:"尚未读取真机 Patch"});
@@ -2055,8 +2120,11 @@ export function App() {
   const titanActiveHandleRef=useRef({scene:null,accent:null});
   const titanSimulationRef=useRef(titanSimulation);
   const titanCommandQueueRef=useRef(Promise.resolve());
+  const gatlingUpdateQueueRef=useRef(createLatestOnlyAsyncQueue());
   const gatlingBaselineKeyRef=useRef("");
-  const beamBaselineKeyRef=useRef("");
+  const beamShowControllerRef=useRef(createBeamShowController());
+  const beamShowBusyRef=useRef(false);
+  const beamPreparedKeyRef=useRef("");
   const titanAutomationRef=useRef(createLightingAutomationState());
   const titanDiscoveryRef=useRef({busy:false,lastAttempt:0});
   const qu16DiscoveryRef=useRef({busy:false,lastAttempt:0});
@@ -2195,7 +2263,8 @@ export function App() {
   useEffect(()=>{
     const deck=selectDominantDeck(playingDecks,crossfade)??(crossfade<50?1:2);
     const status=deckReferenceStatus[deck];
-    const shouldBind=desktopRuntime
+    const shouldBind=AI_RESCUE_FEATURE_ENABLED
+      && desktopRuntime
       && deckVocalModes[deck]==="accompaniment"
       && Boolean(deckAiRescueEnabled[deck])
       && Boolean(status?.ready);
@@ -2275,7 +2344,7 @@ export function App() {
       return true;
     }catch(error){
       console.info("当前网络未识别到酒吧 Titan 控制台",error);
-      const message="当前未识别到酒吧 Titan 控制台；已进入离线模拟，20 秒后自动重试";
+      const message=`灯控连接暂时失败：${String(error)}；20 秒后自动重试`;
       setTitanStatus(current=>current.connected===false&&current.host===host&&current.message===message?current:{...current,connected:false,environmentMode:"offline",host,message});
       setTitanPlaybacks(current=>current.length?[]:current);
       setTitanStaticPlaybacks(current=>current.length?[]:current);
@@ -2483,6 +2552,9 @@ export function App() {
     return command;
   },[desktopRuntime,lightingEnabled,refreshTitanPlaybacks,titanEffectRegistry,titanMappingShowName,titanMappings,titanStatus.connected,titanStatus.host,titanStatus.showName]);
   const updateGatling=useCallback(({paletteTitanId=null,dimmerPercent=null,speedValue=null,source="manual"}={})=>{
+    if(beamShowBusyRef.current&&["rhythm","rhythm-release","video-color"].includes(source)){
+      return Promise.resolve(false);
+    }
     if(!lightingEnabled){
       setTitanActionStatus({state:"paused",message:"KING 灯光联动已暂停；加特林保持当前状态"});
       return Promise.resolve(false);
@@ -2497,26 +2569,62 @@ export function App() {
       return Promise.resolve(false);
     }
     const sourceLabel=source==="video-color"?"主视频取色":source==="rhythm"?"音乐节拍":source==="rhythm-release"?"节拍回落":"暗红常规";
-    setTitanActionStatus({state:"busy",message:`正在更新加特林 · ${sourceLabel}`});
-    const command=titanCommandQueueRef.current.catch(()=>undefined).then(async()=>{
-      const result=await invoke("titan_update_gatling",{
-        host:titanStatus.host,
-        expectedShowName:kingclubGatlingProfile.showName,
-        paletteTitanId,
-        dimmerPercent,
-        speedValue,
+    return gatlingUpdateQueueRef.current.push(()=>{
+      setTitanActionStatus({state:"busy",message:`正在更新加特林 · ${sourceLabel}`});
+      const command=titanCommandQueueRef.current.catch(()=>undefined).then(async()=>{
+        const result=await invoke("titan_update_gatling",{
+          host:titanStatus.host,
+          expectedShowName:kingclubGatlingProfile.showName,
+          paletteTitanId,
+          dimmerPercent,
+          speedValue,
+        });
+        setTitanActionStatus({state:"live",message:`${result?.message||"暗场加特林已更新"} · ${sourceLabel}`});
+        return true;
+      }).catch((error)=>{
+        setTitanActionStatus({state:"error",message:`加特林控制失败：${String(error)}`});
+        return false;
       });
-      setTitanActionStatus({state:"live",message:`${result?.message||"暗场加特林已更新"} · ${sourceLabel}`});
+      titanCommandQueueRef.current=command;
+      return command;
+    });
+  },[desktopRuntime,lightingEnabled,titanStatus.connected,titanStatus.deviceName,titanStatus.host,titanStatus.showName]);
+  const runBeamShow=useCallback(({bpm=128,source="rhythm"}={})=>{
+    if(!lightingEnabled||!beamShowArmed)return Promise.resolve(false);
+    const liveConnection=Boolean(desktopRuntime&&titanStatus.connected&&titanStatus.host);
+    if(!liveConnection){
+      setTitanActionStatus({state:"simulation",message:"离线预演：南区到北区光束点缀未向 Titan 发送命令"});
+      return Promise.resolve(false);
+    }
+    if(titanStatus.deviceName!==SITE_TITAN_IDENTITY.deviceName||titanStatus.showName!==kingclubBeamProfile.showName){
+      setTitanActionStatus({state:"blocked",message:`光束联动仅绑定 ${SITE_TITAN_IDENTITY.deviceName} / Show ${kingclubBeamProfile.showName}`});
+      return Promise.resolve(false);
+    }
+    if(beamShowBusyRef.current)return Promise.resolve(false);
+    gatlingUpdateQueueRef.current.cancelPending();
+    beamShowBusyRef.current=true;
+    setTitanActionStatus({state:"busy",message:"强段点缀：光束正从南区逐排走向北区…"});
+    const command=titanCommandQueueRef.current.catch(()=>undefined).then(async()=>{
+      const result=await invoke("titan_run_beam_show",{
+        host:titanStatus.host,
+        expectedShowName:kingclubBeamProfile.showName,
+        bpm,
+        panValue:kingclubBeamProfile.fixedPanValue,
+        tiltValue:kingclubBeamProfile.fixedTiltValue,
+      });
+      setTitanActionStatus({state:"live",message:`${result?.message||"光束六拍点缀已完成"} · ${source==="rhythm"?"音乐强段":"手动"}`});
       return true;
     }).catch((error)=>{
-      setTitanActionStatus({state:"error",message:`加特林控制失败：${String(error)}`});
+      setTitanActionStatus({state:"error",message:`光束点缀失败并已执行收光：${String(error)}`});
       return false;
+    }).finally(()=>{
+      beamShowBusyRef.current=false;
     });
     titanCommandQueueRef.current=command;
     return command;
-  },[desktopRuntime,lightingEnabled,titanStatus.connected,titanStatus.deviceName,titanStatus.host,titanStatus.showName]);
-  const updateBeam=useCallback(({dimmerPercent=null,shutterOpen=null,source="manual"}={})=>{
-    if(!lightingEnabled){
+  },[beamShowArmed,desktopRuntime,lightingEnabled,titanStatus.connected,titanStatus.deviceName,titanStatus.host,titanStatus.showName]);
+  const updateBeam=useCallback(({dimmerPercent=null,shutterOpen=null,panValue=null,tiltValue=null,source="manual"}={})=>{
+    if(!lightingEnabled&&source!=="safety-off"){
       setTitanActionStatus({state:"paused",message:"KING 灯光联动已暂停；光束保持当前状态"});
       return Promise.resolve(false);
     }
@@ -2529,13 +2637,15 @@ export function App() {
       setTitanActionStatus({state:"blocked",message:`光束联动仅绑定 ${SITE_TITAN_IDENTITY.deviceName} / Show ${kingclubBeamProfile.showName}`});
       return Promise.resolve(false);
     }
-    const sourceLabel=source==="rhythm"?"音乐节拍":"蓝花常规";
+    const sourceLabel=source==="rhythm"?"音乐节拍":source==="arm-ready"?"光束点缀待命":source==="safety-off"?"光束安全收光":"光束常规";
     const command=titanCommandQueueRef.current.catch(()=>undefined).then(async()=>{
       const result=await invoke("titan_update_beam",{
         host:titanStatus.host,
         expectedShowName:kingclubBeamProfile.showName,
         dimmerPercent,
         shutterOpen,
+        panValue,
+        tiltValue,
       });
       setTitanActionStatus({state:"live",message:`${result?.message||"光束已更新"} · ${sourceLabel}`});
       return true;
@@ -2562,19 +2672,31 @@ export function App() {
     });
   },[desktopRuntime,light,lightingEnabled,titanStatus.connected,titanStatus.host,titanStatus.showName,updateGatling]);
   useEffect(()=>{
-    if(!lightingEnabled||light!==null||!desktopRuntime||!titanStatus.connected||!titanStatus.host){
-      beamBaselineKeyRef.current="";
+    const anyDeckPlaying=Boolean(playingDecks[1]||playingDecks[2]);
+    const canPrepare=lightingEnabled&&light===null&&beamShowArmed&&anyDeckPlaying&&desktopRuntime&&titanStatus.connected&&titanStatus.host;
+    if(canPrepare){
+      const key=`${titanStatus.host}|${titanStatus.showName}`;
+      if(beamPreparedKeyRef.current!==key){
+        beamPreparedKeyRef.current=key;
+        updateBeam({
+          dimmerPercent:0,
+          shutterOpen:true,
+          panValue:kingclubBeamProfile.fixedPanValue,
+          tiltValue:kingclubBeamProfile.fixedTiltValue,
+          source:"arm-ready",
+        });
+      }
       return;
     }
-    const key=`${titanStatus.host}|${titanStatus.showName}`;
-    if(beamBaselineKeyRef.current===key)return;
-    beamBaselineKeyRef.current=key;
+    beamPreparedKeyRef.current="";
+    beamShowControllerRef.current.reset();
+    if(!desktopRuntime||!titanStatus.connected||!titanStatus.host)return;
     updateBeam({
-      dimmerPercent:kingclubBeamProfile.baseDimmerPercent,
-      shutterOpen:true,
-      source:"baseline",
+      dimmerPercent:0,
+      shutterOpen:false,
+      source:"safety-off",
     });
-  },[desktopRuntime,light,lightingEnabled,titanStatus.connected,titanStatus.host,titanStatus.showName,updateBeam]);
+  },[beamShowArmed,desktopRuntime,light,lightingEnabled,playingDecks,titanStatus.connected,titanStatus.host,updateBeam]);
   useEffect(()=>{
     if(lightingEnabled)return;
     const clearedSimulation=clearTitanSimulator(titanSimulationRef.current);
@@ -2967,8 +3089,12 @@ export function App() {
   useEffect(() => {
     if (!desktopRuntime || !audioAssets.length) return undefined;
     const loadedPaths = new Set(Object.values(deckSelectionRef.current).map((item)=>item?.path).filter(Boolean));
-    const orderedAssets = [...audioAssets].sort((left,right)=>Number(loadedPaths.has(right.path))-Number(loadedPaths.has(left.path)));
-    for (const item of orderedAssets) {
+    // Waveform/rhythm work is latency-sensitive and can be expensive for long
+    // mixes. Analyse only the tracks actually loaded into a Deck; analysing the
+    // whole 762-song library at startup can starve live audio for hours.
+    audioAnalysisQueueRef.current = audioAnalysisQueueRef.current.filter(({item})=>loadedPaths.has(item.path));
+    const requestedAssets = audioAssets.filter((item)=>loadedPaths.has(item.path));
+    for (const item of requestedAssets) {
       const key = audioAnalysisKey(item);
       const peakCount = waveformPeakCount(item.durationSeconds ?? Number(item.durationMs ?? 0) / 1000);
       const existing = audioAnalysesRef.current[key];
@@ -3001,7 +3127,7 @@ export function App() {
     };
     drainAnalysisQueue();
     return undefined;
-  }, [desktopRuntime, audioAnalysisFingerprint]);
+  }, [desktopRuntime, audioAnalysisFingerprint, deck1, deck2]);
   const saveTrackRhythmCorrection = async (track, correction) => {
     if (!track?.path) throw new Error("当前 Deck 没有可校正的本地歌曲");
     const analysis = await invoke("save_rhythm_correction", {
@@ -3038,8 +3164,9 @@ export function App() {
           observedAtSeconds:currentSeconds,
           lateByMs:Math.max(0, Math.round((currentSeconds - rhythmEvent.atSeconds) * 1000)),
           leadByMs:Math.max(0, Math.round((rhythmEvent.atSeconds - currentSeconds) * 1000)),
-          bpm:Number(analysis?.bpm) || 0,
+          bpm:effectiveRhythmBpm(analysis),
           confidence:Number(analysis?.bpmConfidence) || 0,
+          energy:rhythmEnergyAt(analysis,rhythmEvent.atSeconds),
         } }));
       }
     }
@@ -3076,7 +3203,11 @@ export function App() {
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return undefined;
     let disposed = false;
-    const scan = () => invoke("scan_media_library")
+    let scanning = false;
+    const scan = () => {
+      if (disposed || scanning) return Promise.resolve();
+      scanning = true;
+      return invoke("scan_media_library")
       .then((library) => {
         if (disposed) return;
         setMediaLibraryDirectories({
@@ -3094,7 +3225,6 @@ export function App() {
           durationSeconds: Number(item.durationMs ?? 0) / 1000,
           duration: item.durationMs ? formatDuration(Number(item.durationMs) / 1000) : "--:--",
         }));
-        prewarmPersistentVideoThumbnails(nextVideos);
         const loadedPaths = Object.values(deckSelectionRef.current).map((item)=>item?.path).filter(Boolean);
         const stableAudio = reconcileStableAssets(
           audioAssetsRef.current,
@@ -3110,14 +3240,20 @@ export function App() {
           coverSrc: item.thumbnailPath ? convertFileSrc(item.thumbnailPath) : "",
           durationSeconds: Number(item.durationMs ?? 0) / 1000,
         }));
-        for (const item of runtimeCapability.aiProcessingAvailable ? nextAudio : []) {
+        for (const item of audioAiQueueAllowed ? nextAudio : []) {
           const sourceVersion = `${item.path}|${item.sizeBytes ?? 0}|${item.modifiedUnixMs ?? 0}`;
           if (audioAiQueuedRef.current.has(sourceVersion)) continue;
           audioAiQueuedRef.current.add(sourceVersion);
           // Keep fingerprinting and persistent AI-job creation strictly serial. This
           // only registers work; model inference runs in the separate Python worker.
           audioAiQueueChainRef.current = audioAiQueueChainRef.current
-            .then(() => invoke("queue_audio_ai_analysis", { path:item.path, artist:item.artist??null }))
+            .then(() => {
+              if (!audioAiQueueAllowedRef.current) {
+                audioAiQueuedRef.current.delete(sourceVersion);
+                return null;
+              }
+              return invoke("queue_audio_ai_analysis", { path:item.path, artist:item.artist??null });
+            })
             .catch((error) => {
               audioAiQueuedRef.current.delete(sourceVersion);
               console.error(`AI 分析任务登记失败：${item.name ?? item.path}`, error);
@@ -3139,14 +3275,16 @@ export function App() {
           setAudioAssets(nextAudio);
         }
       })
-      .catch((error) => console.error("扫描本地音视频目录失败", error));
+      .catch((error) => console.error("扫描本地音视频目录失败", error))
+      .finally(() => { scanning = false; });
+    };
     scan();
-    const timer = window.setInterval(scan, 5000);
+    const timer = window.setInterval(scan, MEDIA_SCAN_INTERVAL_MS);
     return () => {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [runtimeCapability.aiProcessingAvailable]);
+  }, [audioAiQueueAllowed]);
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return;
     const refresh=()=>refreshFontLibrary()
@@ -3661,7 +3799,7 @@ export function App() {
     if (!state?.deck) return;
     const nextProgress=Math.max(0,Number(state.timePos)||0);
     const nextPlaying=!state.paused;
-    setDeckProgress((current)=>Math.abs((current[state.deck]??0)-nextProgress)<.18
+    setDeckProgress((current)=>Math.abs((current[state.deck]??0)-nextProgress)<.4
       ? current
       : {...current,[state.deck]:nextProgress});
     setPlayingDecks((current)=>current[state.deck]===nextPlaying
@@ -3691,9 +3829,6 @@ export function App() {
     if (!track?.accompanimentPath) return;
     const currentMode = deckVocalModes[deckNumber];
     const nextMode = currentMode === "original" ? "accompaniment" : "original";
-    if (nextMode === "accompaniment") {
-      setDeckAiRescueEnabled((current)=>({...current,[deckNumber]:true}));
-    }
     const nextPath = nextMode === "accompaniment" ? track.accompanimentPath : track.path;
     if (!nextPath) return;
     if (mpvEnabled) {
@@ -3817,6 +3952,33 @@ export function App() {
     const track = tracks[trackIndex];
     if(!track)return;
     await takeDeckOperatorControl(deckNumber,{rollbackAutoTarget:true});
+    const startingPlayback=!playingDecks[deckNumber];
+    if(startingPlayback&&desktopRuntime&&runtimeCapability.aiProcessingAvailable){
+      const otherDeck=deckNumber===1?2:1;
+      const otherTrackIndex=otherDeck===1?deck1:deck2;
+      const playingPaths=[
+        track.path,
+        playingDecks[otherDeck]?tracks[otherTrackIndex]?.path:null,
+      ].filter(Boolean);
+      const deckPaths=[tracks[deck1]?.path,tracks[deck2]?.path,track.path].filter(Boolean);
+      try{
+        // Stop GPU-heavy stem/transcription work before mpv is allowed to
+        // unpause. Waiting here closes the short underrun window that existed
+        // when the scheduler only reacted after playback had already started.
+        const worker=await invoke("set_audio_ai_scheduler",{
+          playingPaths:[...new Set(playingPaths)],
+          deckPaths:[...new Set(deckPaths)],
+        });
+        setAudioAiWorker(worker);
+        if(worker.enabled&&(!worker.playbackProtected||worker.running)){
+          throw new Error("AI 制作后台未进入播放保护状态");
+        }
+      }catch(error){
+        console.error(`Deck ${deckNumber} 播放保护失败`,error);
+        setSongPackageMessage(`播放已阻止：无法安全暂停 AI 制作（${String(error)}）`);
+        return;
+      }
+    }
     if(!playingDecks[deckNumber]&&!deckPlaybackQueueSources[deckNumber]) {
       setDeckPlaybackQueueSources((current)=>({...current,[deckNumber]:activePlaylistPlaybackSource}));
     }
@@ -4156,6 +4318,40 @@ export function App() {
       ? []
       : videos.map((item,index)=>({ ...item, id:`demo-video-${index}`, type:"video", index })), [videoAssets, desktopRuntime]);
   const visibleVideos = mediaCategory === "全部" ? availableVideos : availableVideos.filter((item) => item.category === mediaCategory);
+  const handleProgramVideoEnded=useCallback((ended)=>{
+    const playback=videoPlaybackRef.current;
+    const next=nextProgramVideo(playback,ended,availableVideos);
+    if(!next)return;
+    // Advance the token synchronously: duplicate/late output events cannot skip a clip.
+    updateVideoPlayback({...playback,mediaId:next.id,token:playback.token+1});
+    setOutputMedia(current=>placeOverlayOnMedia(next,current?.type==="text"?current:null));
+    setVideo(next.index);
+    // PVW is deliberately left alone while the operator is preparing a take.
+  },[availableVideos,updateVideoPlayback]);
+  const programVideoEndedRef=useRef(handleProgramVideoEnded);
+  programVideoEndedRef.current=handleProgramVideoEnded;
+  useEffect(()=>{
+    if(!desktopRuntime)return;
+    let disposed=false;
+    let stop=()=>{};
+    listen("program-video-ended",event=>programVideoEndedRef.current(event.payload))
+      .then(unlisten=>{if(disposed)unlisten();else stop=unlisten;})
+      .catch(error=>console.error("视频顺播监听失败",error));
+    return()=>{disposed=true;stop();};
+  },[desktopRuntime]);
+  const renderedVideos = useMemo(
+    () => visibleVideos.slice(0, videoRenderLimit),
+    [visibleVideos, videoRenderLimit],
+  );
+  useEffect(() => {
+    setVideoRenderLimit(VIDEO_GRID_INITIAL_LIMIT);
+  }, [mediaType, mediaCategory, availableVideos.length]);
+  const extendVideoGrid = useCallback(() => {
+    setVideoRenderLimit((current) => nextVideoRenderLimit(current, visibleVideos.length));
+  }, [visibleVideos.length]);
+  const handleVideoGridScroll = useCallback((event) => {
+    if (shouldExtendVideoGrid(event.currentTarget)) extendVideoGrid();
+  }, [extendVideoGrid]);
   const visibleImages = [
     blackScreenImage,
     resolutionTestImage,
@@ -4208,20 +4404,21 @@ export function App() {
             } }));
           });
         }
-        const beamPulse=beamPulseForRhythm(rhythmEvent);
-        updateBeam({
-          dimmerPercent:beamPulse.dimmerPercent,
-          source:"rhythm",
-        }).then((triggered)=>{
-          if(!triggered)return;
-          window.dispatchEvent(new CustomEvent("king:beam-cue", { detail:{
-            source:"rhythm",
-            rule:lightRhythmRule,
-            rhythm:rhythmEvent,
-            look:beamPulse.look,
-            dimmerPercent:beamPulse.dimmerPercent,
-          } }));
-        });
+        const beamPulse=beamShowArmed?beamShowControllerRef.current.next(rhythmEvent):null;
+        if(beamPulse&&!beamPulse.skip){
+          runBeamShow({bpm:beamPulse.bpm,source:"rhythm"}).then((triggered)=>{
+            if(!triggered)return;
+            window.dispatchEvent(new CustomEvent("king:beam-cue", { detail:{
+              source:"rhythm",
+              rule:lightRhythmRule,
+              rhythm:rhythmEvent,
+              look:beamPulse.look,
+              bpm:beamPulse.bpm,
+              beats:beamPulse.beats,
+              rows:beamPulse.rows,
+            } }));
+          });
+        }
       }
 
       if (rhythmEventMatchesRule(videoRhythmRule, rhythmEvent) && availableVideos.length) {
@@ -4249,7 +4446,7 @@ export function App() {
     };
     window.addEventListener("king:rhythm", handleRhythmAutomation);
     return () => window.removeEventListener("king:rhythm", handleRhythmAutomation);
-  }, [availableVideos, crossfade, light, lightingEnabled, lightRhythmRule, mediaTransforms, outputMedia, playingDecks, stagedMedia, updateBeam, updateGatling, videoRhythmRule]);
+  }, [availableVideos, beamShowArmed, crossfade, light, lightingEnabled, lightRhythmRule, mediaTransforms, outputMedia, playingDecks, runBeamShow, stagedMedia, updateGatling, videoRhythmRule]);
   useEffect(()=>{
     if(!lightingEnabled||light!==null||outputBaseMedia?.type!=="video")return undefined;
     videoColorSamplingErrorRef.current=null;
@@ -4313,9 +4510,9 @@ export function App() {
       : outputBaseMedia?.type === "video"
         ? { ...outputMedia, muted:!videoAudioEnabled }
         : outputMedia;
-    invoke("set_program_state", { program:{ media:programMedia, transform:outputTransform, lyrics:activeLyrics } })
+    invoke("set_program_state", { program:{ media:programMedia, transform:outputTransform, lyrics:activeLyrics, playback:videoPlayback } })
       .catch((error)=>console.error("同步 LED 节目画面失败",error));
-  },[outputMedia,outputBaseMedia,outputTransform,videoAudioEnabled,activeLyrics]);
+  },[outputMedia,outputBaseMedia,outputTransform,videoAudioEnabled,activeLyrics,videoPlayback]);
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return;
     connectLedOutput();
@@ -4335,6 +4532,7 @@ export function App() {
   const chosenTextElements = stagedMedia?.type === "text" ? stagedMedia.elements.filter((element)=>selectedTextElements.includes(element.id)) : [];
   const outputLabel = `${outputBaseMedia?.name ?? outputMedia.name}${outputMedia.type === "text" ? " · 文字/Logo 覆盖" : ""}`;
   const stageMedia = (candidate) => {
+    if(candidate.type==="video")candidate={...candidate,playbackCategory:mediaCategory};
     setTextDraftClearSlot(null);
     const replacesOverlay = candidate.type === "text";
     const currentBaseMedia = resolveBaseMedia(stagedMedia ?? outputMedia);
@@ -4487,6 +4685,14 @@ export function App() {
     if (!stagedMedia) return;
     const committedMedia = structuredClone(stagedMedia);
     const committedBaseMedia = resolveBaseMedia(committedMedia);
+    const currentPlayback=videoPlaybackRef.current;
+    if(committedBaseMedia?.id!==currentPlayback.mediaId){
+      updateVideoPlayback({...currentPlayback,
+        queueIds:committedBaseMedia?.type==="video"?captureVideoQueue(availableVideos,committedBaseMedia.playbackCategory??mediaCategory,committedBaseMedia.id):[],
+        mediaId:committedBaseMedia?.id??null,
+        token:currentPlayback.token+1,
+      });
+    }
     const committedTransform = { ...(stagedTransform ?? defaultMediaTransform) };
     setMediaTransforms((current)=>({...current,[committedBaseMedia?.id ?? committedMedia.id]:committedTransform}));
     // 上屏后保留一份独立的 PVW 副本，让操作员可立即继续编辑下一版。
@@ -4935,8 +5141,8 @@ export function App() {
           <div className={`led-stage ${previewMode&&monitorTarget===null?"dual-preview-stage":""}`}>
             {monitorTarget===null
               ? previewMode
-                ? <><div className="dual-screen-pane program-pane"><span className="screen-role-label">PGM · 当前上屏</span><MediaOutputScreen media={outputMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={outputTransform} videoRef={outputVideoElementRef}/></div><div className="dual-screen-pane preview-pane"><span className="screen-role-label">{previewPending?"PVW · 编辑中":"PVW · 已同步"}</span><MediaOutputScreen media={displayMedia} track={tracks[deck1]} transform={displayTransform} editable={stagedMedia?.type==="text"&&stagedMedia===displayMedia} selectedElementId={selectedTextElement} selectedElementIds={selectedTextElements} onElementSelect={selectTextElement} onElementChange={updateTextElementById} onEditStart={rememberTextState}/>{stagedMedia===displayMedia&&resolveBaseMedia(stagedMedia)?.src&&<MediaTransformEditor value={displayTransform} onChange={setStagedTransform}/>}<svg className="preview-visible-outline" viewBox="0 0 2048 2304" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><path d="M512 0h1024v1152h512v1152H0V1152h512z"/></svg></div></>
-                : <MediaOutputScreen media={displayMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={displayTransform} videoRef={outputVideoElementRef}/>
+                ? <><div className="dual-screen-pane program-pane"><span className="screen-role-label">PGM · 当前上屏</span><MediaOutputScreen media={outputMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={outputTransform} videoRef={outputVideoElementRef} playback={videoPlayback} onVideoEnded={desktopRuntime?undefined:handleProgramVideoEnded}/></div><div className="dual-screen-pane preview-pane"><span className="screen-role-label">{previewPending?"PVW · 编辑中":"PVW · 已同步"}</span><MediaOutputScreen media={displayMedia} track={tracks[deck1]} transform={displayTransform} editable={stagedMedia?.type==="text"&&stagedMedia===displayMedia} selectedElementId={selectedTextElement} selectedElementIds={selectedTextElements} onElementSelect={selectTextElement} onElementChange={updateTextElementById} onEditStart={rememberTextState}/>{stagedMedia===displayMedia&&resolveBaseMedia(stagedMedia)?.src&&<MediaTransformEditor value={displayTransform} onChange={setStagedTransform}/>}<svg className="preview-visible-outline" viewBox="0 0 2048 2304" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><path d="M512 0h1024v1152h512v1152H0V1152h512z"/></svg></div></>
+                : <MediaOutputScreen media={outputMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={outputTransform} videoRef={outputVideoElementRef} playback={videoPlayback} onVideoEnded={desktopRuntime?undefined:handleProgramVideoEnded}/>
               : <div className="monitor-feed" style={{backgroundImage:`linear-gradient(180deg,rgba(0,0,0,.05),rgba(0,0,0,.28)),url(${monitorTargets[monitorTarget].src})`}}><div className="monitor-live"><span className="live-dot"/> LIVE</div><b>{monitorTargets[monitorTarget].name}</b><small>摄像机视频流接口预留</small></div>}
           </div>
           {previewMode&&monitorTarget===null&&stagedMedia?.type==="text"&&<TextFormatToolbar elements={chosenTextElements} fonts={systemFonts} fontDirectory={fontLibraryDirectory} customFontCount={customFontCount} onOpenFontDirectory={()=>invoke("open_font_directory").then(setFontLibraryDirectory).catch((error)=>console.error("打开字体目录失败",error))} onRefreshFonts={()=>refreshFontLibrary().catch((error)=>console.error("刷新字体目录失败",error))} onApply={applyTextSelection} onAlign={alignTextSelection} onUpload={uploadTextGraphic} saveSlot={activeTextDraftSlot} onSave={saveActiveTextDraft}/>}
@@ -5040,10 +5246,14 @@ export function App() {
       <aside className="right-column">
         <section className={`panel video-panel ${activeMediaCategories.length?"has-categories":""}`}>
           <div className="panel-title compact"><VideoCamera weight="fill"/><div><b>视频快速选择</b><small>{activeMediaType.hint}</small></div>{mediaType==="video"&&<label className="rhythm-rule-control" title="按当前主导 Deck 的节拍自动预选到 PVW，不会直接上屏"><Lightning weight="fill"/><select aria-label="视频节拍预选规则" value={videoRhythmRule} onChange={(event)=>setVideoRhythmRule(event.target.value)}>{rhythmRuleOptions.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label>}{mediaType==="video"&&<button type="button" className={`video-audio-toggle ${videoAudioEnabled?"enabled":"muted"}`} aria-pressed={videoAudioEnabled} onClick={()=>setVideoAudioEnabled((enabled)=>!enabled)} title={videoAudioEnabled?"关闭视频自身声音，仅保留画面":"开启视频自身声音"}>{videoAudioEnabled?<SpeakerHigh weight="fill"/>:<SpeakerSlash weight="fill"/>}<span>{videoAudioEnabled?"视频声音":"已静音"}</span></button>}</div>
+          {mediaType==="video"&&<label className="video-sequence-control"><span>视频播放</span><select aria-label="视频播放模式" value={videoPlayback.mode} onChange={event=>updateVideoPlayback({...videoPlaybackRef.current,mode:event.target.value})}><option value="sequence">顺序自动播放 · 列表循环</option><option value="single">单段循环</option></select><small>{videoPlayback.queueIds.length?`${videoPlayback.queueIds.indexOf(videoPlayback.mediaId)+1} / ${videoPlayback.queueIds.length}`:"上屏后开始顺播"}</small></label>}
           <div className="media-type-switch" role="tablist" aria-label="大屏素材类型">{mediaTypes.map(type=><button key={type.id} type="button" role="tab" aria-selected={mediaType===type.id} className={mediaType===type.id?"active":""} onClick={()=>{setMediaType(type.id);setMediaCategory("全部");setHoverMedia(null)}}>{type.label}</button>)}</div>
           {activeMediaCategories.length>0&&<div className="media-category-switch" role="radiogroup" aria-label={`${activeMediaType.label}分类`}>{activeMediaCategories.map((category)=><button key={category} type="button" role="radio" aria-checked={mediaCategory===category} className={mediaCategory===category?"active":""} onClick={()=>setMediaCategory(category)}>{category}</button>)}</div>}
-          <div className={mediaType==="image"?"video-grid image-grid":mediaType==="text"?"text-workspace":"video-grid"}>
-            {mediaType==="video"?(visibleVideos.length?visibleVideos.map((item)=>{const candidate={...item,id:item.id,type:"video",name:item.name,src:item.src};const programActive=outputBaseMedia?.id===candidate.id;const previewSelected=stagedBaseMedia?.id===candidate.id;return <button key={item.id} type="button" className={`${programActive?"active program-active":""} ${previewSelected?"staged preview-selected":""}`} onClick={()=>stageMedia(candidate)} aria-current={programActive?"true":undefined} aria-pressed={previewSelected} aria-label={`预览视频 ${item.name}${programActive?"，当前上屏":""}${previewSelected?"，PVW 已选":""}`} title={`${item.name} · ${programActive?"PGM 当前上屏 · ":""}${previewSelected?"PVW 已选":"点击后进入 PVW"}`}><MediaThumbnail item={item}/>{programActive&&<i><Play weight="fill"/></i>}</button>}):<div className="media-empty"><b>该分类暂无视频</b><small>将 MP4 放入本地视频目录后自动出现。</small></div>)
+          <div className={mediaType==="image"?"video-grid image-grid":mediaType==="text"?"text-workspace":"video-grid"} onScroll={mediaType==="video"?handleVideoGridScroll:undefined}>
+            {mediaType==="video"?(visibleVideos.length?<>
+              {renderedVideos.map((item)=>{const candidate={...item,id:item.id,type:"video",name:item.name,src:item.src};const programActive=outputBaseMedia?.id===candidate.id;const previewSelected=stagedBaseMedia?.id===candidate.id;return <button key={item.id} type="button" className={`${programActive?"active program-active":""} ${previewSelected?"staged preview-selected":""}`} onClick={()=>stageMedia(candidate)} aria-current={programActive?"true":undefined} aria-pressed={previewSelected} aria-label={`预览视频 ${item.name}${programActive?"，当前上屏":""}${previewSelected?"，PVW 已选":""}`} title={`${item.name} · ${programActive?"PGM 当前上屏 · ":""}${previewSelected?"PVW 已选":"点击后进入 PVW"}`}><MediaThumbnail item={item}/>{programActive&&<i><Play weight="fill"/></i>}</button>})}
+              {renderedVideos.length<visibleVideos.length&&<button type="button" className="video-grid-load-more" onClick={extendVideoGrid} aria-label={`继续加载视频，剩余 ${visibleVideos.length-renderedVideos.length} 个`}><b>加载更多</b><small>{renderedVideos.length} / {visibleVideos.length}</small></button>}
+            </>:<div className="media-empty"><b>该分类暂无视频</b><small>将 MP4 放入本地视频目录后自动出现。</small></div>)
             :mediaType==="image"?visibleImages.map((item)=>{const candidate={id:item.id,type:"image",name:item.name,src:item.src};return <button key={item.id} type="button" className={`${outputBaseMedia?.id===candidate.id?"active":""} ${stagedBaseMedia?.id===candidate.id?"staged":""} ${item.locked?"black-screen-tile":""}`} onMouseEnter={()=>setHoverMedia(candidate)} onMouseLeave={()=>setHoverMedia(null)} onFocus={()=>setHoverMedia(candidate)} onBlur={()=>setHoverMedia(null)} onClick={()=>stageMedia(candidate)} aria-label={item.locked?"预览固定黑屏，不可删除":`预览图片 ${item.name}`} title={item.locked?"固定黑屏 · 不可移动 · 不可删除":item.name}>{item.src?<img src={item.src} alt=""/>:<strong>黑屏</strong>}{item.locked&&<em>固定</em>}</button>})
             :<><section className="text-template-section"><header><b>预设模板</b><small>选择后在 PVW 画面编辑</small></header><div className="text-template-row">{textPrograms.map((item)=>{const candidate={...item,type:"text"};return <button key={item.id} type="button" className={`${stagedMedia?.id===candidate.id?"staged":""}`} onClick={()=>stageMedia(candidate)} aria-label={`选择${item.name}模板`}><TextProgramThumbnail program={item}/></button>})}</div></section><section className="text-draft-section"><header><b>暂存</b><small>4 个可视暂存位</small></header><div className="text-draft-row">{textDrafts.map((draft,index)=><div className={`text-draft-slot ${draft?"filled":"empty"}`} key={index}><button type="button" className="text-draft-main" onClick={()=>openTextDraft(index)} onContextMenu={(event)=>{event.preventDefault();if(draft)setTextDraftClearSlot(index)}} aria-label={draft?`暂存 ${index+1}，点击调取；右键清空`:`暂存 ${index+1}，点击新建图文`}>{draft?<TextProgramThumbnail program={draft} slot={index+1}/>:<span className="empty-draft-preview"><b>{index+1}</b><small>新建</small></span>}</button></div>)}</div></section></>}
           </div>
@@ -5051,7 +5261,7 @@ export function App() {
           {mediaType==="image"&&imageAssets.length===0&&<small className="image-library-hint">{imageLibraryDirectory?`将图片放入：${imageLibraryDirectory}`:"桌面版启动后自动扫描图片目录"}</small>}
         </section>
         <section ref={lightPanelRef} className={`panel light-panel ${lightingEnabled ? "lighting-on" : "lighting-off"}`}>
-          <div className="panel-title compact"><LightbulbFilament weight="fill"/><div className="titan-panel-identity"><b>{titanStatus.connected?titanStatus.deviceName:"Avolites Titan"}</b><small className={titanStatus.connected?"titan-live":"titan-offline"}>{titanStatus.connected?`Titan ${titanStatus.softwareVersion} · ${titanStatus.showName} · ${titanPlaybacks.length} Cue/Playback`:titanStatus.message||"离线模拟 · 不发送现场灯光命令"}</small></div><label className="rhythm-rule-control lighting-rhythm-rule" title="自动模式只跟随当前实际占主导声音的 Deck"><Lightning weight="fill"/><select aria-label="灯光节拍联动规则" value={lightRhythmRule} onChange={(event)=>setLightRhythmRule(event.target.value)}>{rhythmRuleOptions.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label><button type="button" className="lighting-power-toggle" aria-pressed={lightingEnabled} title={lightingEnabled ? "暂停 KING 灯光联动；不会修改 Titan Show" : "恢复 KING 灯光联动"} onClick={()=>setLightingEnabled((enabled)=>!enabled)}><span className="live-dot"/>{lightingEnabled ? "灯光联动" : "联动暂停"}</button></div>
+          <div className="panel-title compact"><LightbulbFilament weight="fill"/><div className="titan-panel-identity"><b>{titanStatus.connected?titanStatus.deviceName:"Avolites Titan"}</b><small className={titanStatus.connected?"titan-live":"titan-offline"}>{titanStatus.connected?`Titan ${titanStatus.softwareVersion} · ${titanStatus.showName} · ${titanPlaybacks.length} Cue/Playback`:titanStatus.message||"离线模拟 · 不发送现场灯光命令"}</small></div><label className="rhythm-rule-control lighting-rhythm-rule" title="自动模式只跟随当前实际占主导声音的 Deck"><Lightning weight="fill"/><select aria-label="灯光节拍联动规则" value={lightRhythmRule} onChange={(event)=>setLightRhythmRule(event.target.value)}>{rhythmRuleOptions.map(([id,label])=><option value={id} key={id}>{label}</option>)}</select></label><button type="button" className="lighting-power-toggle beam-show-arm" aria-pressed={beamShowArmed} title={beamShowArmed?"停止后续点缀；当前六拍短秀完成后自动收光，重启仍默认不布防":"确认现场安全后，允许强段约每分钟穿插一次南区到北区六拍点缀"} onClick={()=>setBeamShowArmed((armed)=>!armed)}><span className="live-dot"/>{beamShowArmed?"光束点缀已布防":"光束点缀未布防"}</button><button type="button" className="lighting-power-toggle" aria-pressed={lightingEnabled} title={lightingEnabled ? "暂停 KING 灯光联动；不会修改 Titan Show" : "恢复 KING 灯光联动"} onClick={()=>setLightingEnabled((enabled)=>!enabled)}><span className="live-dot"/>{lightingEnabled ? "灯光联动" : "联动暂停"}</button></div>
           <div className="light-grid">{lights.map((lightPreset)=>{const titanId=Number(titanMappings[lightPreset.id]);const mappedPlayback=titanPlaybacks.find((playback)=>playback.titanId===titanId);const registeredEffect=titanEffectRegistry.find((effect)=>Number(effect.presetId)===lightPreset.id);const configured=Boolean(lightPreset.label||mappedPlayback||registeredEffect);const displayName=lightPreset.id===0?lightPreset.label:registeredEffect?.kingName||lightPreset.label||mappedPlayback?.legend||`Titan 效果 ${lightPreset.id}`;const isActive=effectiveLight===lightPreset.id;const simulatedActive=!titanStatus.connected&&isTitanPresetSimulated(titanSimulation,lightPreset.id);const mode=lightPlaybackModes[lightPreset.id]??"once";return <div className={`light-preset ${configured?"configured":"empty"} ${isActive?"active":""} ${mappedPlayback?.active?"titan-active":""} ${simulatedActive?"titan-simulated":""} ${light===null&&isActive?"rhythm-active":""}`} key={lightPreset.id}><button type="button" className="light-preset-main" disabled={!configured} onClick={()=>{if(lightPreset.id===0){setAutoLightPreset(0);setLight(null);}else{setLight(lightPreset.id);triggerTitanPlayback(lightPreset.id,"manual");}}} aria-label={lightPreset.id===0?"启用暗红加特林视频色彩与音乐节拍联动":configured?`触发 ${displayName}`:`${lightPreset.id} 号灯光预设未配置`} title={lightPreset.id===0?"暗红 10% 常规底色；颜色跟随主视频，速度和亮度轻微跟随主导 Deck":mappedPlayback?`${displayName} · TitanId ${mappedPlayback.titanId}`:displayName}><span className="light-number">{lightPreset.id}</span>{configured&&<span className="light-name">{displayName}</span>}{configured&&<span className="light-duration">{lightPreset.id===0&&light===null?"AUTO LIVE":mappedPlayback?.active?"TITAN LIVE":simulatedActive?"SIMULATION":lightPreset.duration||"已绑定"}</span>}</button>{configured&&lightPreset.id!==0&&<button type="button" className="light-mode-toggle" onClick={()=>setLightPlaybackModes((current)=>({...current,[lightPreset.id]:mode==="loop"?"once":"loop"}))} aria-label={`${displayName}${mode==="loop"?"循环播放":"单次播放"}`} title={mode==="loop"?"循环播放：点击改为单次":"单次播放：点击改为循环"}>{mode==="loop"?<ArrowsClockwise weight="bold"/>:<span className="light-once">1</span>}</button>}</div>})}</div>
           <div className="quick-actions">
             <button type="button" className={light===null?"auto active":"auto"} aria-pressed={light===null} onClick={()=>{setAutoLightPreset(0);setLight(null);}} title="暗红加特林：主视频定颜色，主导 Deck 定速度和节拍起伏">自动</button>

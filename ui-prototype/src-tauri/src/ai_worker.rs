@@ -134,6 +134,7 @@ pub struct AiWorkerStatus {
     pub available: bool,
     pub enabled: bool,
     pub running: bool,
+    pub playback_protected: bool,
     pub process_id: Option<u32>,
     pub python_path: Option<String>,
     pub worker_path: Option<String>,
@@ -209,7 +210,7 @@ fn scheduler_tier(state: &WorkerProcess) -> &'static str {
 
 fn scheduler_message(state: &WorkerProcess) -> String {
     match scheduler_tier(state) {
-        "on-air" => "AI 三级调度：播放歌曲最高优先；Worker 保持低优先级运行".to_string(),
+        "on-air" => "播放保护：检测到 Deck 正在播出，AI 制作已暂停；停止播放后自动继续".to_string(),
         "deck-ready" => "AI 三级调度：Deck 待播歌曲优先；后台曲库随后".to_string(),
         _ => "AI 三级调度：曲库后台制作（低优先级、单任务）".to_string(),
     }
@@ -270,6 +271,15 @@ pub fn start(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatu
     if !state.runtime_enabled {
         stop_locked(&mut state);
         state.message = "开业模式：AI 歌曲制作已关闭，MOSS 与 Worker 均未运行".to_string();
+        return status_locked(&mut state);
+    }
+    if state.playing_jobs > 0 {
+        // Windows process priority does not throttle CUDA scheduling. Stem
+        // separation can therefore saturate the GPU while mpv is feeding the
+        // venue output, producing audible underruns. Release the entire AI
+        // process tree and GPU allocation while either Deck is on air.
+        stop_locked(&mut state);
+        state.message = scheduler_message(&state);
         return status_locked(&mut state);
     }
     #[cfg(windows)]
@@ -357,6 +367,9 @@ pub fn set_scheduler_context(
         .map_err(|_| "无法锁定 AI worker 状态".to_string())?;
     state.playing_jobs = playing_jobs;
     state.deck_jobs = deck_jobs;
+    if state.runtime_enabled && state.playing_jobs > 0 {
+        stop_locked(&mut state);
+    }
     state.message = if state.runtime_enabled {
         scheduler_message(&state)
     } else {
@@ -419,6 +432,7 @@ fn status_locked(state: &mut WorkerProcess) -> Result<AiWorkerStatus, String> {
                 .is_some_and(|path| path.is_file()),
         enabled: state.runtime_enabled,
         running,
+        playback_protected: state.runtime_enabled && state.playing_jobs > 0,
         process_id: state.child.as_ref().map(Child::id),
         python_path: state
             .python_path
@@ -433,6 +447,39 @@ fn status_locked(state: &mut WorkerProcess) -> Result<AiWorkerStatus, String> {
         scheduler_tier: scheduler_tier(state).to_string(),
         message: state.message.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn on_air_scheduler_uses_playback_protection() {
+        let mut state = WorkerProcess::default();
+        state.runtime_enabled = true;
+        state.playing_jobs = 1;
+        state.deck_jobs = 2;
+
+        assert_eq!(scheduler_tier(&state), "on-air");
+        assert!(scheduler_message(&state).contains("AI 制作已暂停"));
+        stop_locked(&mut state);
+        let status = status_locked(&mut state).expect("status");
+        assert!(status.enabled);
+        assert!(status.playback_protected);
+        assert!(!status.running);
+    }
+
+    #[test]
+    fn idle_scheduler_is_not_playback_protected() {
+        let mut state = WorkerProcess::default();
+        state.runtime_enabled = true;
+        state.playing_jobs = 0;
+        state.deck_jobs = 1;
+
+        let status = status_locked(&mut state).expect("status");
+        assert!(!status.playback_protected);
+        assert_eq!(scheduler_tier(&state), "deck-ready");
+    }
 }
 
 pub fn status(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatus, String> {

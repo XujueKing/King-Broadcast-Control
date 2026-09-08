@@ -1,9 +1,10 @@
 use serde::Serialize;
 use serde_json::Value;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
-    time::Duration,
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs},
+    time::{Duration, Instant},
 };
 
 use crate::network_discovery;
@@ -88,11 +89,19 @@ const KINGCLUB_GATLING_SPEED_FUNCTION_ID: u64 = 1;
 const KINGCLUB_GATLING_PALETTES: [u64; 8] = [
     33_187, 33_207, 33_214, 33_219, 33_227, 33_234, 33_240, 33_249,
 ];
-const KINGCLUB_BEAM_GROUP_TITAN_ID: u64 = 15_735;
 const KINGCLUB_BEAM_FIXTURE_TITAN_IDS: [u64; 25] = [
     3_511, 3_512, 3_513, 3_514, 3_515, 3_516, 3_517, 3_518, 3_519, 3_520, 3_521, 3_522, 3_523,
     3_524, 3_525, 3_526, 3_527, 3_528, 3_529, 3_530, 3_703, 3_704, 3_705, 3_706, 15_676,
 ];
+const KINGCLUB_BEAM_ROWS_SOUTH_TO_NORTH: [&[u64]; 6] = [
+    &[3_527, 3_528, 3_529, 3_530],
+    &[3_526, 3_525, 3_524, 3_523],
+    &[3_522, 3_520, 3_517, 3_516],
+    &[3_521, 3_519, 3_518, 3_515],
+    &[3_704, 3_705, 3_511, 3_514, 15_676],
+    &[3_703, 3_706, 3_512, 3_513],
+];
+const KINGCLUB_BEAM_WALK_LEVEL: f64 = 100.0;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,6 +121,19 @@ struct TitanBeamAction {
     fixture_count: usize,
     dimmer_percent: Option<f64>,
     shutter_open: Option<bool>,
+    pan_value: Option<f64>,
+    tilt_value: Option<f64>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TitanBeamShowAction {
+    ok: bool,
+    fixture_count: usize,
+    bpm: f64,
+    beat_interval_ms: u64,
+    beats: usize,
     message: String,
 }
 
@@ -148,6 +170,49 @@ fn parse_http_response(response: &[u8]) -> Result<&[u8], String> {
     Ok(&response[header_end + 4..])
 }
 
+fn same_ipv4_subnet(local: Ipv4Addr, remote: Ipv4Addr) -> bool {
+    let local = local.octets();
+    let remote = remote.octets();
+    local[..3] == remote[..3]
+}
+
+fn local_address_for_titan(remote: SocketAddr) -> Option<SocketAddr> {
+    let IpAddr::V4(remote_ip) = remote.ip() else {
+        return None;
+    };
+    local_ip_address::list_afinet_netifas()
+        .ok()?
+        .into_iter()
+        .filter_map(|(_, address)| match address {
+            IpAddr::V4(address)
+                if !address.is_loopback()
+                    && !address.is_link_local()
+                    && same_ipv4_subnet(address, remote_ip) =>
+            {
+                Some(SocketAddr::new(IpAddr::V4(address), 0))
+            }
+            _ => None,
+        })
+        .next()
+}
+
+fn connect_titan(address: SocketAddr) -> Result<TcpStream, String> {
+    if let Some(local_address) = local_address_for_titan(address) {
+        let domain = if address.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
+            .map_err(|error| format!("无法创建 Titan 局域网连接：{error}"))?;
+        socket
+            .bind(&local_address.into())
+            .map_err(|error| format!("无法绑定 Titan 局域网地址 {local_address}：{error}"))?;
+        socket
+            .connect_timeout(&address.into(), TITAN_TIMEOUT)
+            .map_err(|error| format!("无法从 {local_address} 连接 Titan {address}：{error}"))?;
+        return Ok(socket.into());
+    }
+    TcpStream::connect_timeout(&address, TITAN_TIMEOUT)
+        .map_err(|error| format!("无法连接 Titan {address}：{error}"))
+}
+
 fn http_get(host: &str, path: &str) -> Result<Vec<u8>, String> {
     let host = validate_host(host)?;
     if !path.starts_with("/titan/") || path.contains('\r') || path.contains('\n') {
@@ -158,8 +223,7 @@ fn http_get(host: &str, path: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("无法解析 Titan 地址 {host}：{error}"))?
         .next()
         .ok_or_else(|| format!("无法解析 Titan 地址 {host}"))?;
-    let mut stream = TcpStream::connect_timeout(&address, TITAN_TIMEOUT)
-        .map_err(|error| format!("无法连接 Titan {host}:{TITAN_WEB_API_PORT}：{error}"))?;
+    let mut stream = connect_titan(address)?;
     stream
         .set_read_timeout(Some(TITAN_TIMEOUT))
         .map_err(|error| error.to_string())?;
@@ -534,11 +598,23 @@ fn update_gatling(
         verified_site_handle(host, "/titan/handles/Colours", palette_id, "paletteHandle")?;
     }
 
+    // Group 59 is useful as a site identity check, but operators can edit its
+    // membership on the desk. Select the physically verified Gatling fixture
+    // directly so a stale group can never pull a beam into automatic updates.
+    let fixtures = read_handle_summaries(host, "/titan/handles/Fixtures")?;
+    let gatling_fixture = beam_fixture_handle(&fixtures, KINGCLUB_GATLING_FIXTURE_TITAN_ID)?;
+    let location = fixture_handle_location(gatling_fixture)?;
     http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear")?;
+    std::thread::sleep(Duration::from_millis(50));
+    if !selected_fixture_ids(host)?.is_empty() {
+        http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear")?;
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let select_path = format!(
-        "/titan/script/2/Group/RecallGroup?handle_titanId={KINGCLUB_GATLING_GROUP_TITAN_ID}"
+        "/titan/script/2/Programmer/Editor/Selection/SelectFixture?handle_location={location}"
     );
     http_get(host, &select_path)?;
+    std::thread::sleep(Duration::from_millis(50));
     let selected = selected_fixture_ids(host)?;
     if selected != [KINGCLUB_GATLING_FIXTURE_TITAN_ID] {
         let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
@@ -589,29 +665,14 @@ fn validate_beam_level(dimmer_percent: Option<f64>) -> Result<(), String> {
     Ok(())
 }
 
-fn update_beam(
-    host: &str,
-    expected_show_name: &str,
-    dimmer_percent: Option<f64>,
-    shutter_open: Option<bool>,
-) -> Result<TitanBeamAction, String> {
-    validate_beam_level(dimmer_percent)?;
-    if expected_show_name.trim() != KINGCLUB_GATLING_SHOW {
-        return Err("光束现场配置只绑定 Show 2024.12.28".to_string());
+fn validate_beam_position(control_name: &str, value: Option<f64>) -> Result<(), String> {
+    if value.is_some_and(|position| !position.is_finite() || !(0.0..=1.0).contains(&position)) {
+        return Err(format!("光束 {control_name} 位置必须在 0.0-1.0 范围内"));
     }
-    let status = read_status(host)?;
-    if status.show_name != expected_show_name {
-        return Err(format!(
-            "Titan Show 身份不匹配：需要 {expected_show_name}，当前为 {}",
-            status.show_name
-        ));
-    }
-    verified_site_handle(
-        host,
-        "/titan/handles/Groups",
-        KINGCLUB_BEAM_GROUP_TITAN_ID,
-        "groupHandle",
-    )?;
+    Ok(())
+}
+
+fn verified_beam_fixture_handles(host: &str) -> Result<Vec<TitanHandleSummary>, String> {
     let fixtures = read_handle_summaries(host, "/titan/handles/Fixtures")?;
     let fixture_ids = fixtures
         .iter()
@@ -624,35 +685,149 @@ fn update_beam(
     {
         return Err("光束白名单与当前 Show Fixture 不一致；已拒绝输出".to_string());
     }
+    Ok(fixtures)
+}
 
+fn fixture_handle_location(handle: &TitanHandleSummary) -> Result<String, String> {
+    let page = handle
+        .page
+        .ok_or_else(|| "光束 Fixture 缺少页码".to_string())?;
+    let index = handle
+        .index
+        .ok_or_else(|| "光束 Fixture 缺少位置".to_string())?;
+    if handle.group != "Fixtures" || page < 0 || index < 0 {
+        return Err("光束 Fixture 句柄位置无效".to_string());
+    }
+    // Titan's script HandleLocation syntax is one-based even though the
+    // handles inventory reports zero-based page/index values.
+    Ok(format!("Fixtures_{}_{}", page + 1, index + 1))
+}
+
+fn beam_fixture_handle<'a>(
+    fixtures: &'a [TitanHandleSummary],
+    titan_id: u64,
+) -> Result<&'a TitanHandleSummary, String> {
+    fixtures
+        .iter()
+        .find(|handle| handle.handle_type == "fixtureHandle" && handle.titan_id == Some(titan_id))
+        .ok_or_else(|| format!("未找到光束 Fixture TitanId {titan_id}"))
+}
+
+fn add_beam_fixture_to_selection(
+    host: &str,
+    fixtures: &[TitanHandleSummary],
+    titan_id: u64,
+) -> Result<(), String> {
+    let fixture = beam_fixture_handle(fixtures, titan_id)?;
+    let location = fixture_handle_location(fixture)?;
+    let path = format!(
+        "/titan/script/2/Programmer/Editor/Selection/SelectFixture?handle_location={location}"
+    );
+    http_get(host, &path)?;
+    Ok(())
+}
+
+fn select_beam_fixture(
+    host: &str,
+    fixtures: &[TitanHandleSummary],
+    titan_id: u64,
+) -> Result<(), String> {
     http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear")?;
-    let select_path =
-        format!("/titan/script/2/Group/RecallGroup?handle_titanId={KINGCLUB_BEAM_GROUP_TITAN_ID}");
-    http_get(host, &select_path)?;
+    add_beam_fixture_to_selection(host, fixtures, titan_id)
+}
+
+fn select_beam_row(
+    host: &str,
+    fixtures: &[TitanHandleSummary],
+    titan_ids: &[u64],
+) -> Result<(), String> {
+    http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear")?;
+    for titan_id in titan_ids {
+        add_beam_fixture_to_selection(host, fixtures, *titan_id)?;
+    }
     let mut selected = selected_fixture_ids(host)?;
     selected.sort_unstable();
-    let mut expected = KINGCLUB_BEAM_FIXTURE_TITAN_IDS.to_vec();
+    let mut expected = titan_ids.to_vec();
     expected.sort_unstable();
     if selected != expected {
         let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
         return Err(format!(
-            "光束 Group 57 当前选择与 25 台白名单不一致 {:?}；已拒绝输出",
+            "光束行选择与 A 编号不一致 {:?}；已拒绝输出",
             selected
         ));
     }
+    Ok(())
+}
+
+fn set_fixture_preset_level(
+    host: &str,
+    fixture: &TitanHandleSummary,
+    value: f64,
+    old_value: f64,
+) -> Result<(), String> {
+    let location = fixture_handle_location(fixture)?;
+    let path = format!(
+        "/titan/script/2/Fixtures/PresetLevelHandle?handle_location={location}&value={value:.3}&oldValue={old_value:.3}"
+    );
+    http_get(host, &path)?;
+    Ok(())
+}
+
+fn update_beam(
+    host: &str,
+    expected_show_name: &str,
+    dimmer_percent: Option<f64>,
+    shutter_open: Option<bool>,
+    pan_value: Option<f64>,
+    tilt_value: Option<f64>,
+) -> Result<TitanBeamAction, String> {
+    validate_beam_level(dimmer_percent)?;
+    validate_beam_position("Pan", pan_value)?;
+    validate_beam_position("Tilt", tilt_value)?;
+    if expected_show_name.trim() != KINGCLUB_GATLING_SHOW {
+        return Err("光束现场配置只绑定 Show 2024.12.28".to_string());
+    }
+    let status = read_status(host)?;
+    if status.show_name != expected_show_name {
+        return Err(format!(
+            "Titan Show 身份不匹配：需要 {expected_show_name}，当前为 {}",
+            status.show_name
+        ));
+    }
+    let fixtures = verified_beam_fixture_handles(host)?;
 
     let operation = (|| {
-        if let Some(level) = dimmer_percent {
-            let path = format!(
-                "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level={level:.3}"
-            );
-            http_get(host, &path)?;
-        }
-        if shutter_open == Some(true) {
-            http_get(
-                host,
-                "/titan/script/2/Programmer/Editor/Fixtures/SetControlValueByName?controlName=Shutter&functionName=Open&value=1.000&programmer=true&createRestorePoint=false",
-            )?;
+        for titan_id in KINGCLUB_BEAM_FIXTURE_TITAN_IDS {
+            let fixture = beam_fixture_handle(&fixtures, titan_id)?;
+            select_beam_fixture(host, &fixtures, titan_id)?;
+            if let Some(level) = dimmer_percent {
+                if level == 0.0 {
+                    set_fixture_preset_level(host, fixture, 0.0, KINGCLUB_BEAM_WALK_LEVEL / 100.0)?;
+                }
+                let path = format!(
+                    "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level={level:.3}"
+                );
+                http_get(host, &path)?;
+            }
+            if let Some(open) = shutter_open {
+                let value = if open { 1.0 } else { 0.0 };
+                let path = format!(
+                    "/titan/script/2/Programmer/Editor/Fixtures/SetControlValueByName?controlName=Shutter&functionName=Open&value={value:.3}&programmer=true&createRestorePoint=false"
+                );
+                http_get(host, &path)?;
+            }
+            if let Some(value) = pan_value {
+                let path = format!(
+                    "/titan/script/2/Programmer/Editor/Fixtures/SetControlValueByName?controlName=Pan&functionName=Pan&value={value:.3}&programmer=true&createRestorePoint=false"
+                );
+                http_get(host, &path)?;
+            }
+            if let Some(value) = tilt_value {
+                let path = format!(
+                    "/titan/script/2/Programmer/Editor/Fixtures/SetControlValueByName?controlName=Tilt&functionName=Tilt&value={value:.3}&programmer=true&createRestorePoint=false"
+                );
+                http_get(host, &path)?;
+            }
         }
         Ok::<(), String>(())
     })();
@@ -664,7 +839,105 @@ fn update_beam(
         fixture_count: KINGCLUB_BEAM_FIXTURE_TITAN_IDS.len(),
         dimmer_percent,
         shutter_open,
-        message: "25 台蓝花光束已更新".to_string(),
+        pan_value,
+        tilt_value,
+        message: "25 台光束节拍造型已更新".to_string(),
+    })
+}
+
+fn run_beam_show(
+    host: &str,
+    expected_show_name: &str,
+    bpm: f64,
+    pan_value: f64,
+    tilt_value: f64,
+) -> Result<TitanBeamShowAction, String> {
+    if !bpm.is_finite() || !(60.0..=200.0).contains(&bpm) {
+        return Err("光束秀 BPM 必须在 60-200 范围内".to_string());
+    }
+    for (name, value) in [("Pan", pan_value), ("Tilt", tilt_value)] {
+        validate_beam_position(name, Some(value))?;
+    }
+    if expected_show_name.trim() != KINGCLUB_GATLING_SHOW {
+        return Err("光束现场配置只绑定 Show 2024.12.28".to_string());
+    }
+    let status = read_status(host)?;
+    if status.show_name != expected_show_name {
+        return Err(format!(
+            "Titan Show 身份不匹配：需要 {expected_show_name}，当前为 {}",
+            status.show_name
+        ));
+    }
+    let fixtures = verified_beam_fixture_handles(host)?;
+
+    let beat_interval = Duration::from_secs_f64(60.0 / bpm);
+    let beat_interval_ms = beat_interval.as_millis() as u64;
+
+    let operation = (|| {
+        // Arming pre-positions the heads in blackout. The time-critical show
+        // only changes direct fixture levels, so six rows stay on the BPM grid.
+        let show_started = Instant::now();
+        let mut previous_row: Option<&[u64]> = None;
+        for (index, row) in KINGCLUB_BEAM_ROWS_SOUTH_TO_NORTH.iter().enumerate() {
+            select_beam_row(host, &fixtures, row)?;
+            let on_path = format!(
+                "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level={KINGCLUB_BEAM_WALK_LEVEL:.3}"
+            );
+            http_get(host, &on_path)?;
+            if let Some(previous) = previous_row {
+                select_beam_row(host, &fixtures, previous)?;
+                http_get(
+                    host,
+                    "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level=0",
+                )?;
+            }
+            previous_row = Some(row);
+            let deadline = show_started
+                + Duration::from_secs_f64(beat_interval.as_secs_f64() * (index + 1) as f64);
+            if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                std::thread::sleep(remaining);
+            }
+        }
+        if let Some(previous) = previous_row {
+            select_beam_row(host, &fixtures, previous)?;
+            http_get(
+                host,
+                "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level=0",
+            )?;
+        }
+        Ok::<(), String>(())
+    })();
+
+    // Fail closed: direct fixture levels and programmer values are both reset.
+    for titan_id in KINGCLUB_BEAM_FIXTURE_TITAN_IDS {
+        if let Ok(fixture) = beam_fixture_handle(&fixtures, titan_id) {
+            let _ = set_fixture_preset_level(host, fixture, 0.0, KINGCLUB_BEAM_WALK_LEVEL / 100.0);
+        }
+    }
+    if operation.is_err() {
+        for titan_id in KINGCLUB_BEAM_FIXTURE_TITAN_IDS {
+            if select_beam_fixture(host, &fixtures, titan_id).is_ok() {
+                let _ = http_get(
+                    host,
+                    "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level=0",
+                );
+                let _ = http_get(
+                    host,
+                    "/titan/script/2/Programmer/Editor/Fixtures/SetControlValueByName?controlName=Shutter&functionName=Open&value=0&programmer=true&createRestorePoint=false",
+                );
+            }
+        }
+    }
+    let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
+    operation?;
+
+    Ok(TitanBeamShowAction {
+        ok: true,
+        fixture_count: KINGCLUB_BEAM_FIXTURE_TITAN_IDS.len(),
+        bpm,
+        beat_interval_ms,
+        beats: KINGCLUB_BEAM_ROWS_SOUTH_TO_NORTH.len(),
+        message: "A组光束南区到北区六拍点缀已完成并归零".to_string(),
     })
 }
 
@@ -786,6 +1059,8 @@ pub async fn titan_update_beam(
     expected_show_name: String,
     dimmer_percent: Option<f64>,
     shutter_open: Option<bool>,
+    pan_value: Option<f64>,
+    tilt_value: Option<f64>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         serde_json::to_value(update_beam(
@@ -793,6 +1068,30 @@ pub async fn titan_update_beam(
             &expected_show_name,
             dimmer_percent,
             shutter_open,
+            pan_value,
+            tilt_value,
+        )?)
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn titan_run_beam_show(
+    host: String,
+    expected_show_name: String,
+    bpm: f64,
+    pan_value: f64,
+    tilt_value: f64,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        serde_json::to_value(run_beam_show(
+            &host,
+            &expected_show_name,
+            bpm,
+            pan_value,
+            tilt_value,
         )?)
         .map_err(|error| error.to_string())
     })
@@ -814,6 +1113,18 @@ mod tests {
     fn rejects_url_in_host_field() {
         assert!(validate_host("http://192.168.1.154").is_err());
         assert_eq!(validate_host("192.168.1.154").unwrap(), "192.168.1.154");
+    }
+
+    #[test]
+    fn detects_matching_site_subnet_without_accepting_tunnel_addresses() {
+        assert!(same_ipv4_subnet(
+            Ipv4Addr::new(192, 168, 1, 237),
+            Ipv4Addr::new(192, 168, 1, 154)
+        ));
+        assert!(!same_ipv4_subnet(
+            Ipv4Addr::new(198, 18, 0, 1),
+            Ipv4Addr::new(192, 168, 1, 154)
+        ));
     }
 
     #[test]
@@ -887,8 +1198,15 @@ mod tests {
 
     #[test]
     fn beam_automation_uses_verified_fixture_protocol_ranges() {
-        assert_eq!(KINGCLUB_BEAM_GROUP_TITAN_ID, 15_735);
         assert_eq!(KINGCLUB_BEAM_FIXTURE_TITAN_IDS.len(), 25);
+        assert_eq!(KINGCLUB_BEAM_ROWS_SOUTH_TO_NORTH.len(), 6);
+        assert_eq!(
+            KINGCLUB_BEAM_ROWS_SOUTH_TO_NORTH
+                .iter()
+                .map(|row| row.len())
+                .sum::<usize>(),
+            25
+        );
         assert!(validate_beam_level(Some(0.0)).is_ok());
         assert!(validate_beam_level(Some(100.0)).is_ok());
         assert!(validate_beam_level(Some(100.1)).is_err());

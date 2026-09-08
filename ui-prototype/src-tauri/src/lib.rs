@@ -609,73 +609,89 @@ fn open_lighting_package_directory(app: tauri::AppHandle, kind: String) -> Resul
 }
 
 #[tauri::command]
-fn mpv_runtime_status(
-    state: tauri::State<mpv_runtime::MpvManager>,
+async fn mpv_runtime_status(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
 ) -> Result<mpv_runtime::MpvRuntimeStatus, String> {
-    mpv_runtime::runtime_status(&state)
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::runtime_status(&manager))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn mpv_deck_load(
-    state: tauri::State<mpv_runtime::MpvManager>,
+async fn mpv_deck_load(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
     deck: u8,
     path: String,
 ) -> Result<mpv_runtime::MpvDeckState, String> {
-    mpv_runtime::load_deck(&state, deck, Path::new(&path))
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::load_deck(&manager, deck, Path::new(&path)))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn mpv_deck_switch_source(
-    state: tauri::State<mpv_runtime::MpvManager>,
+async fn mpv_deck_switch_source(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
     deck: u8,
     path: String,
 ) -> Result<mpv_runtime::MpvDeckState, String> {
-    mpv_runtime::switch_source_preserving_state(&state, deck, Path::new(&path))
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::switch_source_preserving_state(&manager, deck, Path::new(&path)))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn mpv_deck_set_paused(
-    state: tauri::State<mpv_runtime::MpvManager>,
+async fn mpv_deck_set_paused(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
     deck: u8,
     paused: bool,
 ) -> Result<mpv_runtime::MpvDeckState, String> {
-    mpv_runtime::set_paused(&state, deck, paused)
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::set_paused(&manager, deck, paused))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn mpv_deck_seek(
-    state: tauri::State<mpv_runtime::MpvManager>,
+async fn mpv_deck_seek(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
     deck: u8,
     seconds: f64,
 ) -> Result<mpv_runtime::MpvDeckState, String> {
-    mpv_runtime::seek(&state, deck, seconds)
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::seek(&manager, deck, seconds))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn mpv_deck_set_volume(
-    state: tauri::State<mpv_runtime::MpvManager>,
+async fn mpv_deck_set_volume(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
     deck: u8,
     volume: f64,
-) -> Result<mpv_runtime::MpvDeckState, String> {
-    mpv_runtime::set_volume(&state, deck, volume)
+) -> Result<(), String> {
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::set_volume(&manager, deck, volume))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn mpv_deck_state(
-    state: tauri::State<mpv_runtime::MpvManager>,
+async fn mpv_deck_state(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
     deck: u8,
 ) -> Result<mpv_runtime::MpvDeckState, String> {
-    mpv_runtime::deck_state(&state, deck)
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::deck_state(&manager, deck))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn mpv_deck_shutdown(state: tauri::State<mpv_runtime::MpvManager>, deck: u8) -> Result<(), String> {
-    mpv_runtime::shutdown_deck(&state, deck)
+async fn mpv_deck_shutdown(state: tauri::State<'_, mpv_runtime::MpvManager>, deck: u8) -> Result<(), String> {
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::shutdown_deck(&manager, deck))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn mpv_rescue_preview_sync(
-    state: tauri::State<mpv_runtime::MpvManager>,
+async fn mpv_rescue_preview_sync(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
     deck: u8,
     path: String,
     seconds: f64,
@@ -683,15 +699,16 @@ fn mpv_rescue_preview_sync(
     enabled: bool,
     volume: f64,
 ) -> Result<mpv_runtime::MpvRescuePreviewState, String> {
-    mpv_runtime::sync_rescue_preview(
-        &state,
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::sync_rescue_preview(
+        &manager,
         deck,
         Path::new(&path),
         seconds,
         playing,
         enabled,
         volume,
-    )
+    )).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2216,6 +2233,7 @@ pub fn run() {
             titan_runtime::titan_release_playback,
             titan_runtime::titan_update_gatling,
             titan_runtime::titan_update_beam,
+            titan_runtime::titan_run_beam_show,
             vocal_runtime_status,
             vocal_profile_input_devices,
             list_vocal_profiles,

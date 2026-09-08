@@ -19,3 +19,10 @@ test("offline settings surface exposes disarm but no arm or audio-start action",
   assert.doesNotMatch(appSource,/invoke\("vocal_evaluate_arm"\)/);
   assert.doesNotMatch(appSource,/>\s*(启动补音|武装音频)\s*</);
 });
+
+test("AI rescue stays globally disabled while accompaniment playback remains available",()=>{
+  assert.match(appSource,/const AI_RESCUE_FEATURE_ENABLED=false;/);
+  assert.match(appSource,/useState\(\{ 1: false, 2: false \}\)/);
+  assert.match(appSource,/补音功能暂时关闭；伴唱只播放纯伴奏/);
+  assert.doesNotMatch(appSource,/nextMode === "accompaniment"[\s\S]{0,120}setDeckAiRescueEnabled/);
+});

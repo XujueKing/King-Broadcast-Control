@@ -9,7 +9,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -61,7 +61,8 @@ const MPV_AUDIO_OUTPUT_ARGS: [&str; 6] = [
 ];
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-pub struct MpvManager(pub Mutex<MpvManagerInner>);
+#[derive(Clone)]
+pub struct MpvManager(pub Arc<Mutex<MpvManagerInner>>);
 
 pub struct MpvManagerInner {
     binary: Option<PathBuf>,
@@ -158,13 +159,13 @@ impl Default for MpvManager {
         let binary = discover_mpv_binary();
         let audio_device = binary.as_deref().and_then(discover_preferred_audio_device);
         let output_trim_db = preferred_output_trim_db(audio_device.as_ref());
-        Self(Mutex::new(MpvManagerInner {
+        Self(Arc::new(Mutex::new(MpvManagerInner {
             binary,
             audio_device,
             output_trim_db,
             instances: HashMap::new(),
             process_job: ProcessJob::new().expect("create mpv process job"),
-        }))
+        })))
     }
 }
 
@@ -436,6 +437,9 @@ fn spawn_deck(
     if output_trim_db < 0.0 {
         command.arg(format!("--af=volume={output_trim_db:.1}dB"));
     }
+    // Integration tests exercise decoding/IPC without ever reaching the PA.
+    #[cfg(test)]
+    command.args(["--ao=null", "--audio-device=auto"]);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command
@@ -451,11 +455,57 @@ fn spawn_deck(
         let _ = child.wait();
         return Err(error);
     }
+    start_diagnostics(&pipe_path, deck);
     Ok(MpvInstance {
         child,
         pipe_path,
         loaded_path: None,
     })
+}
+
+// One read-only subscription per player, not another decoder/output session.
+// Keep evidence across restarts without recording music or growing indefinitely.
+fn start_diagnostics(pipe_path: &str, deck: u8) {
+    let pipe_path = pipe_path.to_owned();
+    thread::spawn(move || {
+        let Some(root) = env::var_os("APPDATA") else { return };
+        let directory = PathBuf::from(root)
+            .join(if cfg!(test) { "club.king.broadcast-control/runtime/audio-diagnostics-test" } else { "club.king.broadcast-control/runtime/audio-diagnostics" });
+        if std::fs::create_dir_all(&directory).is_err() { return; }
+        let path = directory.join(format!("deck-{deck}.jsonl"));
+        // Retain the immediately preceding session, including abnormal exits.
+        let previous = directory.join(format!("deck-{deck}.previous.jsonl"));
+        if path.exists() && std::fs::copy(&path, &previous).is_err() { return; }
+        let Ok(mut log) = File::create(path) else { return };
+        let _ = writeln!(log, "{}", json!({"deck":deck,"event":"diagnostic-start","readOnly":true,"pid":std::process::id()}));
+        // The first frontend query may acquire the named-pipe instance while
+        // mpv creates its next listener. Retry just like normal IPC commands.
+        let mut pipe = match open_pipe_with_timeout(&pipe_path, Duration::from_secs(3)) {
+            Ok(pipe) => pipe,
+            Err(error) => {
+                let _ = writeln!(log, "{}", json!({"deck":deck,"event":"diagnostic-connect-failed","error":error.to_string()}));
+                return;
+            }
+        };
+        let mut requests = vec![json!({"command":["request_log_messages","info"]})];
+        for (index, name) in ["path", "pause", "audio-device", "audio-params", "audio-out-params", "eof-reached"].iter().enumerate() {
+            requests.push(json!({"command":["observe_property",index + 1,name]}));
+        }
+        for request in requests {
+            if writeln!(pipe, "{request}").is_err() { return; }
+        }
+        if pipe.flush().is_err() { return; }
+        let mut bytes = 0_usize;
+        for line in BufReader::new(pipe).lines() {
+            let Ok(line) = line else { break };
+            let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+            let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            let record = json!({"timestampMs":timestamp,"deck":deck,"event":event}).to_string();
+            bytes += record.len() + 1;
+            if bytes > 8 * 1024 * 1024 { break; }
+            if writeln!(log, "{record}").is_err() { break; }
+        }
+    });
 }
 
 fn send_command(pipe_path: &str, command: Value) -> Result<Value, String> {
@@ -611,6 +661,12 @@ pub fn load_deck(manager: &MpvManager, deck: u8, path: &Path) -> Result<MpvDeckS
         json!(["loadfile", canonical_path.to_string_lossy(), "replace"]),
     )?;
     send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+    wait_for_loaded_path(instance, &canonical_path)?;
+    instance.loaded_path = Some(canonical_path);
+    deck_state_for_instance(deck, instance)
+}
+
+fn wait_for_loaded_path(instance: &MpvInstance, canonical_path: &Path) -> Result<(), String> {
     let expected_path = normalized_mpv_path(&canonical_path.to_string_lossy());
     let settle_deadline = Instant::now() + MPV_LOAD_SETTLE_TIMEOUT;
     let mut stable_reads = 0_u8;
@@ -637,8 +693,7 @@ pub fn load_deck(manager: &MpvManager, deck: u8, path: &Path) -> Result<MpvDeckS
     if stable_reads < MPV_LOAD_STABLE_READS {
         return Err("mpv 装载未在安全窗口内稳定；Deck 已保持静音暂停".into());
     }
-    instance.loaded_path = Some(canonical_path);
-    deck_state_for_instance(deck, instance)
+    Ok(())
 }
 
 pub fn switch_source_preserving_state(
@@ -655,40 +710,20 @@ pub fn switch_source_preserving_state(
         .map_err(|_| "无法锁定 mpv 状态".to_string())?;
     let instance = ensure_instance(&mut manager, deck)?;
     let previous = deck_state_for_instance(deck, instance)?;
+    send_command(&instance.pipe_path, json!(["set_property", "volume", 0.0]))?;
+    send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
     send_command(
         &instance.pipe_path,
         json!(["loadfile", canonical_path.to_string_lossy(), "replace"]),
     )?;
     send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+    wait_for_loaded_path(instance, &canonical_path)?;
     instance.loaded_path = Some(canonical_path);
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let mut duration = 0.0;
-    while std::time::Instant::now() < deadline {
-        duration = property_f64(&instance.pipe_path, "duration");
-        if duration > 0.0 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    if previous.time_pos > 0.0 {
-        let target = if duration > 0.0 {
-            previous.time_pos.min(duration)
-        } else {
-            previous.time_pos
-        };
-        send_command(
-            &instance.pipe_path,
-            json!(["seek", target, "absolute+exact"]),
-        )?;
-    }
-    send_command(
-        &instance.pipe_path,
-        json!(["set_property", "volume", previous.volume.clamp(0.0, 100.0)]),
-    )?;
-    send_command(
-        &instance.pipe_path,
-        json!(["set_property", "pause", previous.paused]),
+    safe_seek_instance(
+        instance,
+        previous.time_pos,
+        !previous.paused,
+        previous.volume.clamp(0.0, 100.0),
     )?;
     deck_state_for_instance(deck, instance)
 }
@@ -725,7 +760,7 @@ pub fn seek(manager: &MpvManager, deck: u8, seconds: f64) -> Result<MpvDeckState
     deck_state_for_instance(deck, instance)
 }
 
-pub fn set_volume(manager: &MpvManager, deck: u8, volume: f64) -> Result<MpvDeckState, String> {
+pub fn set_volume(manager: &MpvManager, deck: u8, volume: f64) -> Result<(), String> {
     if !volume.is_finite() {
         return Err("音量必须是有限数字".to_string());
     }
@@ -738,7 +773,9 @@ pub fn set_volume(manager: &MpvManager, deck: u8, volume: f64) -> Result<MpvDeck
         &instance.pipe_path,
         json!(["set_property", "volume", volume.clamp(0.0, 100.0)]),
     )?;
-    deck_state_for_instance(deck, instance)
+    // Fade writes only acknowledge the write. The existing state poll owns
+    // snapshots; five extra IPC connections per fade step block both Decks.
+    Ok(())
 }
 
 pub fn deck_state(manager: &MpvManager, deck: u8) -> Result<MpvDeckState, String> {
@@ -849,6 +886,17 @@ fn deck_state_for_instance(deck: u8, instance: &mut MpvInstance) -> Result<MpvDe
     {
         return Err(format!("Deck {deck} mpv 实例已经退出"));
     }
+    // A transport failure is not a pause, zero progress or an EOF. Propagate
+    // it so the frontend retains its last good state instead of changing decks.
+    let paused = property(&instance.pipe_path, "pause")?.as_bool().ok_or("mpv pause 状态无效")?;
+    let volume = property(&instance.pipe_path, "volume")?.as_f64().ok_or("mpv volume 状态无效")?;
+    let (time_pos, duration, eof_reached) = if instance.loaded_path.is_some() {
+        (
+            property(&instance.pipe_path, "time-pos")?.as_f64().ok_or("mpv 播放位置无效")?,
+            property(&instance.pipe_path, "duration")?.as_f64().ok_or("mpv 时长无效")?,
+            property(&instance.pipe_path, "eof-reached")?.as_bool().ok_or("mpv EOF 状态无效")?,
+        )
+    } else { (0.0, 0.0, false) };
     Ok(MpvDeckState {
         deck,
         running: true,
@@ -856,17 +904,11 @@ fn deck_state_for_instance(deck: u8, instance: &mut MpvInstance) -> Result<MpvDe
             .loaded_path
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
-        paused: property(&instance.pipe_path, "pause")
-            .ok()
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true),
-        time_pos: property_f64(&instance.pipe_path, "time-pos"),
-        duration: property_f64(&instance.pipe_path, "duration"),
-        volume: property_f64(&instance.pipe_path, "volume"),
-        eof_reached: property(&instance.pipe_path, "eof-reached")
-            .ok()
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false),
+        paused,
+        time_pos,
+        duration,
+        volume,
+        eof_reached,
     })
 }
 
