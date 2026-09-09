@@ -13,3 +13,5 @@
 .app-shell .settings-view:has(.singer-gateway-settings)>.settings-mixer-model{min-height:82px}
 .app-shell .settings-view:has(.singer-gateway-settings)>.settings-columns{min-height:430px}
 .app-shell .settings-view>.singer-gateway-settings{margin:12px 16px}
+
+.singer-audio-binding,.singer-audio-panel{border-top:1px solid #38464c;margin-top:18px;padding-top:12px}.singer-audio-levels{display:flex;flex-wrap:wrap;gap:24px;margin:12px 0}.singer-gateway-settings .singer-audio-level{display:flex;flex:1 1 180px;flex-direction:column;align-items:stretch;gap:6px}.singer-audio-level span{display:flex;justify-content:space-between}.singer-audio-level input[type=range]{width:100%;min-height:40px;accent-color:#76caba}.singer-audio-level output{color:#8fcac0}.singer-audio-panel button[aria-pressed=true]{background:#6c4920}

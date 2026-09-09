@@ -1,4 +1,5 @@
 import { createLightingSession, rhythmPulsePayload, createVideoColorTracker } from "./lighting-session.js";
+import {defaultSingerAudioPolicy,singerAudioSnapshot,executeSingerAudio,transitionSingerAcappella} from "./singer-audio.js";
 import SingerGatewaySettings from "./SingerGatewaySettings.jsx";
 import { useSingerGateway } from "./singer-gateway.js";
 import { executeSingerOperation } from "./singer-playback.js";
@@ -182,6 +183,13 @@ const createMpvVolumeWriter = () => {
     enqueue(batch) {
       pending = batch;
       schedule();
+    },
+    async settled() {
+      const deadline=Date.now()+2500;
+      while(inFlight||pending||timer){
+        if(Date.now()>deadline)throw new Error("audio_readback_failed");
+        await new Promise(resolve=>window.setTimeout(resolve,20));
+      }
     },
     clear() {
       pending = null;
@@ -1484,7 +1492,7 @@ function MusicManagementView({ leftPanel, activeLibrary, onActiveLibraryChange, 
   </section>;
 }
 
-function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitorChange, onSave, dirty, runtimeCapability, audioAiWorker, aiRuntimeBusy, onAiRuntimeEnabledChange, mixerModelId, mixerDriverStatus, mixerControlHost, mixerMeterStatus, onMixerModelChange, onMixerControlHostChange, onOpenMixerDriver, titanHost, titanStatus, titanPlaybacks, titanMappings, titanActionStatus, lightingPackageStatus, onTitanHostChange, onRefreshTitan, onTitanMappingChange, onExportLightingPackage, onImportLightingPackage, onOpenLightingPackageDirectory, vocalStatus, vocalBusy, onRefreshVocal, onVocalPresetChange, onVocalDisarm, vocalRouting, routingBusy, onDiscoverRouting, onSaveRouting, calibrationStatus, onRunCalibration }) {
+function SettingsView({ singerAudioControls, screenTargets, monitorTargets, onScreenChange, onMonitorChange, onSave, dirty, runtimeCapability, audioAiWorker, aiRuntimeBusy, onAiRuntimeEnabledChange, mixerModelId, mixerDriverStatus, mixerControlHost, mixerMeterStatus, onMixerModelChange, onMixerControlHostChange, onOpenMixerDriver, titanHost, titanStatus, titanPlaybacks, titanMappings, titanActionStatus, lightingPackageStatus, onTitanHostChange, onRefreshTitan, onTitanMappingChange, onExportLightingPackage, onImportLightingPackage, onOpenLightingPackageDirectory, vocalStatus, vocalBusy, onRefreshVocal, onVocalPresetChange, onVocalDisarm, vocalRouting, routingBusy, onDiscoverRouting, onSaveRouting, calibrationStatus, onRunCalibration }) {
   const failoverView=describeVocalFailover(vocalStatus.failover);
   const aiRuntimeAvailable=Boolean(runtimeCapability.aiProcessingAvailable);
   const aiRuntimeEnabled=audioAiWorker.enabled!==false;
@@ -1498,7 +1506,7 @@ function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitor
       <div className="settings-ai-runtime-state" role="status"><i/><span><b>{!aiRuntimeAvailable?(runtimeCapability.hasNvidia?"AI 制作环境未就绪":"本机为播放版"):aiRuntimeEnabled?(audioAiWorker.running?"制作后台运行中":audioAiWorker.playbackProtected?"播放保护 · 制作已暂停":"制作后台启动中"):"开业模式 · AI 已关闭"}</b><small>{!aiRuntimeAvailable?(runtimeCapability.message||"本机不会启动 MOSS 与制作 Worker"):audioAiWorker.message||(aiRuntimeEnabled?"正在读取后台状态":"MOSS 与 Worker 均未运行")}</small></span></div>
       <button type="button" className="settings-ai-runtime-toggle" role="switch" aria-checked={aiRuntimeEnabled} disabled={!aiRuntimeAvailable||aiRuntimeBusy} onClick={()=>onAiRuntimeEnabledChange(!aiRuntimeEnabled)}><span/><b>{aiRuntimeBusy?"处理中":aiRuntimeEnabled?"关闭 AI 制作":"开启 AI 制作"}</b></button>
     </section>
-    <SingerGatewaySettings/>
+    <SingerGatewaySettings audioControls={singerAudioControls}/>
     <section className="settings-mixer-model" aria-label="调音台型号设置">
       <div className="settings-mixer-identity"><SlidersHorizontal weight="fill"/><span><b>调音台型号包</b><small>USB-B 传输音频 · 以太网 TCP-MIDI 控制 · 选择型号后切换数字孪生 UI 与驱动</small></span></div>
       <label><span>当前型号</span><select value={mixerModelId} onChange={event=>onMixerModelChange(event.target.value)}>{mixerModels.map(model=><option value={model.id} key={model.id}>{model.displayName}</option>)}</select></label>
@@ -1643,6 +1651,11 @@ export function App() {
   // Crossfade remains a live Auto-DJ state and must not be restored mid-queue.
   const [crossfade, setCrossfade] = useState(28);
   const [masterVolume, setMasterVolume] = useState(()=>loadMixerNumber("king.mixer.master",66));
+  const [singerConfiguration,setSingerConfiguration]=useState({deck:1,audioPolicy:defaultSingerAudioPolicy});
+  const singerConfigurationRef=useRef(singerConfiguration);
+  const [singerAcappella,setSingerAcappella]=useState(false);
+  const singerMusicRestoreRef=useRef(null);
+  const [singerAudioBusy,setSingerAudioBusy]=useState(false);
   const [headphoneVolume, setHeadphoneVolume] = useState(()=>loadMixerNumber("king.mixer.headphones",33));
   const [microphoneVolumes, setMicrophoneVolumes] = useState([null,null]);
   const [faderInteractionActive, setFaderInteractionActive] = useState(false);
@@ -3252,9 +3265,9 @@ export function App() {
     writeDeckOutputVolumes(crossfade,masterVolume);
   },[crossfade,masterVolume,tracks,writeDeckOutputVolumes]);
   useEffect(() => {
-    window.localStorage.setItem("king.mixer.master",String(masterVolume));
+    window.localStorage.setItem("king.mixer.master",String(singerAcappella?singerMusicRestoreRef.current??masterVolume:masterVolume));
     window.localStorage.setItem("king.mixer.headphones",String(headphoneVolume));
-  },[masterVolume,headphoneVolume]);
+  },[masterVolume,headphoneVolume,singerAcappella]);
   useEffect(() => {
     window.localStorage.setItem("king.textDrafts", JSON.stringify(textDrafts));
   }, [textDrafts]);
@@ -4362,7 +4375,67 @@ export function App() {
       mpvEndingRef.current[deckNumber]=false;
     }
   };
+  const getSingerAudio=()=>singerAudioSnapshot({
+    policy:singerConfigurationRef.current.audioPolicy,
+    musicVolume:masterVolume,acappella:singerAcappella,
+    musicReady:mpvEnabled&&Boolean(singerClockRef.current[singerConfigurationRef.current.deck]?.running
+        &&singerClockRef.current[singerConfigurationRef.current.deck]?.path
+        &&mpvLoadedPathsRef.current[singerConfigurationRef.current.deck]===playbackPathForDeck(singerConfigurationRef.current.deck,tracks[singerConfigurationRef.current.deck===1?deck1:deck2])
+        &&!mpvLoadingRef.current[singerConfigurationRef.current.deck])
+      &&Date.now()-(singerClockRef.current[singerConfigurationRef.current.deck]?.sampledAtUnixMs??0)<2000
+      &&deckCue.deck===null&&!deckCue.busy&&mpvAutoTransitionRef.current.phase==="idle"
+      &&!playingDecks[singerConfigurationRef.current.deck===1?2:1],
+    mixerLive:mixerControlStatus.mode==="hardware-live"&&qu16ControlSessionRef.current.live,
+    mixer:mixerParameterSnapshotRef.current,
+  });
+  const setSingerMusic=async(deck,value)=>{
+    await mpvVolumeWriterRef.current.settled();
+    const mix=deckCueMix(crossfade,value,headphoneVolume,null);
+    const gain=deck===1?mix.deck1Gain:mix.deck2Gain;
+    const volume=deckOutputVolumePercent(gain,value,deckVocalModes[deck]);
+    await invoke("mpv_deck_set_volume",{deck,volume});
+    const state=await invoke("mpv_deck_state",{deck});
+    applyMpvDeckState(state);
+    if(!state.running||!state.path||!Number.isFinite(state.volume)||Math.abs(state.volume-volume)>0.6)throw new Error("audio_readback_failed");
+    flushSync(()=>setMasterVolume(value));
+    await mpvVolumeWriterRef.current.settled();
+  };
+  const executeSingerWork=async work=>{
+    if(singerCommandBusyRef.current)throw new Error("controller_busy");
+    singerCommandBusyRef.current=true;setSingerAudioBusy(true);
+    try{
+      const context=Object.fromEntries(Object.keys(singerContextRef.current).map(key=>
+        [key,(...args)=>singerContextRef.current[key](...args)]));
+      await executeSingerOperation(work,context);
+      const state=await invoke("mpv_deck_state",{deck:work.deck});
+      applyMpvDeckState(state);
+      flushSync(()=>setDeckProgress(current=>({...current})));
+    }catch(error){setSongPackageMessage(`主唱操作未完成：${String(error)}`);throw error}
+    finally{singerCommandBusyRef.current=false;setSingerAudioBusy(false)}
+  };
   singerContextRef.current={
+    audio:async(deck,operation)=>{
+      if(deck!==singerConfigurationRef.current.deck)throw new Error("audio_unavailable");
+      return executeSingerAudio(operation,{
+        policy:()=>singerConfigurationRef.current.audioPolicy,snapshot:getSingerAudio,
+        setMusic:value=>setSingerMusic(deck,value),
+        setAcappella:async(enabled,max)=>{
+          const next=await transitionSingerAcappella({enabled,current:singerAcappella,volume:masterVolume,
+            restore:singerMusicRestoreRef.current,max,write:value=>setSingerMusic(deck,value)});
+          singerMusicRestoreRef.current=next.restore;
+          flushSync(()=>setSingerAcappella(next.enabled));
+        },
+        writeMixer:async write=>{
+          const session={...qu16ControlSessionRef.current};
+          const result=await writeQu16Parameters([write]);
+          if(!result.accepted)throw new Error("mixer_unavailable");
+          const confirmed=await waitForQu16Readback([write]);
+          const current=qu16ControlSessionRef.current;
+          if(!current.live||current.generation!==session.generation||current.sessionId!==session.sessionId)throw new Error("mixer_unavailable");
+          if(!confirmed)throw new Error("audio_readback_failed");
+        },
+      });
+    },
     ready:()=>mpvEnabled,
     cueActive:()=>deckCue.deck!==null||deckCue.busy,
     transitionBusy:()=>mpvAutoTransitionRef.current.phase!=="idle",
@@ -4391,7 +4464,14 @@ export function App() {
     setVocalMode:(deck,mode)=>switchDeckVocalMode(deck,deck===1?deck1:deck2,{singer:true,mode}),
   };
   useSingerGateway({desktopRuntime,tracks,
+    onConfiguration:response=>{
+      const next={deck:response.deck,audioPolicy:response.audioPolicy??defaultSingerAudioPolicy};
+      if(JSON.stringify(next)!==JSON.stringify(singerConfigurationRef.current)){
+        singerConfigurationRef.current=next;setSingerConfiguration(next);
+      }
+    },
     getSnapshot:()=>({
+      audio:getSingerAudio(),
       runtimeReady:mpvEnabled,
       cueActive:deckCue.deck!==null||deckCue.busy,
       transitionBusy:mpvAutoTransitionRef.current.phase!=="idle",
@@ -4407,19 +4487,7 @@ export function App() {
           playbackMode:deckPlaybackModes[deck],volume:matched?Number(clock.volume)||0:0};
       }),
     }),
-    execute:async work=>{
-      if(singerCommandBusyRef.current)throw new Error("controller_busy");
-      singerCommandBusyRef.current=true;
-      try{
-        const context=Object.fromEntries(Object.keys(singerContextRef.current).map(key=>
-          [key,(...args)=>singerContextRef.current[key](...args)]));
-        await executeSingerOperation(work,context);
-        // Publish the completed song/mode together with its receipt, including
-        // while the operator is on another page or the app is minimized.
-        flushSync(()=>setDeckProgress(current=>({...current})));
-      }catch(error){setSongPackageMessage(`主唱操作未完成：${String(error)}`);throw error}
-      finally{singerCommandBusyRef.current=false}
-    },
+    execute:executeSingerWork,
   });
   const deckOnePath=playbackPathForDeck(1,tracks[deck1])??null;
   const deckTwoPath=playbackPathForDeck(2,tracks[deck2])??null;
@@ -4960,6 +5028,7 @@ export function App() {
     ? { deck1:deckCue.deck===1?headphoneVolume:0, deck2:deckCue.deck===2?headphoneVolume:0 }
     : { deck1:100-crossfade, deck2:crossfade };
   const handleCrossfadeChange = (event) => {
+    if(singerCommandBusyRef.current)return;
     const automaticTarget=mpvAutoTransitionRef.current.targetDeck;
     if(automaticTarget)void takeDeckOperatorControl(automaticTarget,{rollbackAutoTarget:false});
     else cancelMpvAutoTransition();
@@ -4968,11 +5037,14 @@ export function App() {
     setCrossfade(nextCrossfade);
   };
   const handleMasterVolumeChange = (event) => {
+    if(singerCommandBusyRef.current)return;
+    singerMusicRestoreRef.current=null;setSingerAcappella(false);
     const nextMasterVolume = Number(event.target.value);
     writeDeckOutputVolumes(crossfade,nextMasterVolume);
     setMasterVolume(nextMasterVolume);
   };
   const handleMicrophoneVolumeChange = (index,event) => {
+    if(singerCommandBusyRef.current)return;
     const binding=microphoneBindings[index];
     if(!binding||mixerControlStatus.mode!=="hardware-live")return;
     const value=Number(event.target.value);
@@ -5206,7 +5278,8 @@ export function App() {
     </header>
 
     <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""} ${activeNav==="调音台"?"mixer-layout":""} ${activeNav==="Avolites Tiger Touch Pro"?"titan-layout":""} ${activeNav==="演出编排"?"show-editor-layout":""}`}>
-      {activeNav === "设置" ? <SettingsView
+      {activeNav === "设置" ? <SettingsView singerAudioControls={{audio:getSingerAudio(),policy:singerConfiguration.audioPolicy,busy:singerAudioBusy,
+        onOperation:operation=>executeSingerWork({deck:singerConfigurationRef.current.deck,command:{operation}})}}
         screenTargets={screenTargets}
         monitorTargets={monitorTargets}
         onScreenChange={updateScreenTarget}

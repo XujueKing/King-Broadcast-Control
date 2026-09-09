@@ -13,9 +13,9 @@ export function singerCatalog(tracks) {
 
 // This bridge stays mounted on every desktop page. Only this bridge can claim
 // LAN commands; the output WebView and tablet never create another player.
-export function useSingerGateway({desktopRuntime,tracks,getSnapshot,execute}) {
-  const current=useRef({getSnapshot,execute});
-  current.current={getSnapshot,execute};
+export function useSingerGateway({desktopRuntime,tracks,getSnapshot,execute,onConfiguration}) {
+  const current=useRef({getSnapshot,execute,onConfiguration});
+  current.current={getSnapshot,execute,onConfiguration};
   useEffect(()=>{
     if(!desktopRuntime)return;
     invoke("singer_gateway_catalog",{songs:singerCatalog(tracks)})
@@ -29,6 +29,7 @@ export function useSingerGateway({desktopRuntime,tracks,getSnapshot,execute}) {
       try {
         const response=await invoke("singer_gateway_exchange",{snapshot:current.current.getSnapshot()});
         enabled=response.enabled;
+        current.current.onConfiguration?.(response);
         if(response.work){
           const work=response.work;
           void (async()=>{

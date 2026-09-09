@@ -6,7 +6,7 @@ export async function executeSingerOperation(work, context) {
   if(![1,2].includes(deck)||!context.ready())throw new Error("player_unavailable");
   if(context.cueActive())throw new Error("cue_active");
   const type=operation.type;
-  if(!["select","next","play","pause","restart","vocal_mode"].includes(type))throw new Error("unsupported_operation");
+  if(!["select","next","play","pause","restart","vocal_mode","audio_level","acappella"].includes(type))throw new Error("unsupported_operation");
   if(type==="select"||type==="next") {
     const index=context.findTrack(songKey);
     if(index<0)throw new Error("song_not_found");
@@ -14,6 +14,7 @@ export async function executeSingerOperation(work, context) {
     return;
   }
   if(context.transitionBusy()||context.otherPlaying(deck))throw new Error("desktop_mix_active");
+  if(type==="audio_level"||type==="acappella")return context.audio(deck,operation);
   if(!context.hasTrack(deck))throw new Error("no_song_selected");
   if(type==="pause")return context.setPaused(deck,true);
   if(type==="play")return context.setPaused(deck,false);

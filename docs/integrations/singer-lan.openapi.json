@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "KING CLUB Singer LAN API",
-    "version": "1.0.0",
-    "description": "Native staff LAN client; all requests require Bearer token. Accepted commands must be polled to completion."
+    "version": "1.1.0",
+    "description": "Native staff LAN client; all requests require Bearer token. Accepted commands must be polled to completion. Optional additive audio capabilities; absent audio means controller upgrade required. Commands obey configured caps. A cappella mutes computer music only, preserving clock and microphone/FX. Hardware success requires actual readback."
   },
   "servers": [
     {
@@ -376,6 +376,48 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "control",
+              "value"
+            ],
+            "properties": {
+              "type": {
+                "const": "audio_level"
+              },
+              "control": {
+                "enum": [
+                  "music",
+                  "microphone",
+                  "reverb"
+                ]
+              },
+              "value": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "enabled"
+            ],
+            "properties": {
+              "type": {
+                "const": "acappella"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
           }
         ]
       },
@@ -570,6 +612,12 @@
           },
           "busy": {
             "type": "boolean"
+          },
+          "audio": {
+            "$ref": "#/components/schemas/Audio"
+          },
+          "audioPolicy": {
+            "$ref": "#/components/schemas/AudioPolicy"
           }
         },
         "required": [
@@ -649,6 +697,101 @@
           "timing",
           "clock"
         ]
+      },
+      "AudioLevel": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "value",
+          "reason"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "value": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AudioPolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "microphone",
+          "reverbBus",
+          "musicMax",
+          "microphoneMax",
+          "reverbMax"
+        ],
+        "properties": {
+          "microphone": {
+            "enum": [
+              "",
+              "ch-1",
+              "ch-2",
+              "ch-6"
+            ]
+          },
+          "reverbBus": {
+            "enum": [
+              "",
+              "FX 1",
+              "FX 2"
+            ]
+          },
+          "musicMax": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "microphoneMax": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 77
+          },
+          "reverbMax": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 77
+          }
+        }
+      },
+      "Audio": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "music",
+          "microphone",
+          "reverb",
+          "acappella"
+        ],
+        "properties": {
+          "music": {
+            "$ref": "#/components/schemas/AudioLevel"
+          },
+          "microphone": {
+            "$ref": "#/components/schemas/AudioLevel"
+          },
+          "reverb": {
+            "$ref": "#/components/schemas/AudioLevel"
+          },
+          "acappella": {
+            "type": "boolean"
+          }
+        }
       }
     }
   }

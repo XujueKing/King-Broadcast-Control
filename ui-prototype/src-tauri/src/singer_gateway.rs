@@ -33,6 +33,8 @@ fn new_id() -> String {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub audio_policy: AudioPolicy,
     pub enabled: bool,
     pub port: u16,
     pub deck: u8,
@@ -41,12 +43,50 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            audio_policy: AudioPolicy::default(),
             enabled: false,
             port: 4865,
             deck: 1,
             token: new_id() + &new_id(),
         }
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioPolicy {
+    pub microphone: String,
+    pub reverb_bus: String,
+    pub music_max: u8,
+    pub microphone_max: u8,
+    pub reverb_max: u8,
+}
+impl Default for AudioPolicy {
+    fn default() -> Self {
+        Self { microphone: String::new(), reverb_bus: String::new(), music_max: 100, microphone_max: 77, reverb_max: 60 }
+    }
+}
+impl AudioPolicy {
+    fn valid(&self) -> bool {
+        ["", "ch-1", "ch-2", "ch-6"].contains(&self.microphone.as_str())
+            && ["", "FX 1", "FX 2"].contains(&self.reverb_bus.as_str())
+            && self.music_max <= 100 && self.microphone_max <= 77 && self.reverb_max <= 77
+    }
+}
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioLevel {
+    pub available: bool,
+    pub value: Option<u8>,
+    pub reason: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AudioSnapshot {
+    pub music: AudioLevel,
+    pub microphone: AudioLevel,
+    pub reverb: AudioLevel,
+    pub acappella: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -86,6 +126,8 @@ pub struct DeckSnapshot {
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub audio: AudioSnapshot,
     pub decks: Vec<DeckSnapshot>,
     pub cue_active: bool,
     pub transition_busy: bool,
@@ -99,6 +141,8 @@ pub enum Operation {
         #[serde(rename = "songId")]
         song_id: String,
     },
+    AudioLevel { control: String, value: u8 },
+    Acappella { enabled: bool },
     Play {},
     Pause {},
     Restart {},
@@ -226,7 +270,7 @@ impl SingerGateway {
             "addresses": addresses, "controllerOnline": inner.fresh(), "songCount": inner.catalog.len()})
     }
     pub async fn configure(&self, config: Config) -> Result<Value, String> {
-        if config.port < 1024
+        if !config.audio_policy.valid() || config.port < 1024
             || ![1, 2].contains(&config.deck)
             || config.token.len() != 64
             || !config.token.bytes().all(|b| b.is_ascii_hexdigit())
@@ -316,7 +360,7 @@ impl SingerGateway {
     pub fn exchange(&self, snapshot: Snapshot) -> Value {
         let fingerprint = serde_json::to_string(&json!({"decks": snapshot.decks.iter().map(|d|
             json!([d.deck, d.song_key, d.loaded, d.paused, d.vocal_mode, d.playback_mode, d.volume.round()])).collect::<Vec<_>>(),
-            "cue": snapshot.cue_active, "transition": snapshot.transition_busy, "ready": snapshot.runtime_ready})).unwrap();
+            "audio": snapshot.audio, "cue": snapshot.cue_active, "transition": snapshot.transition_busy, "ready": snapshot.runtime_ready})).unwrap();
         let mut inner = self.0.inner.lock().unwrap();
         if inner.fingerprint != fingerprint {
             inner.fingerprint = fingerprint;
@@ -348,11 +392,11 @@ impl SingerGateway {
                         _ => None,
                     };
                     inner.entries[index].receipt.status = "executing".into();
-                    work = json!({"command": command, "deck": deck, "songKey": song_key});
+                    work = json!({"command": command, "deck": deck, "songKey": song_key, "audioPolicy": inner.config.audio_policy});
                 }
             }
         }
-        json!({"enabled": inner.config.enabled, "deck": deck, "work": work})
+        json!({"enabled": inner.config.enabled, "deck": deck, "work": work, "audioPolicy": inner.config.audio_policy})
     }
     pub fn complete(&self, id: &str, error: Option<String>) -> Result<(), String> {
         let mut inner = self.0.inner.lock().unwrap();
@@ -373,6 +417,8 @@ impl SingerGateway {
         entry.receipt.error = error.map(|message| {
             let code = message.strip_prefix("Error: ").unwrap_or(&message);
             if [
+                "invalid_audio_value", "audio_unbound", "mixer_unavailable", "audio_readback_pending",
+                "audio_unavailable", "audio_readback_failed", "acappella_active",
                 "player_unavailable",
                 "cue_active",
                 "desktop_mix_active",
@@ -429,6 +475,26 @@ impl SingerGateway {
             .any(|e| matches!(e.receipt.status.as_str(), "queued" | "executing"))
         {
             return Err(ApiError(StatusCode::CONFLICT, "controller_busy"));
+        }
+        let policy = &inner.config.audio_policy;
+        let audio = &inner.snapshot.audio;
+        match &command.operation {
+            Operation::AudioLevel { control, value } => {
+                let (level, max, bound) = match control.as_str() {
+                    "music" => (&audio.music, policy.music_max, true),
+                    "microphone" => (&audio.microphone, policy.microphone_max, !policy.microphone.is_empty()),
+                    "reverb" => (&audio.reverb, policy.reverb_max, !policy.microphone.is_empty() && !policy.reverb_bus.is_empty()),
+                    _ => return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_audio_value")),
+                };
+                if *value > max { return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_audio_value")); }
+                if !bound { return Err(ApiError(StatusCode::CONFLICT, "audio_unbound")); }
+                if !level.available { return Err(ApiError(StatusCode::CONFLICT, "audio_unavailable")); }
+                if control == "music" && audio.acappella { return Err(ApiError(StatusCode::CONFLICT, "acappella_active")); }
+            }
+            Operation::Acappella { .. } if !audio.music.available => {
+                return Err(ApiError(StatusCode::CONFLICT, "audio_unavailable"));
+            }
+            _ => {}
         }
         match &command.operation {
             Operation::Select { song_id } | Operation::Next { song_id }
@@ -537,6 +603,7 @@ async fn state(State(gateway): State<SingerGateway>) -> Json<Value> {
             "positionSeconds": d.position_seconds, "sampledAtUnixMs": d.sampled_at_unix_ms, "vocalMode": d.vocal_mode,
             "playbackMode": d.playback_mode, "volume": d.volume,
             "clockFresh": inner.fresh() && now_ms().abs_diff(d.sampled_at_unix_ms) < 2000})),
+        "audio": inner.snapshot.audio, "audioPolicy": inner.config.audio_policy,
         "cueActive": inner.snapshot.cue_active, "transitionBusy": inner.snapshot.transition_busy,
         "busy": inner.entries.iter().any(|e| matches!(e.receipt.status.as_str(), "queued" | "executing"))}),
     )
@@ -620,8 +687,10 @@ pub async fn singer_gateway_configure(
     port: u16,
     deck: u8,
     rotate_token: bool,
+    audio_policy: Option<AudioPolicy>,
 ) -> Result<Value, String> {
     let mut config = state.0.inner.lock().unwrap().config.clone();
+    if let Some(policy) = audio_policy { config.audio_policy = policy; }
     config.enabled = enabled;
     config.port = port;
     config.deck = deck;
@@ -956,4 +1025,45 @@ mod tests {
         assert!(response.contains("\"positionSeconds\":12.5"));
         server.abort();
     }
+    #[test]
+    fn audio_requires_explicit_binding_and_enforces_limits_before_claim() {
+        let gateway = fixture();
+        let mut snap = snapshot();
+        snap.audio.music = AudioLevel { available: true, value: Some(66), reason: None };
+        snap.audio.microphone = AudioLevel { available: true, value: Some(60), reason: None };
+        gateway.exchange(snap.clone());
+        let mut command = make_command(&gateway);
+        command.operation = Operation::AudioLevel { control: "microphone".into(), value: 60 };
+        assert_eq!(gateway.submit(command.clone()).err().unwrap().1, "audio_unbound");
+        gateway.0.inner.lock().unwrap().config.audio_policy.microphone = "ch-6".into();
+        command.operation = Operation::AudioLevel { control: "microphone".into(), value: 78 };
+        assert_eq!(gateway.submit(command.clone()).err().unwrap().1, "invalid_audio_value");
+        command.operation = Operation::AudioLevel { control: "gain".into(), value: 30 };
+        assert_eq!(gateway.submit(command.clone()).err().unwrap().1, "invalid_audio_value");
+        command.operation = Operation::AudioLevel { control: "music".into(), value: 55 };
+        assert_eq!(gateway.submit(command.clone()).unwrap().status, "queued");
+        let work = gateway.exchange(snap);
+        assert_eq!(work["work"]["command"]["operation"]["control"], "music");
+        gateway.complete(&command.id, Some("Error: audio_readback_failed".into())).unwrap();
+        let inner = gateway.0.inner.lock().unwrap();
+        assert_eq!(inner.entries.back().unwrap().receipt.status, "failed");
+        assert_eq!(inner.entries.back().unwrap().receipt.error.as_deref(), Some("audio_readback_failed"));
+    }
+    #[test]
+    fn audio_defaults_and_wire_types_fail_closed() {
+        let config: Config = serde_json::from_value(json!({"enabled":false,"port":4865,"deck":1,"token":"0".repeat(64)})).unwrap();
+        assert!(config.audio_policy.microphone.is_empty());
+        assert!(config.audio_policy.reverb_bus.is_empty());
+        for op in [json!({"type":"audio_level","control":"music","value":-1}),
+            json!({"type":"audio_level","control":"music","value":1.5}),
+            json!({"type":"audio_level","control":"microphone","value":60,"target":"lr-master"}),
+            json!({"type":"acappella","enabled":"true"})] {
+            assert!(serde_json::from_value::<Operation>(op).is_err());
+        }
+        let mut policy = AudioPolicy::default();
+        policy.microphone = "ch-11".into(); assert!(!policy.valid());
+        policy.microphone = "ch-6".into(); policy.reverb_bus = "LR".into(); assert!(!policy.valid());
+        policy.reverb_bus = "FX 1".into(); policy.microphone_max = 78; assert!(!policy.valid());
+    }
+
 }
