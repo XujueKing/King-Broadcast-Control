@@ -41,6 +41,7 @@ const createClip=(trackId,name,index,projectDuration)=>{
     id:`${trackId}-clip-${index+1}`,
     name,
     assetId:"",
+    sourceDuration,
     sourceIn:0,
     sourceOut:sourceDuration,
     timelineDuration,
@@ -74,19 +75,23 @@ export function createDefaultShowProject(songKey,durationSeconds=342){
 
 const normalizeClip=(clip,track,index,duration)=>{
   const fallback=createClip(track.id,String(clip?.name||`片段 ${index+1}`),index,duration);
-  const sourceIn=numberWithin(clip?.sourceIn,0,duration,fallback.sourceIn);
-  const sourceOut=numberWithin(clip?.sourceOut,sourceIn+.1,duration,Math.max(sourceIn+.1,fallback.sourceOut));
+  const sourceDuration=numberWithin(clip?.sourceDuration,.1,24*60*60,fallback.sourceDuration);
+  const sourceIn=numberWithin(clip?.sourceIn,0,Math.max(0,sourceDuration-.1),0);
+  const sourceOut=numberWithin(clip?.sourceOut,sourceIn+.1,sourceDuration,sourceDuration);
   return {
     ...fallback,
     ...clip,
     id:String(clip?.id||fallback.id),
     name:String(clip?.name||fallback.name),
     assetId:String(clip?.assetId||""),
+    sourceDuration,
     sourceIn,
     sourceOut,
     timelineDuration:numberWithin(clip?.timelineDuration,.1,duration,fallback.timelineDuration),
     loopMode:String(clip?.loopMode||fallback.loopMode),
     repeatCount:Math.round(numberWithin(clip?.repeatCount,1,999,1)),
+    opacity:numberWithin(clip?.opacity,0,1,1),
+    scale:numberWithin(clip?.scale,.1,3,1),
   };
 };
 
@@ -117,6 +122,7 @@ export const findShowClip=(project,trackId,clipId)=>{
 
 export function updateShowClip(project,trackId,clipId,patch){
   const duration=project.durationSeconds;
+  if(project.tracks.find(track=>track.id===trackId)?.locked)return project;
   return {
     ...project,
     tracks:project.tracks.map(track=>track.id!==trackId?track:{
@@ -160,11 +166,13 @@ export function addAssetToShowTrack(project,trackId,asset,targetIndex=Number.MAX
   const track=project.tracks.find(item=>item.id===trackId);
   if(!track||track.locked||!trackAcceptsAsset(trackId,String(asset?.type||"").toUpperCase()))return project;
   const sequence=project.nextClipId;
-  const sourceDuration=numberWithin(asset?.durationSeconds,.1,project.durationSeconds,30);
+  const sourceDuration=numberWithin(asset?.durationSeconds,.1,24*60*60,30);
   const clip=normalizeClip({
     id:`show-clip-${sequence}`,
     name:String(asset?.name||`素材 ${sequence}`),
     assetId:String(asset?.id||""),
+    sourcePath:String(asset?.path||""),
+    sourceDuration,
     sourceIn:0,
     sourceOut:sourceDuration,
     timelineDuration:sourceDuration,

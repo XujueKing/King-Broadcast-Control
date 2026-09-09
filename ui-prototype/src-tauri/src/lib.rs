@@ -16,6 +16,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, Webvie
 mod ai_analysis;
 mod ai_worker;
 mod audio_importer;
+mod deadline_pipe;
 mod kinglight;
 mod kingsong;
 mod libmpv_runtime;
@@ -25,6 +26,7 @@ mod network_discovery;
 mod qu16_control;
 mod qu16_runtime;
 mod runtime_capability;
+mod runtime_paths;
 mod titan_runtime;
 mod vocal_meter_bridge;
 mod vocal_profiles;
@@ -614,7 +616,8 @@ async fn mpv_runtime_status(
 ) -> Result<mpv_runtime::MpvRuntimeStatus, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || mpv_runtime::runtime_status(&manager))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -624,8 +627,11 @@ async fn mpv_deck_load(
     path: String,
 ) -> Result<mpv_runtime::MpvDeckState, String> {
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || mpv_runtime::load_deck(&manager, deck, Path::new(&path)))
-        .await.map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        mpv_runtime::load_deck(&manager, deck, Path::new(&path))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -635,8 +641,11 @@ async fn mpv_deck_switch_source(
     path: String,
 ) -> Result<mpv_runtime::MpvDeckState, String> {
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || mpv_runtime::switch_source_preserving_state(&manager, deck, Path::new(&path)))
-        .await.map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        mpv_runtime::switch_source_preserving_state(&manager, deck, Path::new(&path))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -647,7 +656,8 @@ async fn mpv_deck_set_paused(
 ) -> Result<mpv_runtime::MpvDeckState, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || mpv_runtime::set_paused(&manager, deck, paused))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -658,7 +668,8 @@ async fn mpv_deck_seek(
 ) -> Result<mpv_runtime::MpvDeckState, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || mpv_runtime::seek(&manager, deck, seconds))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -669,7 +680,8 @@ async fn mpv_deck_set_volume(
 ) -> Result<(), String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || mpv_runtime::set_volume(&manager, deck, volume))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -679,14 +691,19 @@ async fn mpv_deck_state(
 ) -> Result<mpv_runtime::MpvDeckState, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || mpv_runtime::deck_state(&manager, deck))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-async fn mpv_deck_shutdown(state: tauri::State<'_, mpv_runtime::MpvManager>, deck: u8) -> Result<(), String> {
+async fn mpv_deck_shutdown(
+    state: tauri::State<'_, mpv_runtime::MpvManager>,
+    deck: u8,
+) -> Result<(), String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || mpv_runtime::shutdown_deck(&manager, deck))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -700,15 +717,19 @@ async fn mpv_rescue_preview_sync(
     volume: f64,
 ) -> Result<mpv_runtime::MpvRescuePreviewState, String> {
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || mpv_runtime::sync_rescue_preview(
-        &manager,
-        deck,
-        Path::new(&path),
-        seconds,
-        playing,
-        enabled,
-        volume,
-    )).await.map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        mpv_runtime::sync_rescue_preview(
+            &manager,
+            deck,
+            Path::new(&path),
+            seconds,
+            playing,
+            enabled,
+            volume,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1097,36 +1118,6 @@ fn enforce_output_window_bounds(
             unsafe { GetLastError() }
         ));
     }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn request_extended_desktop() -> Result<(), String> {
-    use std::{os::windows::process::CommandExt, process::Command};
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let display_switch = std::env::var_os("WINDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-        .join("System32")
-        .join("DisplaySwitch.exe");
-    let status = Command::new(&display_switch)
-        .arg("/extend")
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map_err(|error| format!("无法请求 Windows 扩展桌面：{error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Windows 扩展桌面请求失败：DisplaySwitch 退出码 {:?}",
-            status.code()
-        ))
-    }
-}
-
-#[cfg(not(windows))]
-fn request_extended_desktop() -> Result<(), String> {
     Ok(())
 }
 
@@ -2233,6 +2224,7 @@ pub fn run() {
             titan_runtime::titan_release_playback,
             titan_runtime::titan_update_gatling,
             titan_runtime::titan_pulse_gatling,
+            titan_runtime::titan_cancel_automation,
             titan_runtime::titan_update_beam,
             titan_runtime::titan_run_beam_show,
             vocal_runtime_status,
@@ -2271,31 +2263,32 @@ pub fn run() {
             open_lighting_package_directory
         ])
         .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+            if window.label() == "main"
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            {
                 let state = window.state::<mpv_runtime::MpvManager>();
                 let _ = mpv_runtime::shutdown_all(&state);
                 window.app_handle().exit(0);
             }
         })
         .setup(|app| {
-            if let Err(error) = request_extended_desktop() {
-                eprintln!("Extended desktop startup unavailable: {error}");
-            }
-            #[cfg(windows)]
-            std::thread::sleep(std::time::Duration::from_millis(1500));
             let app_data = app.path().app_data_dir()?;
             let media_root = media_root_directory(&app.handle().clone())?;
             if let Err(error) = kingsong::directories(&app_data) {
                 eprintln!("KINGSONG directory setup failed: {error}");
             }
-            match kingsong::import_inbox(&app_data, &media_root) {
-                Ok(report) => {
-                    for error in report.errors {
-                        eprintln!("KINGSONG startup import skipped: {error}");
+            let import_app_data = app_data.clone();
+            let import_media_root = media_root.clone();
+            std::thread::spawn(move || {
+                match kingsong::import_inbox(&import_app_data, &import_media_root) {
+                    Ok(report) => {
+                        for error in report.errors {
+                            eprintln!("KINGSONG startup import skipped: {error}");
+                        }
                     }
+                    Err(error) => eprintln!("KINGSONG startup import failed: {error}"),
                 }
-                Err(error) => eprintln!("KINGSONG startup import failed: {error}"),
-            }
+            });
             if app
                 .state::<runtime_capability::RuntimeCapabilities>()
                 .ai_processing_available

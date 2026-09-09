@@ -11,5 +11,6 @@ test("encrypted local imports decode first and then use the normal AI pipeline",
   assert.doesNotMatch(analysisSource, /\("skipped",\s*"encrypted-import-playback"\)/);
   assert.match(analysisSource, /stage IN \('missing-artist', 'encrypted-import-playback'\)/);
   assert.doesNotMatch(appSource, /aiProcessingDisabled/);
-  assert.match(appSource, /runtimeCapability\.aiProcessingAvailable \? nextAudio : \[\]/);
+  assert.match(appSource, /shouldQueueAudioAiAnalysis\(\s*runtimeCapability\.aiProcessingAvailable,\s*audioAiWorker\.enabled/);
+  assert.match(appSource, /audioAiQueueAllowed \? nextAudio : \[\]/);
 });

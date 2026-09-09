@@ -15,6 +15,9 @@ pub struct RuntimeCapabilities {
     pub total_vram_mib: u64,
     pub driver_version: Option<String>,
     pub ai_processing_available: bool,
+    pub ai_environment_available: bool,
+    pub ai_environment_path: Option<String>,
+    pub vocal_engine_available: bool,
     pub message: String,
 }
 
@@ -66,6 +69,9 @@ fn from_nvidia_smi_output(output: Option<&str>) -> RuntimeCapabilities {
         total_vram_mib,
         driver_version,
         ai_processing_available: has_nvidia,
+        ai_environment_available: false,
+        ai_environment_path: None,
+        vocal_engine_available: false,
         message: if has_nvidia {
             format!(
                 "全功能版 · {} · {:.1} GB 显存",
@@ -91,6 +97,9 @@ pub fn detect() -> RuntimeCapabilities {
             total_vram_mib: 0,
             driver_version: None,
             ai_processing_available: has_nvidia,
+            ai_environment_available: false,
+            ai_environment_path: None,
+            vocal_engine_available: false,
             message: if has_nvidia {
                 "全功能版（测试覆盖）"
             } else {
@@ -101,7 +110,27 @@ pub fn detect() -> RuntimeCapabilities {
     }
 
     let output = nvidia_smi_output();
-    from_nvidia_smi_output(output.as_deref())
+    let mut capability = from_nvidia_smi_output(output.as_deref());
+    let root = crate::runtime_paths::ai_root();
+    capability.ai_environment_available = root.is_some();
+    capability.ai_environment_path = root.map(|path| path.to_string_lossy().into_owned());
+    capability.ai_processing_available =
+        capability.has_nvidia && capability.ai_environment_available;
+    capability.vocal_engine_available =
+        crate::vocal_runtime::resolve_vocal_engine_executable().is_ok();
+    if capability.has_nvidia {
+        capability
+            .message
+            .push_str(if capability.ai_environment_available {
+                " · AI 环境已找到，模型/CUDA 以制作自检结果为准"
+            } else {
+                " · AI 环境待配置，当前可播放已制作歌曲"
+            });
+    }
+    if !capability.vocal_engine_available {
+        capability.message.push_str(" · 人声运行程序未安装");
+    }
+    capability
 }
 
 #[cfg(test)]
@@ -117,6 +146,9 @@ mod tests {
             total_vram_mib: 0,
             driver_version: None,
             ai_processing_available: false,
+            ai_environment_available: false,
+            ai_environment_path: None,
+            vocal_engine_available: false,
             message: "播放版".to_string(),
         };
         assert_eq!(value.mode, "player");

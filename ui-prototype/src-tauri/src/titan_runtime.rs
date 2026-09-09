@@ -4,7 +4,10 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -12,6 +15,65 @@ use crate::network_discovery;
 
 const TITAN_WEB_API_PORT: u16 = 4430;
 const TITAN_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+static AUTOMATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+static TITAN_WRITE_LOCK: Mutex<()> = Mutex::new(());
+thread_local! { static CLEANUP_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) }; }
+thread_local! { static COMMAND_GENERATION: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
+
+fn check_command_current() -> Result<(), String> {
+    if CLEANUP_DEADLINE.with(|deadline| deadline.get().is_some_and(|time| Instant::now() >= time)) {
+        return Err("收光操作超时，未确认全部归零".into());
+    }
+    COMMAND_GENERATION.with(|current| {
+        if current
+            .get()
+            .is_some_and(|generation| generation != AUTOMATION_GENERATION.load(Ordering::SeqCst))
+        {
+            Err("灯光指令已取消".into())
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn with_titan_command<T>(
+    generation: Option<u64>,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if let Some(generation) = generation {
+        AUTOMATION_GENERATION.fetch_max(generation, Ordering::SeqCst);
+    }
+    let _guard = TITAN_WRITE_LOCK.lock().map_err(|_| "灯光控制锁异常")?;
+    COMMAND_GENERATION.with(|current| current.set(generation));
+    let result = check_command_current().and_then(|_| operation());
+    COMMAND_GENERATION.with(|current| current.set(None));
+    result
+}
+
+fn cleanup_lighting<T>(operation: impl FnOnce() -> T) -> T {
+    let saved = COMMAND_GENERATION.with(|current| current.replace(None));
+    let previous_deadline = CLEANUP_DEADLINE
+        .with(|deadline| deadline.replace(Some(Instant::now() + Duration::from_secs(3))));
+    let result = operation();
+    COMMAND_GENERATION.with(|current| current.set(saved));
+    CLEANUP_DEADLINE.with(|deadline| deadline.set(previous_deadline));
+    result
+}
+
+fn wait_for_lighting(duration: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + duration;
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        check_command_current()?;
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+    check_command_current()
+}
+
+#[tauri::command]
+pub fn titan_cancel_automation(generation: u64) {
+    AUTOMATION_GENERATION.fetch_max(generation, Ordering::SeqCst);
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,6 +185,8 @@ struct GatlingPulseTarget {
     fixture_location: String,
     validated_at: Instant,
     last_level: f64,
+    last_speed: Option<f64>,
+    speed_updated_at: Instant,
 }
 
 static GATLING_PULSE_TARGET: OnceLock<Mutex<Option<GatlingPulseTarget>>> = OnceLock::new();
@@ -215,7 +279,11 @@ fn local_address_for_titan(remote: SocketAddr) -> Option<SocketAddr> {
 
 fn connect_titan(address: SocketAddr) -> Result<TcpStream, String> {
     if let Some(local_address) = local_address_for_titan(address) {
-        let domain = if address.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+        let domain = if address.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
         let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
             .map_err(|error| format!("无法创建 Titan 局域网连接：{error}"))?;
         socket
@@ -231,6 +299,7 @@ fn connect_titan(address: SocketAddr) -> Result<TcpStream, String> {
 }
 
 fn http_get(host: &str, path: &str) -> Result<Vec<u8>, String> {
+    check_command_current()?;
     let host = validate_host(host)?;
     if !path.starts_with("/titan/") || path.contains('\r') || path.contains('\n') {
         return Err("Titan WebAPI 请求路径无效".to_string());
@@ -240,9 +309,10 @@ fn http_get(host: &str, path: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("无法解析 Titan 地址 {host}：{error}"))?
         .next()
         .ok_or_else(|| format!("无法解析 Titan 地址 {host}"))?;
+    let deadline = Instant::now() + TITAN_TIMEOUT;
     let mut stream = connect_titan(address)?;
     stream
-        .set_read_timeout(Some(TITAN_TIMEOUT))
+        .set_read_timeout(Some(Duration::from_millis(50)))
         .map_err(|error| error.to_string())?;
     stream
         .set_write_timeout(Some(TITAN_TIMEOUT))
@@ -250,13 +320,34 @@ fn http_get(host: &str, path: &str) -> Result<Vec<u8>, String> {
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}:{TITAN_WEB_API_PORT}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
+    check_command_current()?;
     stream
         .write_all(request.as_bytes())
         .map_err(|error| format!("Titan WebAPI 请求发送失败：{error}"))?;
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|error| format!("Titan WebAPI 响应读取失败：{error}"))?;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        check_command_current()?;
+        if Instant::now() >= deadline {
+            return Err("Titan WebAPI 响应超时".into());
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(length) => response.extend_from_slice(&buffer[..length]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
+            }
+            Err(error) => return Err(format!("Titan WebAPI 响应读取失败：{error}")),
+        }
+        if response.len() > 8 * 1024 * 1024 {
+            return Err("Titan WebAPI 响应超出限制".into());
+        }
+    }
     Ok(parse_http_response(&response)?.to_vec())
 }
 
@@ -489,7 +580,15 @@ fn fire_playback(
     let path = format!(
         "/titan/script/2/Playbacks/FirePlaybackAtLevel?handle_titanId={titan_id}&level_level={level:.3}&alwaysRefire={always_refire}"
     );
-    http_get(host, &path)?;
+    if let Err(error) = http_get(host, &path).and_then(|_| check_command_current()) {
+        // A cancelled/failed reply does not prove the console ignored the Fire.
+        // Release the already-verified handle before admitting another command.
+        let released = cleanup_lighting(|| release_playback(host, titan_id, expected_show_name));
+        return Err(match released {
+            Ok(_) => error,
+            Err(cleanup) => format!("{error}；Playback 释放未确认：{cleanup}"),
+        });
+    }
     let legend = if handle.legend.trim().is_empty() {
         format!("Titan Playback {titan_id}")
     } else {
@@ -672,6 +771,8 @@ fn update_gatling(
             fixture_location: location,
             validated_at: Instant::now(),
             last_level: dimmer_percent.unwrap_or(4.0),
+            last_speed: speed_value,
+            speed_updated_at: Instant::now(),
         });
     }
 
@@ -716,6 +817,8 @@ fn validated_gatling_pulse_target(
         fixture_location: fixture_handle_location(fixture)?,
         validated_at: Instant::now(),
         last_level: 4.0,
+        last_speed: None,
+        speed_updated_at: Instant::now(),
     };
     if let Ok(mut cached) = gatling_pulse_target_cache().lock() {
         *cached = Some(target.clone());
@@ -738,44 +841,87 @@ fn set_fixture_location_level(
     Ok(())
 }
 
+fn should_update_speed(target: &GatlingPulseTarget, speed: f64) -> bool {
+    target.last_speed.is_none_or(|last| {
+        (last - speed).abs() >= 0.005
+            && (target.speed_updated_at.elapsed() >= Duration::from_secs(1)
+                || (speed <= 0.22 && last > 0.22))
+    })
+}
+
 fn pulse_gatling(
     host: &str,
     expected_show_name: &str,
     peak_dimmer_percent: f64,
     base_dimmer_percent: f64,
     pulse_millis: u64,
+    speed_value: Option<f64>,
 ) -> Result<TitanGatlingAction, String> {
-    validate_gatling_levels(None, Some(peak_dimmer_percent), None)?;
+    validate_gatling_levels(None, Some(peak_dimmer_percent), speed_value)?;
     validate_gatling_levels(None, Some(base_dimmer_percent), None)?;
     if expected_show_name.trim() != KINGCLUB_GATLING_SHOW {
         return Err("加特林现场配置只绑定 Show 2024.12.28".to_string());
     }
     let target = validated_gatling_pulse_target(host, expected_show_name)?;
-    set_fixture_location_level(
+    let pulse_result = set_fixture_location_level(
         host,
         &target.fixture_location,
         peak_dimmer_percent,
         target.last_level,
-    )?;
-    std::thread::sleep(Duration::from_millis(pulse_millis.clamp(40, 140)));
-    if let Err(error) = set_fixture_location_level(
-        host,
-        &target.fixture_location,
-        base_dimmer_percent,
-        peak_dimmer_percent,
-    ) {
-        let _ = set_fixture_location_level(
+    )
+    .and_then(|_| wait_for_lighting(Duration::from_millis(pulse_millis.clamp(40, 140))));
+    let reset_result = cleanup_lighting(|| {
+        if let Err(error) = set_fixture_location_level(
             host,
             &target.fixture_location,
             base_dimmer_percent,
             peak_dimmer_percent,
-        );
-        return Err(error);
-    }
+        ) {
+            let _ = set_fixture_location_level(
+                host,
+                &target.fixture_location,
+                base_dimmer_percent,
+                peak_dimmer_percent,
+            );
+            return Err(error);
+        }
+        Ok::<(), String>(())
+    });
+    reset_result?;
+    pulse_result?;
     if let Ok(mut cached) = gatling_pulse_target_cache().lock() {
         if let Some(current) = cached.as_mut() {
             if current.host == host && current.show_name == expected_show_name {
                 current.last_level = base_dimmer_percent;
+            }
+        }
+    }
+    // Brightness follows the beat first; motion speed is coalesced after reset.
+    if let Some(speed) = speed_value.filter(|speed| should_update_speed(&target, *speed)) {
+        http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear")?;
+        http_get(
+            host,
+            &format!(
+                "/titan/script/2/Programmer/Editor/Selection/SelectFixture?handle_location={}",
+                target.fixture_location
+            ),
+        )?;
+        let speed_result = (|| {
+            let selected = selected_fixture_ids(host)?;
+            if selected != vec![KINGCLUB_GATLING_FIXTURE_TITAN_ID] {
+                return Err("加特林选择与已核验灯具不一致".into());
+            }
+            http_get(host,&format!("/titan/script/2/Programmer/Editor/Fixtures/SetControlValueById?controlId={KINGCLUB_GATLING_SPEED_CONTROL_ID}&functionId={KINGCLUB_GATLING_SPEED_FUNCTION_ID}&value={speed:.3}&programmer=true&createRestorePoint=false"))?;
+            Ok::<(), String>(())
+        })();
+        cleanup_lighting(|| {
+            let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
+        });
+        speed_result?;
+        if let Ok(mut cached) = gatling_pulse_target_cache().lock() {
+            if let Some(current) = cached.as_mut() {
+                current.last_speed = Some(speed);
+                current.speed_updated_at = Instant::now();
             }
         }
     }
@@ -784,7 +930,7 @@ fn pulse_gatling(
         fixture_titan_id: KINGCLUB_GATLING_FIXTURE_TITAN_ID,
         palette_titan_id: None,
         dimmer_percent: Some(peak_dimmer_percent),
-        speed_value: None,
+        speed_value,
         message: "加特林已跟随音乐短促闪动".to_string(),
     })
 }
@@ -904,6 +1050,41 @@ fn set_fixture_preset_level(
     Ok(())
 }
 
+fn blackout_beams(
+    host: &str,
+    fixtures: &[TitanHandleSummary],
+    close_shutter: bool,
+) -> Result<(), String> {
+    let mut first_error = None;
+    for titan_id in KINGCLUB_BEAM_FIXTURE_TITAN_IDS {
+        check_command_current()?;
+        let result = beam_fixture_handle(fixtures, titan_id).and_then(|fixture| {
+            set_fixture_preset_level(host, fixture, 0.0, KINGCLUB_BEAM_WALK_LEVEL / 100.0)
+        });
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    let programmer = (|| {
+        select_beam_row(host, fixtures, &KINGCLUB_BEAM_FIXTURE_TITAN_IDS)?;
+        http_get(
+            host,
+            "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level=0",
+        )?;
+        if close_shutter {
+            http_get(host,"/titan/script/2/Programmer/Editor/Fixtures/SetControlValueByName?controlName=Shutter&functionName=Open&value=0&programmer=true&createRestorePoint=false")?;
+        }
+        Ok::<(), String>(())
+    })();
+    let cleared = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    programmer?;
+    cleared?;
+    Ok(())
+}
+
 fn update_beam(
     host: &str,
     expected_show_name: &str,
@@ -962,7 +1143,12 @@ fn update_beam(
         }
         Ok::<(), String>(())
     })();
-    let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
+    if operation.is_err() {
+        cleanup_lighting(|| blackout_beams(host, &fixtures, true))
+            .map_err(|error| format!("光束收光未确认：{error}"))?;
+    } else {
+        cleanup_lighting(|| http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear"))?;
+    }
     operation?;
 
     Ok(TitanBeamAction {
@@ -1026,7 +1212,7 @@ fn run_beam_show(
             let deadline = show_started
                 + Duration::from_secs_f64(beat_interval.as_secs_f64() * (index + 1) as f64);
             if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-                std::thread::sleep(remaining);
+                wait_for_lighting(remaining)?;
             }
         }
         if let Some(previous) = previous_row {
@@ -1039,27 +1225,10 @@ fn run_beam_show(
         Ok::<(), String>(())
     })();
 
-    // Fail closed: direct fixture levels and programmer values are both reset.
-    for titan_id in KINGCLUB_BEAM_FIXTURE_TITAN_IDS {
-        if let Ok(fixture) = beam_fixture_handle(&fixtures, titan_id) {
-            let _ = set_fixture_preset_level(host, fixture, 0.0, KINGCLUB_BEAM_WALK_LEVEL / 100.0);
-        }
+    let cleanup = cleanup_lighting(|| blackout_beams(host, &fixtures, operation.is_err()));
+    if let Err(error) = cleanup {
+        return Err(format!("光束收光未确认：{error}"));
     }
-    if operation.is_err() {
-        for titan_id in KINGCLUB_BEAM_FIXTURE_TITAN_IDS {
-            if select_beam_fixture(host, &fixtures, titan_id).is_ok() {
-                let _ = http_get(
-                    host,
-                    "/titan/script/2/Programmer/Editor/Fixtures/SetDimmerLevel?level=0",
-                );
-                let _ = http_get(
-                    host,
-                    "/titan/script/2/Programmer/Editor/Fixtures/SetControlValueByName?controlName=Shutter&functionName=Open&value=0&programmer=true&createRestorePoint=false",
-                );
-            }
-        }
-    }
-    let _ = http_get(host, "/titan/script/2/Programmer/Editor/Selection/Clear");
     operation?;
 
     Ok(TitanBeamShowAction {
@@ -1129,20 +1298,23 @@ pub async fn titan_discover(host_hint: String) -> Result<Value, String> {
 #[tauri::command]
 pub async fn titan_fire_playback(
     host: String,
+    generation: Option<u64>,
     titan_id: u64,
     level: f64,
     always_refire: bool,
     expected_show_name: String,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        serde_json::to_value(fire_playback(
-            &host,
-            titan_id,
-            level,
-            always_refire,
-            &expected_show_name,
-        ))
-        .map_err(|error| error.to_string())
+        with_titan_command(generation, || {
+            serde_json::to_value(fire_playback(
+                &host,
+                titan_id,
+                level,
+                always_refire,
+                &expected_show_name,
+            )?)
+            .map_err(|error| error.to_string())
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1151,12 +1323,15 @@ pub async fn titan_fire_playback(
 #[tauri::command]
 pub async fn titan_release_playback(
     host: String,
+    generation: Option<u64>,
     titan_id: u64,
     expected_show_name: String,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        serde_json::to_value(release_playback(&host, titan_id, &expected_show_name)?)
-            .map_err(|error| error.to_string())
+        with_titan_command(generation, || {
+            serde_json::to_value(release_playback(&host, titan_id, &expected_show_name)?)
+                .map_err(|error| error.to_string())
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1165,20 +1340,23 @@ pub async fn titan_release_playback(
 #[tauri::command]
 pub async fn titan_update_gatling(
     host: String,
+    generation: Option<u64>,
     expected_show_name: String,
     palette_titan_id: Option<u64>,
     dimmer_percent: Option<f64>,
     speed_value: Option<f64>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        serde_json::to_value(update_gatling(
-            &host,
-            &expected_show_name,
-            palette_titan_id,
-            dimmer_percent,
-            speed_value,
-        )?)
-        .map_err(|error| error.to_string())
+        with_titan_command(generation, || {
+            serde_json::to_value(update_gatling(
+                &host,
+                &expected_show_name,
+                palette_titan_id,
+                dimmer_percent,
+                speed_value,
+            )?)
+            .map_err(|error| error.to_string())
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1187,20 +1365,25 @@ pub async fn titan_update_gatling(
 #[tauri::command]
 pub async fn titan_pulse_gatling(
     host: String,
+    generation: Option<u64>,
     expected_show_name: String,
     peak_dimmer_percent: f64,
     base_dimmer_percent: f64,
     pulse_millis: u64,
+    speed_value: Option<f64>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        serde_json::to_value(pulse_gatling(
-            &host,
-            &expected_show_name,
-            peak_dimmer_percent,
-            base_dimmer_percent,
-            pulse_millis,
-        )?)
-        .map_err(|error| error.to_string())
+        with_titan_command(generation, || {
+            serde_json::to_value(pulse_gatling(
+                &host,
+                &expected_show_name,
+                peak_dimmer_percent,
+                base_dimmer_percent,
+                pulse_millis,
+                speed_value,
+            )?)
+            .map_err(|error| error.to_string())
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1209,6 +1392,7 @@ pub async fn titan_pulse_gatling(
 #[tauri::command]
 pub async fn titan_update_beam(
     host: String,
+    generation: Option<u64>,
     expected_show_name: String,
     dimmer_percent: Option<f64>,
     shutter_open: Option<bool>,
@@ -1216,15 +1400,17 @@ pub async fn titan_update_beam(
     tilt_value: Option<f64>,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        serde_json::to_value(update_beam(
-            &host,
-            &expected_show_name,
-            dimmer_percent,
-            shutter_open,
-            pan_value,
-            tilt_value,
-        )?)
-        .map_err(|error| error.to_string())
+        with_titan_command(generation, || {
+            serde_json::to_value(update_beam(
+                &host,
+                &expected_show_name,
+                dimmer_percent,
+                shutter_open,
+                pan_value,
+                tilt_value,
+            )?)
+            .map_err(|error| error.to_string())
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1233,20 +1419,23 @@ pub async fn titan_update_beam(
 #[tauri::command]
 pub async fn titan_run_beam_show(
     host: String,
+    generation: Option<u64>,
     expected_show_name: String,
     bpm: f64,
     pan_value: f64,
     tilt_value: f64,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        serde_json::to_value(run_beam_show(
-            &host,
-            &expected_show_name,
-            bpm,
-            pan_value,
-            tilt_value,
-        )?)
-        .map_err(|error| error.to_string())
+        with_titan_command(generation, || {
+            serde_json::to_value(run_beam_show(
+                &host,
+                &expected_show_name,
+                bpm,
+                pan_value,
+                tilt_value,
+            )?)
+            .map_err(|error| error.to_string())
+        })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1255,6 +1444,50 @@ pub async fn titan_run_beam_show(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_interrupts_a_long_show_and_rejects_queued_old_commands() {
+        let generation = AUTOMATION_GENERATION.load(Ordering::SeqCst) + 1;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let running = std::thread::spawn(move || {
+            with_titan_command(Some(generation), || {
+                sender.send(()).unwrap();
+                wait_for_lighting(Duration::from_secs(6))
+            })
+        });
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let started = Instant::now();
+        titan_cancel_automation(generation + 1);
+        assert!(running.join().unwrap().unwrap_err().contains("取消"));
+        assert!(started.elapsed() < Duration::from_millis(300));
+        assert!(
+            with_titan_command::<()>(Some(generation), || panic!("stale write must not run"))
+                .is_err()
+        );
+        assert!(with_titan_command(Some(generation + 1), || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn speed_coalescing_preserves_immediate_slow_song_reduction() {
+        let target = GatlingPulseTarget {
+            host: "mock".into(),
+            show_name: "mock".into(),
+            fixture_location: "mock".into(),
+            validated_at: Instant::now(),
+            last_level: 4.0,
+            last_speed: Some(0.8),
+            speed_updated_at: Instant::now(),
+        };
+        assert!(!should_update_speed(&target, 0.81));
+        assert!(should_update_speed(&target, 0.18));
+        let target = GatlingPulseTarget {
+            last_speed: Some(0.18),
+            speed_updated_at: Instant::now() - Duration::from_secs(2),
+            ..target
+        };
+        assert!(!should_update_speed(&target, 0.18));
+        assert!(should_update_speed(&target, 0.19));
+    }
 
     #[test]
     fn parses_success_response() {

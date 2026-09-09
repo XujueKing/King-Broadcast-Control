@@ -7,7 +7,7 @@
     "frontendDist": "../dist/client",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev -- --port 1420 --strictPort",
-    "beforeBuildCommand": "npm run build:web"
+    "beforeBuildCommand": "node scripts/prepare-desktop-build.mjs && npm run build:web"
   },
   "app": {
     "windows": [
@@ -62,7 +62,8 @@
       "../.local-tools/mpv/libmpv-2.dll": "libmpv-2.dll",
       "../.local-tools/kgm-decoder/kgm-decoder.exe": "kgm-decoder.exe",
       "../third-party/kgm-decoder-LICENSE.txt": "licenses/kgm-decoder-LICENSE.txt",
-      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../.local-tools/vocal-engine/king-vocal-engine.exe": "king-vocal-engine.exe"
     },
     "icon": [
       "icons/32x32.png",

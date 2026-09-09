@@ -62,7 +62,25 @@ const MPV_AUDIO_OUTPUT_ARGS: [&str; 6] = [
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
-pub struct MpvManager(pub Arc<Mutex<MpvManagerInner>>);
+pub struct MpvManager(pub Arc<MpvManagerSlots>);
+
+pub struct MpvManagerSlots {
+    binary: Option<PathBuf>,
+    audio_device: Option<MpvAudioDevice>,
+    output_trim_db: f64,
+    lanes: HashMap<u8, Mutex<MpvManagerInner>>,
+}
+
+impl MpvManager {
+    fn lane(&self, id: u8) -> Result<std::sync::MutexGuard<'_, MpvManagerInner>, String> {
+        self.0
+            .lanes
+            .get(&id)
+            .ok_or_else(|| format!("无效 mpv 实例编号：{id}"))?
+            .lock()
+            .map_err(|_| "无法锁定 mpv 实例".to_string())
+    }
+}
 
 pub struct MpvManagerInner {
     binary: Option<PathBuf>,
@@ -159,13 +177,27 @@ impl Default for MpvManager {
         let binary = discover_mpv_binary();
         let audio_device = binary.as_deref().and_then(discover_preferred_audio_device);
         let output_trim_db = preferred_output_trim_db(audio_device.as_ref());
-        Self(Arc::new(Mutex::new(MpvManagerInner {
+        let lanes = [1, 2, 11, 12]
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    Mutex::new(MpvManagerInner {
+                        binary: binary.clone(),
+                        audio_device: audio_device.clone(),
+                        output_trim_db,
+                        instances: HashMap::new(),
+                        process_job: ProcessJob::new().expect("create mpv process job"),
+                    }),
+                )
+            })
+            .collect();
+        Self(Arc::new(MpvManagerSlots {
             binary,
             audio_device,
             output_trim_db,
-            instances: HashMap::new(),
-            process_job: ProcessJob::new().expect("create mpv process job"),
-        })))
+            lanes,
+        }))
     }
 }
 
@@ -468,49 +500,92 @@ fn spawn_deck(
 fn start_diagnostics(pipe_path: &str, deck: u8) {
     let pipe_path = pipe_path.to_owned();
     thread::spawn(move || {
-        let Some(root) = env::var_os("APPDATA") else { return };
-        let directory = PathBuf::from(root)
-            .join(if cfg!(test) { "club.king.broadcast-control/runtime/audio-diagnostics-test" } else { "club.king.broadcast-control/runtime/audio-diagnostics" });
-        if std::fs::create_dir_all(&directory).is_err() { return; }
+        let Some(root) = env::var_os("APPDATA") else {
+            return;
+        };
+        let directory = PathBuf::from(root).join(if cfg!(test) {
+            "club.king.broadcast-control/runtime/audio-diagnostics-test"
+        } else {
+            "club.king.broadcast-control/runtime/audio-diagnostics"
+        });
+        if std::fs::create_dir_all(&directory).is_err() {
+            return;
+        }
         let path = directory.join(format!("deck-{deck}.jsonl"));
         // Retain the immediately preceding session, including abnormal exits.
         let previous = directory.join(format!("deck-{deck}.previous.jsonl"));
-        if path.exists() && std::fs::copy(&path, &previous).is_err() { return; }
-        let Ok(mut log) = File::create(path) else { return };
-        let _ = writeln!(log, "{}", json!({"deck":deck,"event":"diagnostic-start","readOnly":true,"pid":std::process::id()}));
+        if path.exists() && std::fs::copy(&path, &previous).is_err() {
+            return;
+        }
+        let Ok(mut log) = File::create(path) else {
+            return;
+        };
+        let _ = writeln!(
+            log,
+            "{}",
+            json!({"deck":deck,"event":"diagnostic-start","readOnly":true,"pid":std::process::id()})
+        );
         // The first frontend query may acquire the named-pipe instance while
         // mpv creates its next listener. Retry just like normal IPC commands.
         let mut pipe = match open_pipe_with_timeout(&pipe_path, Duration::from_secs(3)) {
             Ok(pipe) => pipe,
             Err(error) => {
-                let _ = writeln!(log, "{}", json!({"deck":deck,"event":"diagnostic-connect-failed","error":error.to_string()}));
+                let _ = writeln!(
+                    log,
+                    "{}",
+                    json!({"deck":deck,"event":"diagnostic-connect-failed","error":error.to_string()})
+                );
                 return;
             }
         };
         let mut requests = vec![json!({"command":["request_log_messages","info"]})];
-        for (index, name) in ["path", "pause", "audio-device", "audio-params", "audio-out-params", "eof-reached"].iter().enumerate() {
+        for (index, name) in [
+            "path",
+            "pause",
+            "audio-device",
+            "audio-params",
+            "audio-out-params",
+            "eof-reached",
+        ]
+        .iter()
+        .enumerate()
+        {
             requests.push(json!({"command":["observe_property",index + 1,name]}));
         }
         for request in requests {
-            if writeln!(pipe, "{request}").is_err() { return; }
+            if writeln!(pipe, "{request}").is_err() {
+                return;
+            }
         }
-        if pipe.flush().is_err() { return; }
+        if pipe.flush().is_err() {
+            return;
+        }
         let mut bytes = 0_usize;
         for line in BufReader::new(pipe).lines() {
             let Ok(line) = line else { break };
-            let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
-            let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
             let record = json!({"timestampMs":timestamp,"deck":deck,"event":event}).to_string();
             bytes += record.len() + 1;
-            if bytes > 8 * 1024 * 1024 { break; }
-            if writeln!(log, "{record}").is_err() { break; }
+            if bytes > 8 * 1024 * 1024 {
+                break;
+            }
+            if writeln!(log, "{record}").is_err() {
+                break;
+            }
         }
     });
 }
 
 fn send_command(pipe_path: &str, command: Value) -> Result<Value, String> {
-    let mut pipe = open_pipe_with_timeout(pipe_path, Duration::from_secs(2))
-        .map_err(|error| format!("无法连接 mpv IPC：{error}"))?;
+    let mut pipe =
+        crate::deadline_pipe::DeadlinePipe::connect(pipe_path, Duration::from_millis(800))
+            .map_err(|error| format!("无法连接 mpv IPC：{error}"))?;
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let request = json!({ "command": command, "request_id": request_id });
     serde_json::to_writer(&mut pipe, &request).map_err(|error| error.to_string())?;
@@ -587,28 +662,22 @@ fn ensure_instance(
 }
 
 pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> {
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
-    if manager.binary.is_none() {
-        manager.binary = discover_mpv_binary();
-        manager.audio_device = manager
-            .binary
-            .as_deref()
-            .and_then(discover_preferred_audio_device);
-        manager.output_trim_db = preferred_output_trim_db(manager.audio_device.as_ref());
-    }
-    let binary = manager.binary.clone();
-    let mut active_decks = Vec::new();
-    manager.instances.retain(|deck, instance| {
-        let running = instance.child.try_wait().ok().flatten().is_none();
-        if running && matches!(*deck, 1 | 2) {
-            active_decks.push(*deck);
-        }
-        running
-    });
-    active_decks.sort_unstable();
+    let config = &manager.0;
+    let binary = config.binary.clone();
+    let active_decks = [1, 2]
+        .into_iter()
+        .filter(|deck| {
+            match config.lanes[deck].try_lock() {
+                Ok(mut lane) => lane
+                    .instances
+                    .get_mut(deck)
+                    .is_some_and(|instance| instance.child.try_wait().ok().flatten().is_none()),
+                // A busy Deck is starting or serving a control operation. Never wait for it here.
+                Err(std::sync::TryLockError::WouldBlock) => true,
+                Err(_) => false,
+            }
+        })
+        .collect();
     let version = binary.as_deref().and_then(mpv_version);
     Ok(MpvRuntimeStatus {
         available: binary.is_some() && version.is_some(),
@@ -616,23 +685,20 @@ pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> 
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
         version,
-        audio_device: manager
-            .audio_device
-            .as_ref()
-            .map(|device| device.id.clone()),
-        audio_device_label: manager
+        audio_device: config.audio_device.as_ref().map(|device| device.id.clone()),
+        audio_device_label: config
             .audio_device
             .as_ref()
             .map(|device| device.label.clone()),
-        output_trim_db: manager.output_trim_db,
+        output_trim_db: config.output_trim_db,
         active_decks,
         message: if binary.is_some() {
-            manager.audio_device.as_ref().map_or_else(
+            config.audio_device.as_ref().map_or_else(
                 || "mpv 播放引擎可用 · 系统自动音频设备".to_string(),
                 |device| {
                     format!(
                         "mpv 播放引擎可用 · USB-B → {} · 输出修整 {:.0} dB",
-                        device.label, manager.output_trim_db
+                        device.label, config.output_trim_db
                     )
                 },
             )
@@ -646,10 +712,7 @@ pub fn load_deck(manager: &MpvManager, deck: u8, path: &Path) -> Result<MpvDeckS
     let canonical_path = path
         .canonicalize()
         .map_err(|error| format!("媒体文件不存在：{error}"))?;
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let mut manager = manager.lane(deck)?;
     let instance = ensure_instance(&mut manager, deck)?;
     // A loadfile command can briefly expose stale/partially decoded buffers on
     // Qu-16 USB/WASAPI. Fail closed: mute and pause before replacing the file,
@@ -704,10 +767,7 @@ pub fn switch_source_preserving_state(
     let canonical_path = path
         .canonicalize()
         .map_err(|error| format!("媒体文件不存在：{error}"))?;
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let mut manager = manager.lane(deck)?;
     let instance = ensure_instance(&mut manager, deck)?;
     let previous = deck_state_for_instance(deck, instance)?;
     send_command(&instance.pipe_path, json!(["set_property", "volume", 0.0]))?;
@@ -729,10 +789,7 @@ pub fn switch_source_preserving_state(
 }
 
 pub fn set_paused(manager: &MpvManager, deck: u8, paused: bool) -> Result<MpvDeckState, String> {
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let mut manager = manager.lane(deck)?;
     let instance = ensure_instance(&mut manager, deck)?;
     send_command(
         &instance.pipe_path,
@@ -745,10 +802,7 @@ pub fn seek(manager: &MpvManager, deck: u8, seconds: f64) -> Result<MpvDeckState
     if !seconds.is_finite() {
         return Err("Seek 时间必须是有限数字".to_string());
     }
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let mut manager = manager.lane(deck)?;
     let instance = ensure_instance(&mut manager, deck)?;
     let previous = deck_state_for_instance(deck, instance)?;
     safe_seek_instance(
@@ -764,10 +818,7 @@ pub fn set_volume(manager: &MpvManager, deck: u8, volume: f64) -> Result<(), Str
     if !volume.is_finite() {
         return Err("音量必须是有限数字".to_string());
     }
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let mut manager = manager.lane(deck)?;
     let instance = ensure_instance(&mut manager, deck)?;
     send_command(
         &instance.pipe_path,
@@ -779,10 +830,7 @@ pub fn set_volume(manager: &MpvManager, deck: u8, volume: f64) -> Result<(), Str
 }
 
 pub fn deck_state(manager: &MpvManager, deck: u8) -> Result<MpvDeckState, String> {
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let mut manager = manager.lane(deck)?;
     let instance = ensure_instance(&mut manager, deck)?;
     deck_state_for_instance(deck, instance)
 }
@@ -888,15 +936,27 @@ fn deck_state_for_instance(deck: u8, instance: &mut MpvInstance) -> Result<MpvDe
     }
     // A transport failure is not a pause, zero progress or an EOF. Propagate
     // it so the frontend retains its last good state instead of changing decks.
-    let paused = property(&instance.pipe_path, "pause")?.as_bool().ok_or("mpv pause 状态无效")?;
-    let volume = property(&instance.pipe_path, "volume")?.as_f64().ok_or("mpv volume 状态无效")?;
+    let paused = property(&instance.pipe_path, "pause")?
+        .as_bool()
+        .ok_or("mpv pause 状态无效")?;
+    let volume = property(&instance.pipe_path, "volume")?
+        .as_f64()
+        .ok_or("mpv volume 状态无效")?;
     let (time_pos, duration, eof_reached) = if instance.loaded_path.is_some() {
         (
-            property(&instance.pipe_path, "time-pos")?.as_f64().ok_or("mpv 播放位置无效")?,
-            property(&instance.pipe_path, "duration")?.as_f64().ok_or("mpv 时长无效")?,
-            property(&instance.pipe_path, "eof-reached")?.as_bool().ok_or("mpv EOF 状态无效")?,
+            property(&instance.pipe_path, "time-pos")?
+                .as_f64()
+                .ok_or("mpv 播放位置无效")?,
+            property(&instance.pipe_path, "duration")?
+                .as_f64()
+                .ok_or("mpv 时长无效")?,
+            property(&instance.pipe_path, "eof-reached")?
+                .as_bool()
+                .ok_or("mpv EOF 状态无效")?,
         )
-    } else { (0.0, 0.0, false) };
+    } else {
+        (0.0, 0.0, false)
+    };
     Ok(MpvDeckState {
         deck,
         running: true,
@@ -914,12 +974,8 @@ fn deck_state_for_instance(deck: u8, instance: &mut MpvInstance) -> Result<MpvDe
 
 pub fn shutdown_deck(manager: &MpvManager, deck: u8) -> Result<(), String> {
     validate_deck(deck)?;
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let mut manager = manager.lane(deck)?;
     if let Some(mut instance) = manager.instances.remove(&deck) {
-        let _ = send_command(&instance.pipe_path, json!(["quit"]));
         if instance.child.try_wait().ok().flatten().is_none() {
             let _ = instance.child.kill();
         }
@@ -929,17 +985,12 @@ pub fn shutdown_deck(manager: &MpvManager, deck: u8) -> Result<(), String> {
 }
 
 pub fn shutdown_all(manager: &MpvManager) -> Result<(), String> {
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
-    let instances = std::mem::take(&mut manager.instances);
-    for (_, mut instance) in instances {
-        let _ = send_command(&instance.pipe_path, json!(["quit"]));
-        if instance.child.try_wait().ok().flatten().is_none() {
+    for id in [1, 2, 11, 12] {
+        let mut lane = manager.lane(id)?;
+        for (_, mut instance) in std::mem::take(&mut lane.instances) {
             let _ = instance.child.kill();
+            let _ = instance.child.wait();
         }
-        let _ = instance.child.wait();
     }
     Ok(())
 }
@@ -960,13 +1011,9 @@ pub fn sync_rescue_preview(
         return Err("补音试听音量必须是有限数字".into());
     }
     let instance_id = rescue_preview_instance_id(deck)?;
-    let mut manager = manager
-        .0
-        .lock()
-        .map_err(|_| "无法锁定 mpv 状态".to_string())?;
+    let mut manager = manager.lane(instance_id)?;
     if !enabled {
         if let Some(mut instance) = manager.instances.remove(&instance_id) {
-            let _ = send_command(&instance.pipe_path, json!(["quit"]));
             if instance.child.try_wait().ok().flatten().is_none() {
                 let _ = instance.child.kill();
             }
@@ -1034,6 +1081,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn busy_deck_does_not_lock_other_deck_or_rescue() {
+        let manager = MpvManager::default();
+        let _busy = manager.lane(1).unwrap();
+        assert!(manager.0.lanes[&2].try_lock().is_ok());
+        assert!(manager.0.lanes[&11].try_lock().is_ok());
+    }
+
+    #[test]
     fn only_two_decks_are_valid() {
         assert!(validate_deck(1).is_ok());
         assert!(validate_deck(2).is_ok());
@@ -1055,7 +1110,11 @@ mod tests {
     fn shutdown_all_is_safe_when_no_deck_is_running() {
         let manager = MpvManager::default();
         shutdown_all(&manager).expect("empty mpv manager should shut down cleanly");
-        assert!(manager.0.lock().unwrap().instances.is_empty());
+        assert!(manager
+            .0
+            .lanes
+            .values()
+            .all(|lane| lane.lock().unwrap().instances.is_empty()));
     }
 
     #[test]

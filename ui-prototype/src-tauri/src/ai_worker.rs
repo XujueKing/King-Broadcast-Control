@@ -217,17 +217,20 @@ fn scheduler_message(state: &WorkerProcess) -> String {
 }
 
 fn development_project_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
-        .to_path_buf()
+    crate::runtime_paths::ai_root().unwrap_or_else(|| {
+        crate::runtime_paths::ai_root_candidates()
+            .into_iter()
+            .next()
+            .unwrap()
+    })
 }
 
 fn discover_runtime() -> Option<(PathBuf, PathBuf)> {
-    let root = development_project_root();
-    let python = root.join(".venv-audio-ai/Scripts/python.exe");
-    let worker = root.join("ai-worker/worker.py");
-    (python.is_file() && worker.is_file()).then_some((python, worker))
+    let root = crate::runtime_paths::ai_root()?;
+    Some((
+        root.join(".venv-audio-ai/Scripts/python.exe"),
+        root.join("ai-worker/worker.py"),
+    ))
 }
 
 fn moss_port_is_open() -> bool {
@@ -282,6 +285,10 @@ pub fn start(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatu
         state.message = scheduler_message(&state);
         return status_locked(&mut state);
     }
+    let Some((python, worker)) = discover_runtime() else {
+        state.message = "AI 环境未安装；请在设置指定的 AI 目录完成部署和自检".into();
+        return status_locked(&mut state);
+    };
     #[cfg(windows)]
     if state.job_handle.is_none() {
         state.job_handle = create_worker_job();
@@ -318,10 +325,6 @@ pub fn start(app: &AppHandle, manager: &AiWorkerManager) -> Result<AiWorkerStatu
         }
         state.child = None;
     }
-    let Some((python, worker)) = discover_runtime() else {
-        state.message = "未找到项目 AI 环境，请运行 npm run setup:audio-ai".to_string();
-        return status_locked(&mut state);
-    };
     let app_data = app
         .path()
         .app_data_dir()

@@ -37,7 +37,7 @@ function OutputApp() {
   },[]);
 
   return <main className="output-window-root" aria-label="KING CLUB LED 节目输出">
-    <MediaOutputScreen media={program.media} lyrics={program.lyrics} transform={program.transform} playback={program.playback} onVideoEnded={(ended)=>emitTo("main","program-video-ended",ended).catch(error=>console.error("视频顺播通知失败",error))} allowAudio/>
+    <MediaOutputScreen media={program.media} lyrics={program.lyrics} transform={program.transform} playback={program.playback} onVideoClock={(clock)=>emitTo("main","program-video-clock",clock).catch(()=>{})} onVideoEnded={(ended)=>emitTo("main","program-video-ended",ended).catch(error=>console.error("视频顺播通知失败",error))} allowAudio/>
   </main>;
 }
 

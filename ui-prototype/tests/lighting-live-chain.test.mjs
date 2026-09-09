@@ -40,5 +40,6 @@ test("desktop startup always restores automatic PGM colour and beat lighting", (
 
 test("PGM colour sampling reacts quickly without accepting one-frame colour noise", () => {
   assert.match(appSource, /window\.setInterval\(sample,400\)/);
-  assert.match(appSource, /tracker\.lastAppliedFamily===null\?1:2/);
+  assert.match(appSource, /tracker\.sample\(event\.detail\.family\)/);
+  assert.match(appSource, /tracker\.complete\(ticket,triggered\)/);
 });

@@ -3,8 +3,12 @@ use std::{
     env, fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::Mutex,
+    process::{Child, Command, Stdio},
+    sync::{
+        mpsc::{self, SyncSender},
+        Mutex,
+    },
+    time::Duration,
 };
 
 #[cfg(windows)]
@@ -56,8 +60,7 @@ struct DesiredPlayback {
 
 struct VocalControlProcess {
     child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    requests: SyncSender<(Value, SyncSender<Result<Value, String>>)>,
 }
 
 struct VocalLiveProcess(VocalControlProcess);
@@ -328,41 +331,60 @@ impl VocalControlProcess {
             .stderr(Stdio::null());
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
-        let mut child = command
+        let child = command
             .spawn()
             .map_err(|error| format!("无法启动 {}：{error}", executable.display()))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Vocal Engine stdin 不可用".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Vocal Engine stdout 不可用".to_string())?;
-        Ok(Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-        })
+        Self::from_child(child)
+    }
+
+    fn from_child(mut child: Child) -> Result<Self, String> {
+        let mut stdin = child.stdin.take().ok_or("Vocal Engine stdin 不可用")?;
+        let mut stdout = BufReader::new(child.stdout.take().ok_or("Vocal Engine stdout 不可用")?);
+        let (requests, receiver) =
+            mpsc::sync_channel::<(Value, SyncSender<Result<Value, String>>)>(1);
+        std::thread::spawn(move || {
+            while let Ok((payload, reply)) = receiver.recv() {
+                let result = (|| {
+                    serde_json::to_writer(&mut stdin, &payload)
+                        .map_err(|error| error.to_string())?;
+                    stdin
+                        .write_all(b"\n")
+                        .and_then(|_| stdin.flush())
+                        .map_err(|error| error.to_string())?;
+                    let mut line = String::new();
+                    if stdout
+                        .read_line(&mut line)
+                        .map_err(|error| error.to_string())?
+                        == 0
+                    {
+                        return Err("Vocal Engine 控制进程已退出".into());
+                    }
+                    serde_json::from_str::<Value>(&line).map_err(|error| error.to_string())
+                })();
+                let failed = result.is_err();
+                let _ = reply.send(result);
+                if failed {
+                    break;
+                }
+            }
+        });
+        Ok(Self { child, requests })
     }
 
     fn exchange(&mut self, payload: &Value, request_id: u64) -> Result<Value, String> {
-        serde_json::to_writer(&mut self.stdin, payload)
-            .map_err(|error| format!("Vocal Engine 请求编码失败：{error}"))?;
-        self.stdin
-            .write_all(b"\n")
-            .and_then(|_| self.stdin.flush())
-            .map_err(|error| format!("Vocal Engine 请求写入失败：{error}"))?;
-        let mut line = String::new();
-        let read = self
-            .stdout
-            .read_line(&mut line)
-            .map_err(|error| format!("Vocal Engine 响应读取失败：{error}"))?;
-        if read == 0 {
-            return Err("Vocal Engine 控制进程已退出".into());
-        }
-        let response: Value = serde_json::from_str(&line)
-            .map_err(|error| format!("Vocal Engine 响应无效：{error}"))?;
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .try_send((payload.clone(), reply))
+            .map_err(|_| "Vocal Engine 控制通道不可用")?;
+        let response = match response.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result?,
+            Err(error) => {
+                // Killing the owned child closes both pipes and releases its I/O worker.
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err(format!("Vocal Engine 请求超时或控制通道断开：{error}"));
+            }
+        };
         if response.get("id").and_then(Value::as_u64) != Some(request_id) {
             return Err("Vocal Engine 响应序号不匹配".into());
         }
@@ -422,22 +444,10 @@ impl VocalLiveProcess {
             .stderr(Stdio::null());
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
-        let mut child = command
+        let child = command
             .spawn()
             .map_err(|error| format!("无法启动 {}：{error}", executable.display()))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Vocal Engine 实时 stdin 不可用".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Vocal Engine 实时 stdout 不可用".to_string())?;
-        Ok(Self(VocalControlProcess {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-        }))
+        Ok(Self(VocalControlProcess::from_child(child)?))
     }
 
     fn exchange(&mut self, payload: &Value, request_id: u64) -> Result<Value, String> {
@@ -551,6 +561,30 @@ pub(crate) fn resolve_vocal_engine_executable() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(windows)]
+    #[test]
+    fn unresponsive_control_child_is_killed_after_deadline() {
+        let child = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$null=[Console]::ReadLine(); Start-Sleep -Seconds 10",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let mut process = VocalControlProcess::from_child(child).unwrap();
+        let start = std::time::Instant::now();
+        let result = process.exchange(&json!({"id":1,"command":"status"}), 1);
+        assert!(result.unwrap_err().contains("超时"));
+        assert!(start.elapsed() < Duration::from_secs(4));
+        assert!(process.child.try_wait().unwrap().is_some());
+    }
 
     #[test]
     fn development_binary_candidate_is_repo_relative() {

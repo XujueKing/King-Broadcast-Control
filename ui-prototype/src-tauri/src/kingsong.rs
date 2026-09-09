@@ -5,6 +5,7 @@ use std::{
     fs::{self, File},
     io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,7 +25,7 @@ pub struct SongPackageDirectories {
     pub outbox_directory: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SongPackageResult {
     pub path: String,
@@ -76,6 +77,77 @@ struct PackedEntry {
     name: String,
     size: u64,
     hash: [u8; 32],
+}
+
+static IMPORT_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct ImportFileStamp {
+    path: PathBuf,
+    size: u64,
+    modified: u128,
+}
+
+fn file_stamp(path: &Path) -> Option<ImportFileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some(ImportFileStamp {
+        path: path.to_path_buf(),
+        size: metadata.len(),
+        modified: metadata
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_nanos(),
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+struct ImportReceipt {
+    package: ImportFileStamp,
+    files: Vec<ImportFileStamp>,
+    result: SongPackageResult,
+}
+
+fn receipt_path(app_data: &Path, media_root: &Path, package: &Path) -> PathBuf {
+    let key = format!("{}|{}", media_root.display(), package.display());
+    app_data
+        .join("song-packages/receipts")
+        .join(format!("{}.json", blake3::hash(key.as_bytes()).to_hex()))
+}
+
+fn cached_import(
+    app_data: &Path,
+    receipt: &Path,
+    package: &ImportFileStamp,
+) -> Option<SongPackageResult> {
+    let saved: ImportReceipt = serde_json::from_slice(&fs::read(receipt).ok()?).ok()?;
+    if &saved.package != package
+        || saved.files.is_empty()
+        || saved
+            .files
+            .iter()
+            .any(|file| file_stamp(&file.path).as_ref() != Some(file))
+    {
+        return None;
+    }
+    // Metadata caching skips unpacking only after a fully verified import, and only
+    // while every published file and the ready database registration are intact.
+    let job = ai_analysis::ready_job_for_media_path(
+        &app_data.join("king-club.sqlite3"),
+        Path::new(&saved.result.path),
+    )
+    .ok()?;
+    if job.media_fingerprint != saved.result.song_id {
+        return None;
+    }
+    Some(SongPackageResult {
+        status: "already-imported".into(),
+        ..saved.result
+    })
 }
 
 pub fn directories(app_data: &Path) -> Result<SongPackageDirectories, String> {
@@ -544,7 +616,16 @@ pub fn import_song(
     {
         return Err("只能导入 .kingsong 文件".to_string());
     }
-    let package = File::open(package_path).map_err(|error| error.to_string())?;
+    let _guard = IMPORT_LOCK.lock().map_err(|_| "歌曲导入锁异常")?;
+    let package_path = package_path
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let stamp = file_stamp(&package_path).ok_or("无法读取歌曲包状态")?;
+    let receipt = receipt_path(app_data, media_root, &package_path);
+    if let Some(cached) = cached_import(app_data, &receipt, &stamp) {
+        return Ok(cached);
+    }
+    let package = File::open(&package_path).map_err(|error| error.to_string())?;
     let mut reader = BufReader::new(package);
     let (manifest, entries) = read_header(&mut reader)?;
     let package_root = app_data.join("song-packages");
@@ -612,6 +693,15 @@ pub fn import_song(
             if ai_analysis::fingerprint(&target_original)? != manifest.song_id {
                 return Err("本机已有同 ID 但内容不同的歌曲".to_string());
             }
+            // A cache miss must revalidate published derivatives as well as the
+            // original. Never bless a changed/corrupt target with a fresh receipt.
+            for entry in fs::read_dir(&staging_analysis).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let target = target_analysis_directory.join(entry.file_name());
+                if hash_file(&entry.path())? != hash_file(&target)? {
+                    return Err("本机同 ID 的制作文件与歌曲包不一致，请检查后重新导入".to_string());
+                }
+            }
             ai_analysis::register_imported_ready(
                 &app_data.join("king-club.sqlite3"),
                 &target_original,
@@ -655,13 +745,41 @@ pub fn import_song(
     match import_result {
         Ok(target_original) => {
             remove_staging(&staging);
-            Ok(SongPackageResult {
+            let mut paths = vec![
+                target_original.clone(),
+                target_original.parent().unwrap().join("kingsong.json"),
+            ];
+            let analysis = app_data.join("analysis").join(&manifest.song_id);
+            paths.extend(
+                ["no_vocals.flac", "lyrics.lrc", "lyrics.words.json"]
+                    .into_iter()
+                    .map(|name| analysis.join(name)),
+            );
+            if manifest.reference_file.is_some() {
+                paths.push(analysis.join("reference.json"));
+            }
+            let result = SongPackageResult {
                 path: target_original.to_string_lossy().into_owned(),
                 song_id: manifest.song_id,
                 title: manifest.title,
                 artist: manifest.artist,
-                status: "imported".to_string(),
-            })
+                status: "imported".into(),
+            };
+            let stamps: Option<Vec<_>> = paths.iter().map(|path| file_stamp(path)).collect();
+            if let Some(files) = stamps {
+                if let Some(parent) = receipt.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Ok(bytes) = serde_json::to_vec(&ImportReceipt {
+                    package: stamp,
+                    files,
+                    result: result.clone(),
+                }) {
+                    // A missing/partial receipt is treated as a cache miss; source packages remain untouched.
+                    let _ = fs::write(&receipt, bytes);
+                }
+            }
+            Ok(result)
         }
         Err(error) => {
             remove_staging(&staging);
@@ -856,6 +974,23 @@ mod tests {
         let imported = import_song(&target_app, &target_media, Path::new(&exported.path)).unwrap();
         assert!(Path::new(&imported.path).is_file());
         assert_eq!(imported.song_id, fingerprint);
+        let again = import_song(&target_app, &target_media, Path::new(&exported.path)).unwrap();
+        assert_eq!(again.status, "already-imported");
+        fs::remove_file(
+            target_app.join("song-packages/receipts").join(
+                receipt_path(
+                    &target_app,
+                    &target_media,
+                    &Path::new(&exported.path).canonicalize().unwrap(),
+                )
+                .file_name()
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let verified_again =
+            import_song(&target_app, &target_media, Path::new(&exported.path)).unwrap();
+        assert_eq!(verified_again.status, "imported");
         let jobs = ai_analysis::list(&target_app.join("king-club.sqlite3")).unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].status, "ready");
@@ -865,6 +1000,14 @@ mod tests {
         assert!(Path::new(&jobs[0].derived_directory)
             .join("reference.json")
             .is_file());
+        fs::write(
+            Path::new(&jobs[0].derived_directory).join("no_vocals.flac"),
+            b"changed derivative",
+        )
+        .unwrap();
+        let changed =
+            import_song(&target_app, &target_media, Path::new(&exported.path)).unwrap_err();
+        assert!(changed.contains("不一致"));
         let _ = fs::remove_dir_all(&root);
     }
 }
