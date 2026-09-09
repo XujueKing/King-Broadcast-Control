@@ -1,0 +1,655 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "KING CLUB Singer LAN API",
+    "version": "1.0.0",
+    "description": "Native staff LAN client; all requests require Bearer token. Accepted commands must be polled to completion."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:4865/api/singer/v1"
+    }
+  ],
+  "security": [
+    {
+      "SingerKey": []
+    }
+  ],
+  "paths": {
+    "/state": {
+      "get": {
+        "operationId": "getState",
+        "responses": {
+          "200": {
+            "description": "Current authoritative desktop state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid connection key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "LAN or Origin rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/songs": {
+      "get": {
+        "operationId": "searchSongs",
+        "responses": {
+          "200": {
+            "description": "Local catalog page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SongPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid connection key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "LAN or Origin rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/songs/{id}/lyrics": {
+      "get": {
+        "operationId": "getLyrics",
+        "responses": {
+          "200": {
+            "description": "Line-timed lyrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Lyrics"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid connection key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "LAN or Origin rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/commands/{id}": {
+      "get": {
+        "operationId": "getReceipt",
+        "responses": {
+          "200": {
+            "description": "Command execution receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Receipt"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid connection key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "LAN or Origin rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/commands": {
+      "post": {
+        "operationId": "submitCommand",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Command"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted or existing receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Receipt"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "State changed, busy, expired or ID reused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid operation schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Desktop controller offline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "SingerKey": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Operation": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "songId"
+            ],
+            "properties": {
+              "type": {
+                "const": "select"
+              },
+              "songId": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "songId"
+            ],
+            "properties": {
+              "type": {
+                "const": "next"
+              },
+              "songId": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "play"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "pause"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "restart"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "mode"
+            ],
+            "properties": {
+              "type": {
+                "const": "vocal_mode"
+              },
+              "mode": {
+                "enum": [
+                  "original",
+                  "accompaniment"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "Command": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "sessionId",
+          "expectedRevision",
+          "issuedAtUnixMs",
+          "operation"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 80,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "issuedAtUnixMs": {
+            "type": "integer"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/Operation"
+          }
+        }
+      },
+      "Receipt": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "error",
+          "revision"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "executing",
+              "succeeded",
+              "failed",
+              "expired",
+              "rejected",
+              "cancelled"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          }
+        }
+      },
+      "Song": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "artist": {
+            "type": "string"
+          },
+          "durationSeconds": {
+            "type": "number"
+          },
+          "accompanimentAvailable": {
+            "type": "boolean"
+          },
+          "lyricsAvailable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "artist",
+          "durationSeconds",
+          "accompanimentAvailable",
+          "lyricsAvailable"
+        ]
+      },
+      "Playback": {
+        "type": "object",
+        "properties": {
+          "loaded": {
+            "type": "boolean"
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "positionSeconds": {
+            "type": "number"
+          },
+          "sampledAtUnixMs": {
+            "type": "integer"
+          },
+          "clockFresh": {
+            "type": "boolean"
+          },
+          "vocalMode": {
+            "enum": [
+              "original",
+              "accompaniment"
+            ]
+          },
+          "playbackMode": {
+            "type": "string"
+          },
+          "volume": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "loaded",
+          "paused",
+          "positionSeconds",
+          "sampledAtUnixMs",
+          "clockFresh",
+          "vocalMode",
+          "playbackMode",
+          "volume"
+        ]
+      },
+      "State": {
+        "type": "object",
+        "properties": {
+          "apiVersion": {
+            "const": 1
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "serverTimeUnixMs": {
+            "type": "integer"
+          },
+          "controllerOnline": {
+            "type": "boolean"
+          },
+          "deck": {
+            "enum": [
+              1,
+              2
+            ]
+          },
+          "song": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Song"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "playback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Playback"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cueActive": {
+            "type": "boolean"
+          },
+          "transitionBusy": {
+            "type": "boolean"
+          },
+          "busy": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "apiVersion",
+          "sessionId",
+          "revision",
+          "serverTimeUnixMs",
+          "controllerOnline",
+          "deck",
+          "song",
+          "playback",
+          "cueActive",
+          "transitionBusy",
+          "busy"
+        ]
+      },
+      "SongPage": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Song"
+            }
+          }
+        },
+        "required": [
+          "total",
+          "offset",
+          "limit",
+          "items"
+        ]
+      },
+      "Lyrics": {
+        "type": "object",
+        "properties": {
+          "songId": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "atSeconds": {
+                  "type": "number"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "atSeconds",
+                "text"
+              ]
+            }
+          },
+          "timing": {
+            "const": "line"
+          },
+          "clock": {
+            "const": "mpv"
+          }
+        },
+        "required": [
+          "songId",
+          "lines",
+          "timing",
+          "clock"
+        ]
+      }
+    }
+  }
+}

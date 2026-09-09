@@ -1,5 +1,7 @@
 # Prototype Instructions
 
+主唱移动端范围固定为本地歌库选歌、同步歌词、原唱/伴唱、重唱、切歌和播放/暂停。中控提供局域网接口，平板界面在后续独立项目开发；不要自行扩展吧台管理、顾客点歌或云端业务。远程操作复用现有 Deck 控制与真实 mpv 时钟，切歌必须指定目标歌曲，选歌后暂停待唱，演唱使用单曲播放。连接恢复不得重放过期指令，执行回执不得把受理误报为已播放。
+
 Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.
 
 Before making substantial visual changes, use the Product Design plugin's `get-context` skill when the visual source is unclear or no longer matches the current goal. When the user gives durable prototype-specific design feedback, preferences, or decisions, record them in `AGENTS.md`.

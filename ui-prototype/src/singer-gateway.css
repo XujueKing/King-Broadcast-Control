@@ -1,0 +1,15 @@
+.singer-gateway-settings{padding:16px;margin:0 0 16px;border:1px solid #38464c;border-radius:8px;background:#151e22;color:#dae5e9;font-size:13px}
+.singer-gateway-settings header,.singer-gateway-controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.singer-gateway-settings header{justify-content:space-between}.singer-gateway-settings p,.singer-gateway-settings small{color:#a7bdc6;line-height:1.6}
+.singer-gateway-settings label{display:flex;align-items:center;gap:10px}.singer-gateway-settings input,.singer-gateway-settings select{background:#0c1215;color:#dce7ec;border:1px solid #415960;border-radius:4px;padding:8px;min-width:0}
+.singer-gateway-controls input{width:95px}.singer-gateway-settings button{padding:8px 12px;border:1px solid #55757e;border-radius:4px;background:#253e45;color:#e4f2f6}.singer-gateway-settings button:disabled{opacity:.45}
+.singer-gateway-connection{display:grid;gap:12px;margin-top:16px}.singer-gateway-connection input{flex:1;font-family:monospace}.singer-gateway-connection output{white-space:pre-line;user-select:text}.singer-gateway-connection>div{display:flex;gap:10px}.singer-gateway-settings [role=alert]{color:#ffa18d}
+/* Settings previously assigned fixed row heights by child index. The new
+   connection panel needs its own height and must not overlap hardware panels. */
+.app-shell .settings-view:has(.singer-gateway-settings){display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;min-height:0}
+.app-shell .settings-view:has(.singer-gateway-settings)>*{flex:0 0 auto}
+.app-shell .settings-view:has(.singer-gateway-settings)>.settings-header{min-height:58px}
+.app-shell .settings-view:has(.singer-gateway-settings)>.settings-ai-runtime{min-height:72px}
+.app-shell .settings-view:has(.singer-gateway-settings)>.settings-mixer-model{min-height:82px}
+.app-shell .settings-view:has(.singer-gateway-settings)>.settings-columns{min-height:430px}
+.app-shell .settings-view>.singer-gateway-settings{margin:12px 16px}

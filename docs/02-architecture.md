@@ -182,7 +182,7 @@ Rust 适合承担需要长期稳定运行的核心逻辑，但不要求所有 UI
 - mpv 独立进程 + JSON IPC：视频/音频解码、音轨控制和屏幕输出
 - SQLite：节目、歌单、素材索引、绑定关系、设置和日志
 - rusqlite + bundled SQLite：首版 Rust 数据访问层，随桌面程序离线部署，不依赖数据库服务
-- Axum：后续手机点歌、弹幕和审核所需的局域网 HTTP/WebSocket 服务
+- Axum：主唱平板局域网 HTTP API（曲库、歌词、播放状态与操作回执），接口见 `integrations/SINGER-LAN-API.md`；顾客点歌、弹幕和审核仍属后续范围
 - Serde：命令、状态和配置序列化
 - tracing：结构化日志与故障诊断
 

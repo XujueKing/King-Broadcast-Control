@@ -1,6 +1,9 @@
 import { createLightingSession, rhythmPulsePayload, createVideoColorTracker } from "./lighting-session.js";
+import SingerGatewaySettings from "./SingerGatewaySettings.jsx";
+import { useSingerGateway } from "./singer-gateway.js";
+import { executeSingerOperation } from "./singer-playback.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -1495,6 +1498,7 @@ function SettingsView({ screenTargets, monitorTargets, onScreenChange, onMonitor
       <div className="settings-ai-runtime-state" role="status"><i/><span><b>{!aiRuntimeAvailable?(runtimeCapability.hasNvidia?"AI 制作环境未就绪":"本机为播放版"):aiRuntimeEnabled?(audioAiWorker.running?"制作后台运行中":audioAiWorker.playbackProtected?"播放保护 · 制作已暂停":"制作后台启动中"):"开业模式 · AI 已关闭"}</b><small>{!aiRuntimeAvailable?(runtimeCapability.message||"本机不会启动 MOSS 与制作 Worker"):audioAiWorker.message||(aiRuntimeEnabled?"正在读取后台状态":"MOSS 与 Worker 均未运行")}</small></span></div>
       <button type="button" className="settings-ai-runtime-toggle" role="switch" aria-checked={aiRuntimeEnabled} disabled={!aiRuntimeAvailable||aiRuntimeBusy} onClick={()=>onAiRuntimeEnabledChange(!aiRuntimeEnabled)}><span/><b>{aiRuntimeBusy?"处理中":aiRuntimeEnabled?"关闭 AI 制作":"开启 AI 制作"}</b></button>
     </section>
+    <SingerGatewaySettings/>
     <section className="settings-mixer-model" aria-label="调音台型号设置">
       <div className="settings-mixer-identity"><SlidersHorizontal weight="fill"/><span><b>调音台型号包</b><small>USB-B 传输音频 · 以太网 TCP-MIDI 控制 · 选择型号后切换数字孪生 UI 与驱动</small></span></div>
       <label><span>当前型号</span><select value={mixerModelId} onChange={event=>onMixerModelChange(event.target.value)}>{mixerModels.map(model=><option value={model.id} key={model.id}>{model.displayName}</option>)}</select></label>
@@ -1704,6 +1708,10 @@ export function App() {
   const mpvAutoplayAfterLoadRef = useRef({ 1:false, 2:false });
   const mpvEndingRef = useRef({ 1:false, 2:false });
   const mpvEofHandledRef = useRef({ 1:false, 2:false });
+  const singerClockRef = useRef({1:null,2:null});
+  const singerCommandBusyRef = useRef(false);
+  const singerContextRef = useRef(null);
+  const mpvLoadingRef = useRef({1:null,2:null});
   const mpvAutoTransitionRef = useRef({phase:"idle"});
   const mpvAutoTransitionTimerRef = useRef(null);
   const operatorDeckControlRef=useRef(async()=>{});
@@ -3442,10 +3450,28 @@ export function App() {
   const resetDeckForTrackChange = (deckNumber) => {
     setDeckVocalModes((current)=>resetDeckVocalModeForTrackChange(current,deckNumber));
   };
-  const prepareTrack = async(deck, index) => {
-    if (index===null||isTrackLoaded(index)) return;
+  const prepareTrack = async(deck, index, {singer=false}={}) => {
+    if(singerCommandBusyRef.current&&!singer)return;
+    if (index===null||(!singer&&isTrackLoaded(index))) return;
     deckStartupSelectionAppliedRef.current[deck]=true;
     await takeDeckOperatorControl(deck,{rollbackAutoTarget:true});
+    if(singer){
+      // An unattended Auto-DJ may currently be playing the other Deck. An
+      // explicit singer selection takes over that music, stops both lanes and
+      // cancels autoplay before preparing the requested song.
+      for(const lane of [1,2]){
+        mpvAutoplayAfterLoadRef.current[lane]=false;
+        setDeckAutomationOwner(lane,"operator");
+        if(mpvLoadedPathsRef.current[lane])applyMpvDeckState(await invoke("mpv_deck_set_paused",{deck:lane,paused:true}));
+      }
+      setDeckPlaybackModes({1:"single",2:"single"});
+      const loaded=await ensureMpvDeckLoaded(deck,index,{vocalMode:"original"});
+      if(!loaded)await invoke("mpv_deck_seek",{deck,seconds:0});
+      const state=await invoke("mpv_deck_set_paused",{deck,paused:true});
+      applyMpvDeckState(state);
+      mpvAutoplayAfterLoadRef.current[deck]=false;
+      setDeckPlaybackModes(current=>({...current,[deck]:"single"}));
+    }
     setDeckPlaybackQueueSources((current)=>({...current,[deck]:activePlaylistPlaybackSource}));
     resetDeckForTrackChange(deck);
     if (deck === 1) {
@@ -3866,6 +3892,7 @@ export function App() {
   );
   const applyMpvDeckState = (state) => {
     if (!state?.deck) return;
+    singerClockRef.current[state.deck]={...state,sampledAtUnixMs:Date.now(),path:mpvLoadedPathsRef.current[state.deck]};
     const nextProgress=Math.max(0,Number(state.timePos)||0);
     const nextPlaying=!state.paused;
     setDeckProgress((current)=>Math.abs((current[state.deck]??0)-nextProgress)<.4
@@ -3875,11 +3902,13 @@ export function App() {
       ? current
       : {...current,[state.deck]:nextPlaying});
   };
-  const ensureMpvDeckLoaded = async (deckNumber, trackIndex) => {
+  const ensureMpvDeckLoaded = async (deckNumber, trackIndex, {vocalMode=deckVocalModes[deckNumber]}={}) => {
     const track = tracks[trackIndex];
-    const playbackPath = playbackPathForDeck(deckNumber, track);
+    const playbackPath = vocalMode==="accompaniment"&&track?.accompanimentPath?track.accompanimentPath:track?.path;
     if (!mpvEnabled || !playbackPath) return null;
+    if(mpvLoadingRef.current[deckNumber])await mpvLoadingRef.current[deckNumber];
     if (mpvLoadedPathsRef.current[deckNumber] === playbackPath) return null;
+    const load=(async()=>{
     const state = await invoke("mpv_deck_load",{deck:deckNumber,path:playbackPath});
     mpvLoadedPathsRef.current[deckNumber] = playbackPath;
     mpvEofHandledRef.current[deckNumber] = false;
@@ -3892,12 +3921,18 @@ export function App() {
     await invoke("mpv_deck_set_volume",{deck:deckNumber,volume});
     applyMpvDeckState(state);
     return state;
+    })();
+    mpvLoadingRef.current[deckNumber]=load;
+    try{return await load}finally{if(mpvLoadingRef.current[deckNumber]===load)mpvLoadingRef.current[deckNumber]=null}
   };
-  const switchDeckVocalMode = async (deckNumber, trackIndex) => {
+  const switchDeckVocalMode = async (deckNumber, trackIndex, {singer=false,mode=null}={}) => {
+    if(singerCommandBusyRef.current&&!singer)return;
     const track = tracks[trackIndex];
-    if (!track?.accompanimentPath) return;
+    if(mode!==null&&mode===deckVocalModes[deckNumber])return;
+    if (!track?.accompanimentPath) {if(singer)throw new Error("accompaniment_unavailable");return}
     const currentMode = deckVocalModes[deckNumber];
-    const nextMode = currentMode === "original" ? "accompaniment" : "original";
+    const nextMode = mode??(currentMode === "original" ? "accompaniment" : "original");
+    if(nextMode===currentMode)return;
     const nextPath = nextMode === "accompaniment" ? track.accompanimentPath : track.path;
     if (!nextPath) return;
     if (mpvEnabled) {
@@ -3923,6 +3958,7 @@ export function App() {
         applyMpvDeckState(state);
       } catch (error) {
         console.error(`Deck ${deckNumber} 原唱/伴唱切换失败`, error);
+        if(singer)throw error;
       }
       return;
     }
@@ -3951,17 +3987,18 @@ export function App() {
     setAudioAssets((current)=>current.map((item)=>item.id===trackId&&item.durationSeconds!==durationSeconds?{...item,durationSeconds}:item));
     setDeckProgress((current)=>({...current,[deckNumber]:Math.min(current[deckNumber]??0,durationSeconds)}));
   };
-  const seekDeck = async(deckNumber, seconds) => {
+  const seekDeck = async(deckNumber, seconds, {singer=false}={}) => {
+    if(singerCommandBusyRef.current&&!singer)return;
     const safeSeconds = Math.max(0,Number(seconds)||0);
     await takeDeckOperatorControl(deckNumber,{rollbackAutoTarget:true});
     mpvEofHandledRef.current[deckNumber] = false;
     if (mpvEnabled) {
       const trackIndex = deckNumber===1?deck1:deck2;
-      ensureMpvDeckLoaded(deckNumber,trackIndex)
-        .then(()=>invoke("mpv_deck_seek",{deck:deckNumber,seconds:safeSeconds}))
-        .then(applyMpvDeckState)
-        .catch((error)=>console.error(`Deck ${deckNumber} mpv Seek 失败`,error));
-      setDeckProgress((current)=>({...current,[deckNumber]:safeSeconds}));
+      try {
+        await ensureMpvDeckLoaded(deckNumber,trackIndex);
+        const state=await invoke("mpv_deck_seek",{deck:deckNumber,seconds:safeSeconds});
+        applyMpvDeckState(state);
+      }catch(error){console.error(`Deck ${deckNumber} mpv Seek 失败`,error);if(singer)throw error}
       return;
     }
     const audio = getDeckAudio(deckNumber);
@@ -3969,6 +4006,7 @@ export function App() {
     setDeckProgress((current)=>({...current,[deckNumber]:safeSeconds}));
   };
   const loadAdjacentDeckTrack = async(deckNumber, direction) => {
+    if(singerCommandBusyRef.current)return;
     const currentIndex = deckNumber===1?deck1:deck2;
     const excludedIndex = deckNumber===1?deck2:deck1;
     if(currentIndex===null||currentIndex===undefined)return;
@@ -4017,11 +4055,13 @@ export function App() {
     }
     setPlayingDecks((current)=>({...current,[deckNumber]:false}));
   };
-  const toggleDeckPlayback = async (deckNumber, trackIndex) => {
+  const toggleDeckPlayback = async (deckNumber, trackIndex, {singer=false,paused=null}={}) => {
+    if(singerCommandBusyRef.current&&!singer)return;
     const track = tracks[trackIndex];
     if(!track)return;
     await takeDeckOperatorControl(deckNumber,{rollbackAutoTarget:true});
-    const startingPlayback=!playingDecks[deckNumber];
+    const targetPaused=paused??Boolean(playingDecks[deckNumber]);
+    const startingPlayback=!targetPaused;
     if(startingPlayback&&desktopRuntime&&runtimeCapability.aiProcessingAvailable){
       const otherDeck=deckNumber===1?2:1;
       const otherTrackIndex=otherDeck===1?deck1:deck2;
@@ -4045,6 +4085,7 @@ export function App() {
       }catch(error){
         console.error(`Deck ${deckNumber} 播放保护失败`,error);
         setSongPackageMessage(`播放已阻止：无法安全暂停 AI 制作（${String(error)}）`);
+        if(singer)throw error;
         return;
       }
     }
@@ -4058,11 +4099,12 @@ export function App() {
           await invoke("mpv_deck_seek",{deck:deckNumber,seconds:0});
           mpvEofHandledRef.current[deckNumber]=false;
         }
-        const state=await invoke("mpv_deck_set_paused",{deck:deckNumber,paused:Boolean(playingDecks[deckNumber])});
+        const state=await invoke("mpv_deck_set_paused",{deck:deckNumber,paused:targetPaused});
         applyMpvDeckState(state);
       } catch(error) {
         console.error(`Deck ${deckNumber} mpv 播放控制失败`,error);
         setPlayingDecks((current)=>({...current,[deckNumber]:false}));
+        if(singer)throw error;
       }
       return;
     }
@@ -4320,6 +4362,65 @@ export function App() {
       mpvEndingRef.current[deckNumber]=false;
     }
   };
+  singerContextRef.current={
+    ready:()=>mpvEnabled,
+    cueActive:()=>deckCue.deck!==null||deckCue.busy,
+    transitionBusy:()=>mpvAutoTransitionRef.current.phase!=="idle",
+    otherPlaying:deck=>Boolean(playingDecks[deck===1?2:1]),
+    findTrack:key=>tracks.findIndex(track=>track.path===key&&!track.demo),
+    hasTrack:deck=>Boolean(tracks[deck===1?deck1:deck2]?.path),
+    hasAccompaniment:deck=>Boolean(tracks[deck===1?deck1:deck2]?.accompanimentPath),
+    select:(deck,index)=>prepareTrack(deck,index,{singer:true}),
+    setPaused:async(deck,paused)=>{
+      // Singer playback is an explicit single-song action. Reuse the desktop
+      // AI playback guard and pause acknowledgement before returning success.
+      setDeckPlaybackModes(current=>({...current,[deck]:"single"}));
+      if(!paused){
+        await ensureMpvDeckLoaded(deck,deck===1?deck1:deck2);
+        const position=deck===1?0:100;
+        await invoke("mpv_deck_set_volume",{deck,volume:masterVolume});
+        setCrossfade(position);
+        writeDeckOutputVolumes(position,masterVolume);
+      }
+      await toggleDeckPlayback(deck,deck===1?deck1:deck2,{singer:true,paused});
+    },
+    restart:async deck=>{
+      setDeckPlaybackModes(current=>({...current,[deck]:"single"}));
+      await seekDeck(deck,0,{singer:true});
+    },
+    setVocalMode:(deck,mode)=>switchDeckVocalMode(deck,deck===1?deck1:deck2,{singer:true,mode}),
+  };
+  useSingerGateway({desktopRuntime,tracks,
+    getSnapshot:()=>({
+      runtimeReady:mpvEnabled,
+      cueActive:deckCue.deck!==null||deckCue.busy,
+      transitionBusy:mpvAutoTransitionRef.current.phase!=="idle",
+      decks:[1,2].map(deck=>{
+        const track=tracks[deck===1?deck1:deck2];
+        const clock=singerClockRef.current[deck];
+        const path=playbackPathForDeck(deck,track);
+        const loaded=Boolean(path&&mpvLoadedPathsRef.current[deck]===path&&!mpvLoadingRef.current[deck]);
+        const matched=loaded&&clock?.path===path;
+        return {deck,songKey:track?.path??null,loaded,paused:matched?clock.paused:!playingDecks[deck],
+          positionSeconds:matched?Math.max(0,Number(clock.timePos)||0):0,
+          sampledAtUnixMs:matched?clock.sampledAtUnixMs:0,vocalMode:deckVocalModes[deck],
+          playbackMode:deckPlaybackModes[deck],volume:matched?Number(clock.volume)||0:0};
+      }),
+    }),
+    execute:async work=>{
+      if(singerCommandBusyRef.current)throw new Error("controller_busy");
+      singerCommandBusyRef.current=true;
+      try{
+        const context=Object.fromEntries(Object.keys(singerContextRef.current).map(key=>
+          [key,(...args)=>singerContextRef.current[key](...args)]));
+        await executeSingerOperation(work,context);
+        // Publish the completed song/mode together with its receipt, including
+        // while the operator is on another page or the app is minimized.
+        flushSync(()=>setDeckProgress(current=>({...current})));
+      }catch(error){setSongPackageMessage(`主唱操作未完成：${String(error)}`);throw error}
+      finally{singerCommandBusyRef.current=false}
+    },
+  });
   const deckOnePath=playbackPathForDeck(1,tracks[deck1])??null;
   const deckTwoPath=playbackPathForDeck(2,tracks[deck2])??null;
   useEffect(()=>{
@@ -4356,7 +4457,7 @@ export function App() {
       polling=true;
       try {
         for(const [deckNumber,trackIndex,path] of [[1,deck1,deckOnePath],[2,deck2,deckTwoPath]]) {
-          if(!path||mpvLoadedPathsRef.current[deckNumber]!==path)continue;
+          if(!path||mpvLoadedPathsRef.current[deckNumber]!==path||mpvLoadingRef.current[deckNumber]||singerCommandBusyRef.current)continue;
           const state=await invoke("mpv_deck_state",{deck:deckNumber});
           if(disposed)return;
           dispatchDeckRhythmEvents(

@@ -35,6 +35,13 @@ libloading = "0.8"
 local-ip-address = "0.6.13"
 socket2 = "0.6.5"
 king-vocal-engine = { path = "../../vocal-engine" }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros", "io-util"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [profile.dev]
 opt-level = 3

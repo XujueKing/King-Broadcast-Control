@@ -27,6 +27,7 @@ mod qu16_control;
 mod qu16_runtime;
 mod runtime_capability;
 mod runtime_paths;
+mod singer_gateway;
 mod titan_runtime;
 mod vocal_meter_bridge;
 mod vocal_profiles;
@@ -2166,12 +2167,18 @@ pub fn run() {
         .manage(audio_importer::AudioImporter::default())
         .manage(waveform::WaveformCache::default())
         .manage(mpv_runtime::MpvManager::default())
+        .manage(singer_gateway::SingerGateway::default())
         .manage(ai_worker::AiWorkerManager::default())
         .manage(qu16_runtime::Qu16Runtime::default())
         .manage(vocal_meter_bridge::VocalMeterBridge::default())
         .manage(vocal_runtime::VocalRuntimeBridge::default())
         .manage(capability_state)
         .invoke_handler(tauri::generate_handler![
+            singer_gateway::singer_gateway_status,
+            singer_gateway::singer_gateway_configure,
+            singer_gateway::singer_gateway_catalog,
+            singer_gateway::singer_gateway_exchange,
+            singer_gateway::singer_gateway_complete,
             scan_image_library,
             scan_media_library,
             ensure_video_thumbnail,
@@ -2272,6 +2279,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            singer_gateway::start_saved(app.handle());
             let app_data = app.path().app_data_dir()?;
             let media_root = media_root_directory(&app.handle().clone())?;
             if let Err(error) = kingsong::directories(&app_data) {
