@@ -32,12 +32,17 @@ export const mediaAssetFingerprint = (items) => items.map((item)=>[
   item.thumbnailPath,
 ].join(":")).join("|");
 
-export const describeReadyStemProgress = (accompanimentAvailable, job) => {
+export const describeReadyStemProgress = (accompanimentAvailable, job, { lyricsAvailable=false, workerEnabled=true }={}) => {
   if (!accompanimentAvailable) return null;
+  const label = lyricsAvailable ? "伴奏、歌词可用" : "伴奏可用 · 缺少歌词";
   const status = String(job?.status ?? "");
   const stage = String(job?.stage ?? "");
+  const error = String(job?.errorMessage ?? job?.error_message ?? "");
+  const failure = /transcript/i.test(error) ? "歌词识别失败"
+    : /allocate|allocation|memory/i.test(error) ? "资源不足/未制作"
+      : /convert string to float/i.test(error) ? "时间解析失败" : "分析失败";
   if (status === "ready") {
-    return { label:"全部制作完成", actionLabel:"已完成" };
+    return { label, taskLabel:"AI 分析已完成", actionLabel:"已完成" };
   }
   if (status === "running") {
     const detail = stage === "analyzing-reference"
@@ -47,18 +52,18 @@ export const describeReadyStemProgress = (accompanimentAvailable, job) => {
         : stage === "restoring-moss"
           ? "补音服务恢复中"
           : "后续分析中";
-    return { label:`伴奏已就绪 · ${detail}`, actionLabel:"伴奏可用" };
+    return { label, taskLabel:`AI ${detail}`, actionLabel:"伴奏可用" };
   }
   if (status === "paused") {
-    return { label:"伴奏已就绪 · 后续制作暂停", actionLabel:"伴奏可用" };
+    return { label, taskLabel:workerEnabled ? "AI 制作已暂停" : "AI 制作已关闭", actionLabel:"伴奏可用" };
   }
   if (status === "failed") {
-    return { label:"伴奏已就绪 · 后续分析失败", actionLabel:null };
+    return { label, taskLabel:`上次 AI 分析：${failure}`, actionLabel:null };
   }
   if (status === "queued") {
-    return { label:"伴奏已就绪 · 等待后续分析", actionLabel:null };
+    return { label, taskLabel:workerEnabled ? "AI 分析待执行" : "AI 制作已关闭，排队任务未执行", actionLabel:null };
   }
-  return { label:"伴奏已就绪", actionLabel:"伴奏可用" };
+  return { label, taskLabel:"未完成 AI 分析", actionLabel:"伴奏可用" };
 };
 
 export const equalPowerGains = (crossfade) => {

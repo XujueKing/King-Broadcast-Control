@@ -1,5 +1,7 @@
 # Prototype Instructions
 
+曲库状态先显示实际素材可用性：伴奏和歌词均可用时，在状态文字后显示绿色小勾；任一缺失不得显示小勾。AI 任务进度、历史失败原因及完整错误另放在悬停详情中，不得覆盖素材状态或把历史任务伪改为成功。
+
 主唱移动端范围为本地歌库选歌、同步歌词、原唱/伴唱、重唱、切歌、播放/暂停，以及用户确认的全场演唱调音（伴奏音量、指定麦克风音量、指定混响发送量、清唱）。中控提供局域网接口，平板界面在后续独立项目开发；不要自行扩展吧台管理、顾客点歌或云端业务。远程操作复用现有 Deck 控制与真实 mpv 时钟，切歌必须指定目标歌曲，选歌后暂停待唱，演唱使用单曲播放。连接恢复不得重放过期指令，执行回执不得把受理误报为已播放。
 
 Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.

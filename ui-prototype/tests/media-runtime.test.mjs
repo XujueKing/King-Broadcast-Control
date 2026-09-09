@@ -157,15 +157,26 @@ test("operator arbitration keeps playing or target-CUE Decks independent",()=>{
 test("completed stems become usable before reference analysis finishes",()=>{
   assert.deepEqual(
     describeReadyStemProgress(true,{status:"running",stage:"analyzing-reference"}),
-    {label:"伴奏已就绪 · 补音参考制作中",actionLabel:"伴奏可用"},
+    {label:"伴奏可用 · 缺少歌词",taskLabel:"AI 补音参考制作中",actionLabel:"伴奏可用"},
   );
   assert.deepEqual(
     describeReadyStemProgress(true,{status:"running",stage:"transcribing"}),
-    {label:"伴奏已就绪 · 歌词分析中",actionLabel:"伴奏可用"},
+    {label:"伴奏可用 · 缺少歌词",taskLabel:"AI 歌词分析中",actionLabel:"伴奏可用"},
   );
   assert.deepEqual(
     describeReadyStemProgress(true,{status:"ready",stage:"complete"}),
-    {label:"全部制作完成",actionLabel:"已完成"},
+    {label:"伴奏可用 · 缺少歌词",taskLabel:"AI 分析已完成",actionLabel:"已完成"},
   );
   assert.equal(describeReadyStemProgress(false,{status:"running",stage:"separating-high-quality"}),null);
+});
+
+test("imported lyrics and backing remain available after an earlier AI transcript failure",()=>{
+  const job={status:"failed",errorMessage:"MOSS-Music did not return the requested JSON transcript"};
+  assert.deepEqual(describeReadyStemProgress(true,job,{lyricsAvailable:true,workerEnabled:false}),{
+    label:"伴奏、歌词可用",taskLabel:"上次 AI 分析：歌词识别失败",actionLabel:null,
+  });
+  assert.equal(job.status,"failed");
+  assert.equal(describeReadyStemProgress(true,job,{lyricsAvailable:false}).label,"伴奏可用 · 缺少歌词");
+  assert.equal(describeReadyStemProgress(false,job,{lyricsAvailable:true}),null);
+  assert.equal(describeReadyStemProgress(true,{status:"queued"},{lyricsAvailable:true,workerEnabled:false}).taskLabel,"AI 制作已关闭，排队任务未执行");
 });
