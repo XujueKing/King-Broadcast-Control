@@ -2050,9 +2050,14 @@ fn collect_media_files(
 }
 
 fn media_root_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if cfg!(debug_assertions) {
-        if let Some(path) = std::env::var_os("KING_MEDIA_ROOT") {
-            return Ok(PathBuf::from(path));
+    if let Some(path) = std::env::var_os("KING_MEDIA_ROOT") {
+        return Ok(PathBuf::from(path));
+    }
+    #[cfg(windows)]
+    {
+        let drive = Path::new(r"D:\");
+        if drive.is_dir() {
+            return Ok(drive.join("KINGCLUB-Media"));
         }
     }
     Ok(app
@@ -2076,15 +2081,20 @@ fn scan_image_library(app: tauri::AppHandle) -> Result<ImageLibrary, String> {
 }
 
 #[tauri::command]
-async fn scan_media_library(
-    app: tauri::AppHandle,
-) -> Result<LocalMediaLibrary, String> {
+async fn scan_media_library(app: tauri::AppHandle) -> Result<LocalMediaLibrary, String> {
     let root_directory = media_root_directory(&app)?;
+    let database_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("king-club.sqlite3");
     tauri::async_runtime::spawn_blocking(move || {
-        let cache=app.state::<MediaMetadataCache>();
-        let importer=app.state::<audio_importer::AudioImporter>();
-        scan_media_root(root_directory, &cache, Some(&importer))
-    }).await.map_err(|error| error.to_string())?
+        let cache = app.state::<MediaMetadataCache>();
+        let importer = app.state::<audio_importer::AudioImporter>();
+        scan_media_root_with_database(root_directory, database_path, &cache, Some(&importer))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn scan_media_root(
@@ -2092,39 +2102,62 @@ fn scan_media_root(
     cache: &MediaMetadataCache,
     importer: Option<&audio_importer::AudioImporter>,
 ) -> Result<LocalMediaLibrary, String> {
+    let database_path = root_directory
+        .parent()
+        .map(|directory| directory.join("king-club.sqlite3"))
+        .unwrap_or_else(|| root_directory.join("king-club.sqlite3"));
+    scan_media_root_with_database(root_directory, database_path, cache, importer)
+}
+
+fn scan_media_root_with_database(
+    root_directory: PathBuf,
+    database_path: PathBuf,
+    cache: &MediaMetadataCache,
+    importer: Option<&audio_importer::AudioImporter>,
+) -> Result<LocalMediaLibrary, String> {
     let video_directory = root_directory.join("videos");
     let audio_directory = root_directory.join("audio");
     fs::create_dir_all(&video_directory).map_err(|error| error.to_string())?;
     fs::create_dir_all(&audio_directory).map_err(|error| error.to_string())?;
-    let audio_import = importer
+    let mut audio_import = importer
         .map(|importer| importer.prepare(&audio_directory))
         .unwrap_or_default();
+    let kugou_directory = audio_importer::kugou_download_directory().filter(|directory| {
+        let source = directory
+            .canonicalize()
+            .unwrap_or_else(|_| directory.clone());
+        let managed = audio_directory
+            .canonicalize()
+            .unwrap_or_else(|_| audio_directory.clone());
+        source != managed && !source.starts_with(&managed)
+    });
+    if let (Some(importer), Some(directory)) = (importer, kugou_directory.as_deref()) {
+        let kugou_import = importer.prepare_from(directory, &audio_directory);
+        audio_import.detected += kugou_import.detected;
+        audio_import.ready += kugou_import.ready;
+        audio_import.failed += kugou_import.failed;
+        audio_import.decoder_available |= kugou_import.decoder_available;
+        audio_import.state = if audio_import.failed > 0 {
+            "error".into()
+        } else if audio_import.ready > 0 {
+            "ready".into()
+        } else {
+            audio_import.state
+        };
+        if !kugou_import.message.is_empty() {
+            audio_import.message.push_str("；酷狗目录：");
+            audio_import.message.push_str(&kugou_import.message);
+        }
+    }
 
     let mut videos = Vec::new();
     let mut audio = Vec::new();
-    let database_path = root_directory
-        .parent()
-        .map(|directory| directory.join("king-club.sqlite3"));
-    let ready_artifacts = database_path
-        .as_deref()
-        .map(ai_analysis::ready_artifacts_by_media_path)
-        .transpose()?
-        .unwrap_or_default();
-    let ready_artifacts_by_fingerprint = database_path
-        .as_deref()
-        .map(ai_analysis::ready_artifacts_by_media_fingerprint)
-        .transpose()?
-        .unwrap_or_default();
-    let available_stems = database_path
-        .as_deref()
-        .map(ai_analysis::available_stems_by_media_path)
-        .transpose()?
-        .unwrap_or_default();
-    let available_stems_by_fingerprint = database_path
-        .as_deref()
-        .map(ai_analysis::available_stems_by_media_fingerprint)
-        .transpose()?
-        .unwrap_or_default();
+    let ready_artifacts = ai_analysis::ready_artifacts_by_media_path(&database_path)?;
+    let ready_artifacts_by_fingerprint =
+        ai_analysis::ready_artifacts_by_media_fingerprint(&database_path)?;
+    let available_stems = ai_analysis::available_stems_by_media_path(&database_path)?;
+    let available_stems_by_fingerprint =
+        ai_analysis::available_stems_by_media_fingerprint(&database_path)?;
     let empty_ready_artifacts = HashMap::new();
     let empty_stem_artifacts = HashMap::new();
     collect_media_files(
@@ -2181,6 +2214,23 @@ fn scan_media_root(
         },
         &mut audio,
     )?;
+    if let Some(directory) = kugou_directory.as_deref() {
+        collect_media_files(
+            directory,
+            directory,
+            &["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus"],
+            "酷狗音乐",
+            cache,
+            Some(&root_directory.join("cache").join("audio-covers")),
+            &MediaArtifactIndex {
+                ready: &ready_artifacts,
+                ready_by_fingerprint: &ready_artifacts_by_fingerprint,
+                available_stems: &available_stems,
+                stems_by_fingerprint: &available_stems_by_fingerprint,
+            },
+            &mut audio,
+        )?;
+    }
     videos.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
     audio.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
 
