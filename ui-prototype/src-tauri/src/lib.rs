@@ -2118,7 +2118,18 @@ fn scan_media_root_with_database(
 ) -> Result<LocalMediaLibrary, String> {
     let video_directory = root_directory.join("videos");
     let audio_directory = root_directory.join("audio");
-    fs::create_dir_all(&video_directory).map_err(|error| error.to_string())?;
+    // Videos may live on a removable drive through a Windows junction.  A
+    // disconnected target must not prevent the independent audio library from
+    // loading.  Do not replace the dangling junction: it becomes usable again
+    // when the drive returns.
+    let video_directory_available = match fs::metadata(&video_directory) {
+        Ok(metadata) => metadata.is_dir(),
+        Err(_) if fs::symlink_metadata(&video_directory).is_ok() => false,
+        Err(_) => {
+            fs::create_dir_all(&video_directory).map_err(|error| error.to_string())?;
+            true
+        }
+    };
     fs::create_dir_all(&audio_directory).map_err(|error| error.to_string())?;
     let mut audio_import = importer
         .map(|importer| importer.prepare(&audio_directory))
@@ -2161,21 +2172,26 @@ fn scan_media_root_with_database(
         ai_analysis::available_stems_by_media_fingerprint(&database_path)?;
     let empty_ready_artifacts = HashMap::new();
     let empty_stem_artifacts = HashMap::new();
-    collect_media_files(
-        &video_directory,
-        &video_directory,
-        &["mp4", "m4v", "mov", "webm"],
-        "舞台",
-        cache,
-        None,
-        &MediaArtifactIndex {
-            ready: &empty_ready_artifacts,
-            ready_by_fingerprint: &empty_ready_artifacts,
-            available_stems: &empty_stem_artifacts,
-            stems_by_fingerprint: &empty_stem_artifacts,
-        },
-        &mut videos,
-    )?;
+    if video_directory_available {
+        if let Err(error) = collect_media_files(
+            &video_directory,
+            &video_directory,
+            &["mp4", "m4v", "mov", "webm"],
+            "舞台",
+            cache,
+            None,
+            &MediaArtifactIndex {
+                ready: &empty_ready_artifacts,
+                ready_by_fingerprint: &empty_ready_artifacts,
+                available_stems: &empty_stem_artifacts,
+                stems_by_fingerprint: &empty_stem_artifacts,
+            },
+            &mut videos,
+        ) {
+            eprintln!("视频目录暂时不可用，继续加载音频库：{error}");
+            videos.clear();
+        }
+    }
     let thumbnail_cache_directory = root_directory.join("cache").join("video-thumbnails");
     for video in &mut videos {
         let source = PathBuf::from(&video.path)
