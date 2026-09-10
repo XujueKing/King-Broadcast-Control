@@ -1364,6 +1364,7 @@ fn run_connection(
     let mut control_observer: Option<Qu16ControlObserver> = None;
     let mut synced = false;
     let mut pending_writes: BTreeMap<String, PendingWrite> = BTreeMap::new();
+    let mut readback_requested_at: Option<Instant> = None;
     let mut invalid_meter_frames = 0;
     let mut decoder = MidiStreamDecoder::default();
     let mut buffer = [0_u8; 4_096];
@@ -1398,6 +1399,22 @@ fn run_connection(
             &mut pending_writes,
         ) {
             return ConnectionOutcome::Retry(error);
+        }
+
+        // Some desks do not echo a write to its originating connection.
+        // Request authoritative state once for an outstanding batch; never
+        // resend the command or mistake the socket write for confirmation.
+        if pending_writes.is_empty() {
+            readback_requested_at = None;
+        } else if readback_requested_at.is_none()
+            && pending_writes.values().any(|pending| pending.sent_at.elapsed() >= Duration::from_millis(100))
+        {
+            if let Err(error) = stream.write_all(&build_get_system_state_request()) {
+                return ConnectionOutcome::Retry(format!("Qu-16 readback request failed: {error}"));
+            }
+            readback_requested_at = Some(Instant::now());
+        } else if readback_requested_at.is_some_and(|at| at.elapsed() >= Duration::from_millis(1800)) {
+            return ConnectionOutcome::Retry("Qu-16 write readback timed out; resynchronizing without replay".into());
         }
 
         let timed_out: Vec<String> = pending_writes

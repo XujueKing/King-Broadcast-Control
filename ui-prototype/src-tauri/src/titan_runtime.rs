@@ -458,6 +458,9 @@ fn read_static_playbacks(host: &str) -> Result<Vec<TitanPlaybackHandle>, String>
 fn read_triggerable_playbacks(host: &str) -> Result<Vec<TitanPlaybackHandle>, String> {
     let mut handles = read_playbacks(host)?;
     handles.extend(read_static_playbacks(host)?);
+    // Tiger Touch's lower physical executor buttons live in Macros, even
+    // when the stored handle is a cue rather than a key-sequence macro.
+    handles.extend(read_playbacks_from_path(host, "/titan/handles/Macros")?);
     handles.retain(is_triggerable_playback);
     Ok(handles)
 }

@@ -1,5 +1,5 @@
 import AudioProcessorWorkspace from "./AudioProcessorWorkspace.jsx";
-import {frontLightState,setFrontLight} from "./singer-front-light.js";
+import {frontLightState,setFrontLight,FRONT_LIGHT_POLL_MS} from "./singer-front-light.js";
 import {createWaveformClock} from "./waveform-clock.js";
 import {singerCompletionBookmark,SingerInterlude,singerPlaylistKey,singerPlaylistSource,singerReturnPlan} from './singer-library.js';
 import { createLightingSession, rhythmPulsePayload, createVideoColorTracker } from "./lighting-session.js";
@@ -2498,7 +2498,8 @@ export function App() {
       setTitanPlaybacks(current=>JSON.stringify(current)===JSON.stringify(next)?current:next);
       return next;
     }catch(error){
-      singerFrontLightSampleRef.current={host:"",at:0,handles:[]};
+      // Preserve the last hardware sample through a transient read failure.
+      // frontLightState expires it and rejects a changed host/device/show.
       console.error("Titan Playback 状态读取失败",error);
       return [];
     }
@@ -2525,7 +2526,7 @@ export function App() {
       try{await refreshTitanPlaybacks();}finally{refreshing=false;}
     };
     refresh();
-    const timer=window.setInterval(()=>{if(!disposed)refresh();},5000);
+    const timer=window.setInterval(()=>{if(!disposed)refresh();},FRONT_LIGHT_POLL_MS);
     return ()=>{disposed=true;window.clearInterval(timer);};
   },[desktopRuntime,titanStatus.connected,titanStatus.host,titanStatus.showName,refreshTitanPlaybacks]);
   useEffect(()=>{
