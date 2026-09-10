@@ -56,3 +56,6 @@ ui-prototype/public/build-info.json
 
 # Local singer audio verification snapshots
 /ui-prototype/artifacts/singer-audio-*.json
+
+# Local runtime captures and diagnostics (may contain pairing/session data)
+/ui-prototype/artifacts/

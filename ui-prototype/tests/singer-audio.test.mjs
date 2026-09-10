@@ -6,6 +6,18 @@ import {executeSingerOperation} from '../src/singer-playback.js';
 const policy={...defaultSingerAudioPolicy,microphone:'ch-6',reverbBus:'FX 1'};
 const mixer={connected:true,synced:true,parameters:{'fader:ch-6':98,'send:ch-6:FX 1':44},pendingDetails:{}};
 const snapshot=(extra={})=>singerAudioSnapshot({policy,musicVolume:66,musicReady:true,acappella:false,mixerLive:true,mixer,...extra});
+test('two microphone controls have isolated bindings, readbacks and limits',async()=>{
+  const policy={...defaultSingerAudioPolicy,microphone:'ch-1',microphone2:'ch-2',microphone2Max:65};
+  const mixer={connected:true,synced:true,parameters:{'fader:ch-1':98,'fader:ch-2':70},pendingDetails:{}};
+  const audio=snapshot({policy,mixer});
+  assert.equal(audio.microphone.value,77);assert.equal(audio.microphone2.value,55);
+  const writes=[];const context={policy:()=>policy,snapshot:()=>audio,writeMixer:async write=>writes.push(write)};
+  await executeSingerAudio({type:'audio_level',control:'microphone2',value:60},context);
+  assert.deepEqual(writes,[{key:'fader:ch-2',value:76}]);
+  await assert.rejects(executeSingerAudio({type:'audio_level',control:'microphone2',value:66},context),/invalid_audio_value/);
+  assert.equal(snapshot({policy,mixer:{...mixer,pendingDetails:{'fader:ch-2':{}}}}).microphone.available,true);
+  assert.equal(snapshot({policy,mixer:{...mixer,pendingDetails:{'fader:ch-2':{}}}}).microphone2.available,false);
+});
 test('mic/FX controls require explicit binding, live sync and actual parameter echo',()=>{
   assert.equal(snapshot().microphone.value,77);
   assert.equal(snapshot({policy:defaultSingerAudioPolicy}).microphone.reason,'audio_unbound');

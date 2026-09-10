@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "additionalBrowserArgs": "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows",
         "title": "KING CLUB Broadcast Control",
         "width": 1440,
         "height": 900,
@@ -29,6 +30,7 @@
       },
       {
         "label": "output",
+        "additionalBrowserArgs": "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows",
         "title": "KING CLUB LED Output",
         "url": "output.html",
         "width": 960,

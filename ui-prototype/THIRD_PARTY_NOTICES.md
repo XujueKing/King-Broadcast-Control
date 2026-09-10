@@ -22,3 +22,7 @@ KING CLUB Broadcast Control uses the unmodified Windows binary of `kugou-kgm-dec
 - License: Anti 996 License Version 1.0 (Draft), bundled at `licenses/kgm-decoder-LICENSE.txt`
 
 Use this importer only for music files you are legally entitled to access and convert. Public performance rights remain separate from file-format compatibility.
+
+## Atmosphere sound pad
+
+Bundled CC0 recordings from BigSoundBank: Joseph SARDIN (applause, 2479), DenisChardonnet (cheers/shouts, 0237 and 0236). Sources: https://bigsoundbank.com/applaudissements-concert-bar-1-s2479.html , https://bigsoundbank.com/shouts-and-applauses-of-teens-2-s0237.html , https://bigsoundbank.com/cris-et-applaudissements-d-ados-1-s0236.html . License: https://creativecommons.org/publicdomain/zero/1.0/ .

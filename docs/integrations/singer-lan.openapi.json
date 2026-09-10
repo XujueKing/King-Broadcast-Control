@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "KING CLUB Singer LAN API",
-    "version": "1.1.0",
-    "description": "Native staff LAN client; all requests require Bearer token. Accepted commands must be polled to completion. Optional additive audio capabilities; absent audio means controller upgrade required. Commands obey configured caps. A cappella mutes computer music only, preserving clock and microphone/FX. Hardware success requires actual readback."
+    "version": "1.4.0",
+    "description": "Native staff LAN client; Business requests require Bearer token; private-LAN discovery and one-use, five-minute four-digit pairing are additive exceptions. Accepted commands must be polled to completion. Optional additive audio capabilities; absent audio means controller upgrade required. Commands obey configured caps. A cappella mutes computer music only, preserving clock and microphone/FX. Hardware success requires actual readback."
   },
   "servers": [
     {
@@ -114,6 +114,14 @@
               "maximum": 100,
               "default": 50
             }
+          },
+          {
+            "name": "playlistId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter to playlist order; omit for full-library search."
           }
         ]
       }
@@ -278,6 +286,172 @@
           }
         }
       }
+    },
+    "/info": {
+      "get": {
+        "operationId": "getControllerIdentity",
+        "security": [],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "nonce",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-fA-F0-9]{32}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public identity and HMAC-SHA256 proof; no credential or pairing code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "apiVersion",
+                    "service",
+                    "controllerId",
+                    "port",
+                    "nonce",
+                    "proof"
+                  ],
+                  "properties": {
+                    "apiVersion": {
+                      "const": 1
+                    },
+                    "service": {
+                      "const": "kingclub-singer-v1"
+                    },
+                    "controllerId": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "port": {
+                      "type": "integer"
+                    },
+                    "nonce": {
+                      "type": "string"
+                    },
+                    "proof": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "LAN or browser Origin rejected"
+          }
+        }
+      }
+    },
+    "/pair": {
+      "post": {
+        "operationId": "pairTablet",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "controllerId",
+                  "code"
+                ],
+                "properties": {
+                  "controllerId": {
+                    "type": "string",
+                    "pattern": "^[a-fA-F0-9]{32}$"
+                  },
+                  "code": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Paired; window consumed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "apiVersion",
+                    "controllerId",
+                    "token"
+                  ],
+                  "properties": {
+                    "apiVersion": {
+                      "const": 1
+                    },
+                    "controllerId": {
+                      "type": "string"
+                    },
+                    "token": {
+                      "type": "string",
+                      "pattern": "^[a-fA-F0-9]{64}$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Incorrect code; counts toward five attempts"
+          },
+          "403": {
+            "description": "Pairing closed or source denied"
+          },
+          "409": {
+            "description": "Controller identity changed"
+          },
+          "410": {
+            "description": "Pairing expired"
+          },
+          "429": {
+            "description": "Five failures; reopen pairing on desktop"
+          },
+          "503": {
+            "description": "Gateway disabled"
+          }
+        }
+      }
+    },
+    "/playlists": {
+      "get": {
+        "summary": "List local playlist categories without paths",
+        "responses": {
+          "200": {
+            "description": "Playlist summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Playlist"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -393,6 +567,7 @@
                 "enum": [
                   "music",
                   "microphone",
+                  "microphone2",
                   "reverb"
                 ]
               },
@@ -413,6 +588,120 @@
             "properties": {
               "type": {
                 "const": "acappella"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "semitones"
+            ],
+            "properties": {
+              "type": {
+                "const": "pitch"
+              },
+              "semitones": {
+                "type": "integer",
+                "minimum": -6,
+                "maximum": 6
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "songId"
+            ],
+            "properties": {
+              "type": {
+                "const": "temporary_select"
+              },
+              "songId": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "songId",
+              "playlistId"
+            ],
+            "properties": {
+              "type": {
+                "const": "playlist_select"
+              },
+              "songId": {
+                "type": "string"
+              },
+              "playlistId": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "effect",
+              "volume"
+            ],
+            "properties": {
+              "type": {
+                "const": "atmosphere"
+              },
+              "effect": {
+                "type": "string",
+                "enum": [
+                  "applause",
+                  "cheer",
+                  "scream",
+                  "stop"
+                ]
+              },
+              "volume": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 60
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "enabled"
+            ],
+            "properties": {
+              "type": {
+                "const": "auto_return_next"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "enabled"
+            ],
+            "properties": {
+              "type": {
+                "const": "front_light"
               },
               "enabled": {
                 "type": "boolean"
@@ -547,6 +836,11 @@
           },
           "volume": {
             "type": "number"
+          },
+          "pitchSemitones": {
+            "type": "integer",
+            "minimum": -6,
+            "maximum": 6
           }
         },
         "required": [
@@ -618,6 +912,64 @@
           },
           "audioPolicy": {
             "$ref": "#/components/schemas/AudioPolicy"
+          },
+          "controllerId": {
+            "type": "string",
+            "description": "Stable controller identity for paired address recovery"
+          },
+          "features": {
+            "type": "object",
+            "properties": {
+              "pitch": {
+                "type": "boolean"
+              },
+              "playlists": {
+                "type": "boolean"
+              },
+              "temporarySelect": {
+                "type": "boolean"
+              }
+            }
+          },
+          "playlist": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Playlist"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "interlude": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "active": {
+                "type": "boolean"
+              },
+              "returnSong": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Song"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "returnPositionSeconds": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "returnRevision": {
+                "type": "integer"
+              }
+            }
           }
         },
         "required": [
@@ -766,6 +1118,21 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 77
+          },
+          "microphone2": {
+            "enum": [
+              "",
+              "ch-1",
+              "ch-2",
+              "ch-6"
+            ],
+            "default": ""
+          },
+          "microphone2Max": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 77,
+            "default": 77
           }
         }
       },
@@ -790,6 +1157,44 @@
           },
           "acappella": {
             "type": "boolean"
+          },
+          "microphone2": {
+            "$ref": "#/components/schemas/AudioLevel"
+          }
+        }
+      },
+      "Playlist": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "library",
+          "count"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "weekday",
+              "event",
+              "custom"
+            ]
+          },
+          "library": {
+            "enum": [
+              1,
+              2
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       }

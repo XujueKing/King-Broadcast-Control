@@ -3685,3 +3685,9 @@ button:disabled{color:#626d72}
 .video-sequence-control small { white-space:nowrap; color:#84979f; }
 .video-panel.has-categories:has(.video-sequence-control) { grid-template-rows:38px 34px 34px 28px minmax(0,1fr); }
 @media(max-height:800px) { .video-panel.has-categories:has(.video-sequence-control) { grid-template-rows:36px 30px 31px 26px minmax(0,1fr); } }
+
+/* In text mode only the explicit background-mode button may intercept input. */
+.media-transform-editor.text-edit-mode{pointer-events:none}
+.media-transform-editor.text-edit-mode .media-transform-toolbar{pointer-events:auto}
+
+.transport .vocal-rescue-toggle{white-space:nowrap;line-height:1;overflow:hidden}

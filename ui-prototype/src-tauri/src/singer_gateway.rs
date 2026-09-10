@@ -19,6 +19,8 @@ use std::{
 };
 use tauri::Manager;
 use tokio::sync::Mutex as AsyncMutex;
+#[path = "singer_pairing.rs"]
+mod pairing;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -33,6 +35,8 @@ fn new_id() -> String {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
+    #[serde(default = "new_id")]
+    pub controller_id: String,
     #[serde(default)]
     pub audio_policy: AudioPolicy,
     pub enabled: bool,
@@ -43,6 +47,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            controller_id: new_id(),
             audio_policy: AudioPolicy::default(),
             enabled: false,
             port: 4865,
@@ -56,21 +61,26 @@ impl Default for Config {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AudioPolicy {
     pub microphone: String,
+    #[serde(default)] pub microphone2: String,
     pub reverb_bus: String,
     pub music_max: u8,
     pub microphone_max: u8,
+    #[serde(default = "default_microphone_max")] pub microphone2_max: u8,
     pub reverb_max: u8,
 }
+fn default_microphone_max() -> u8 { 77 }
 impl Default for AudioPolicy {
     fn default() -> Self {
-        Self { microphone: String::new(), reverb_bus: String::new(), music_max: 100, microphone_max: 77, reverb_max: 60 }
+        Self { microphone: String::new(), microphone2: String::new(), reverb_bus: String::new(), music_max: 100, microphone_max: 77, microphone2_max: 77, reverb_max: 60 }
     }
 }
 impl AudioPolicy {
     fn valid(&self) -> bool {
         ["", "ch-1", "ch-2", "ch-6"].contains(&self.microphone.as_str())
+            && ["", "ch-1", "ch-2", "ch-6"].contains(&self.microphone2.as_str())
+            && (self.microphone2.is_empty() || self.microphone2 != self.microphone)
             && ["", "FX 1", "FX 2"].contains(&self.reverb_bus.as_str())
-            && self.music_max <= 100 && self.microphone_max <= 77 && self.reverb_max <= 77
+            && self.music_max <= 100 && self.microphone_max <= 77 && self.microphone2_max <= 77 && self.reverb_max <= 77
     }
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -85,6 +95,7 @@ pub struct AudioLevel {
 pub struct AudioSnapshot {
     pub music: AudioLevel,
     pub microphone: AudioLevel,
+    #[serde(default)] pub microphone2: AudioLevel,
     pub reverb: AudioLevel,
     pub acappella: bool,
 }
@@ -110,9 +121,30 @@ impl Song {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Playlist {
+    pub key: String,
+    pub name: String,
+    pub kind: String,
+    pub library: u8,
+    pub song_keys: Vec<String>,
+}
+impl Playlist {
+    fn id(&self) -> String { blake3::hash(self.key.as_bytes()).to_hex().to_string() }
+    fn summary(&self) -> Value {
+        json!({"id":self.id(),"name":self.name,"kind":self.kind,"library":self.library,"count":self.song_keys.len()})
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeckSnapshot {
+    #[serde(default)] pub pitch_semitones: i8,
+    #[serde(default)] pub playlist_key: Option<String>,
+    #[serde(default)] pub return_song_key: Option<String>,
+    #[serde(default)] pub return_position_seconds: Option<f64>,
+    #[serde(default)] pub return_revision: u64,
     pub deck: u8,
     pub song_key: Option<String>,
     pub loaded: bool,
@@ -127,6 +159,10 @@ pub struct DeckSnapshot {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Snapshot {
     #[serde(default)]
+    pub front_light: Value,
+    #[serde(default)]
+    pub auto_return_next: bool,
+    #[serde(default)]
     pub audio: AudioSnapshot,
     pub decks: Vec<DeckSnapshot>,
     pub cue_active: bool,
@@ -137,6 +173,12 @@ pub struct Snapshot {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    FrontLight { enabled: bool },
+    AutoReturnNext { enabled: bool },
+    Atmosphere { effect: String, volume: u8 },
+    Pitch { semitones: i8 },
+    TemporarySelect { #[serde(rename="songId")] song_id: String },
+    PlaylistSelect { #[serde(rename="songId")] song_id: String, #[serde(rename="playlistId")] playlist_id: String },
     Select {
         #[serde(rename = "songId")]
         song_id: String,
@@ -177,6 +219,7 @@ struct Entry {
     admitted: Instant,
 }
 struct Inner {
+    pairing: Option<pairing::PairingWindow>,
     config: Config,
     config_path: Option<PathBuf>,
     running: bool,
@@ -187,9 +230,11 @@ struct Inner {
     fingerprint: String,
     updated: Option<Instant>,
     catalog: Vec<Song>,
+    playlists: Vec<Playlist>,
     entries: VecDeque<Entry>,
 }
 struct Shared {
+    discovery: Mutex<Option<tokio::task::JoinHandle<()>>>,
     inner: Mutex<Inner>,
     lifecycle: AsyncMutex<()>,
     server: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -199,7 +244,9 @@ pub struct SingerGateway(Arc<Shared>);
 impl Default for SingerGateway {
     fn default() -> Self {
         Self(Arc::new(Shared {
+            discovery: Mutex::new(None),
             inner: Mutex::new(Inner {
+                pairing: None,
                 config: Config::default(),
                 config_path: None,
                 running: false,
@@ -210,6 +257,7 @@ impl Default for SingerGateway {
                 fingerprint: String::new(),
                 updated: None,
                 catalog: vec![],
+                playlists: vec![],
                 entries: VecDeque::new(),
             }),
             lifecycle: AsyncMutex::new(()),
@@ -267,10 +315,11 @@ impl SingerGateway {
             }
         }
         json!({"config": inner.config, "running": inner.running, "error": inner.error,
+            "pairing": inner.pairing.as_ref().map(pairing::PairingWindow::status),
             "addresses": addresses, "controllerOnline": inner.fresh(), "songCount": inner.catalog.len()})
     }
     pub async fn configure(&self, config: Config) -> Result<Value, String> {
-        if !config.audio_policy.valid() || config.port < 1024
+        if config.controller_id.len() != 32 || !config.controller_id.bytes().all(|b| b.is_ascii_hexdigit()) || !config.audio_policy.valid() || config.port < 1024
             || ![1, 2].contains(&config.deck)
             || config.token.len() != 64
             || !config.token.bytes().all(|b| b.is_ascii_hexdigit())
@@ -290,7 +339,9 @@ impl SingerGateway {
             inner.config.enabled = false;
             inner.running = false;
             inner.cancel_queued();
+            inner.pairing = None;
         }
+        if let Some(task) = self.0.discovery.lock().unwrap().take() { task.abort(); }
         let previous = self.0.server.lock().unwrap().take();
         if let Some(task) = previous {
             task.abort();
@@ -329,6 +380,7 @@ impl SingerGateway {
             inner.entries.clear();
         }
         if let Some(listener) = listener {
+            pairing::start_discovery(self).await;
             let gateway = self.clone();
             let task = tokio::spawn(async move {
                 let result = axum::serve(
@@ -357,10 +409,17 @@ impl SingerGateway {
         inner.revision += 1;
         Ok(())
     }
+    pub fn set_playlists(&self, playlists: Vec<Playlist>) -> Result<(), String> {
+        if playlists.len()>1000 || playlists.iter().any(|p| p.key.is_empty() || ![1,2].contains(&p.library) || p.song_keys.len()>100_000) {
+            return Err("歌单数据无效".into());
+        }
+        let mut inner=self.0.inner.lock().unwrap();
+        inner.playlists=playlists; inner.revision+=1; Ok(())
+    }
     pub fn exchange(&self, snapshot: Snapshot) -> Value {
         let fingerprint = serde_json::to_string(&json!({"decks": snapshot.decks.iter().map(|d|
-            json!([d.deck, d.song_key, d.loaded, d.paused, d.vocal_mode, d.playback_mode, d.volume.round()])).collect::<Vec<_>>(),
-            "audio": snapshot.audio, "cue": snapshot.cue_active, "transition": snapshot.transition_busy, "ready": snapshot.runtime_ready})).unwrap();
+            json!([d.deck, d.song_key, d.loaded, d.paused, d.vocal_mode, d.playback_mode, d.volume.round(), d.pitch_semitones, d.playlist_key, d.return_song_key, d.return_revision])).collect::<Vec<_>>(),
+            "frontLight": snapshot.front_light, "audio": snapshot.audio, "autoReturnNext": snapshot.auto_return_next, "cue": snapshot.cue_active, "transition": snapshot.transition_busy, "ready": snapshot.runtime_ready})).unwrap();
         let mut inner = self.0.inner.lock().unwrap();
         if inner.fingerprint != fingerprint {
             inner.fingerprint = fingerprint;
@@ -384,15 +443,19 @@ impl SingerGateway {
                     inner.entries[index].receipt.error = Some("state_changed".into());
                 } else {
                     let song_key = match &command.operation {
-                        Operation::Select { song_id } | Operation::Next { song_id } => inner
+                        Operation::Select { song_id } | Operation::Next { song_id } | Operation::TemporarySelect { song_id } | Operation::PlaylistSelect { song_id, .. } => inner
                             .catalog
                             .iter()
                             .find(|s| s.id() == *song_id)
                             .map(|s| s.key.clone()),
                         _ => None,
                     };
+                    let playlist_key = match &command.operation {
+                        Operation::PlaylistSelect { playlist_id, .. } => inner.playlists.iter().find(|p| p.id()==*playlist_id).map(|p|p.key.clone()),
+                        _=>None,
+                    };
                     inner.entries[index].receipt.status = "executing".into();
-                    work = json!({"command": command, "deck": deck, "songKey": song_key, "audioPolicy": inner.config.audio_policy});
+                    work = json!({"command": command, "deck": deck, "songKey": song_key, "playlistKey":playlist_key, "audioPolicy": inner.config.audio_policy});
                 }
             }
         }
@@ -417,7 +480,7 @@ impl SingerGateway {
         entry.receipt.error = error.map(|message| {
             let code = message.strip_prefix("Error: ").unwrap_or(&message);
             if [
-                "invalid_audio_value", "audio_unbound", "mixer_unavailable", "audio_readback_pending",
+                "invalid_pitch", "pitch_readback_failed", "playlist_not_found", "song_not_in_playlist", "return_song_unavailable", "invalid_audio_value", "audio_unbound", "mixer_unavailable", "audio_readback_pending",
                 "audio_unavailable", "audio_readback_failed", "acappella_active",
                 "player_unavailable",
                 "cue_active",
@@ -476,6 +539,18 @@ impl SingerGateway {
         {
             return Err(ApiError(StatusCode::CONFLICT, "controller_busy"));
         }
+        match &command.operation {
+            Operation::FrontLight { .. } if inner.snapshot.front_light["available"] != true => return Err(ApiError(StatusCode::CONFLICT,"front_light_unavailable")),
+            Operation::Atmosphere { effect, volume } if !["applause","cheer","scream","stop"].contains(&effect.as_str()) || *volume>60 => return Err(ApiError(StatusCode::BAD_REQUEST,"invalid_effect")),
+            Operation::Pitch { semitones } if !(-6..=6).contains(semitones) => return Err(ApiError(StatusCode::BAD_REQUEST,"invalid_pitch")),
+            Operation::PlaylistSelect { song_id, playlist_id } => {
+                let playlist=inner.playlists.iter().find(|p|p.id()==*playlist_id).ok_or(ApiError(StatusCode::NOT_FOUND,"playlist_not_found"))?;
+                if !playlist.song_keys.iter().any(|key|blake3::hash(key.as_bytes()).to_hex().to_string()==*song_id) {
+                    return Err(ApiError(StatusCode::CONFLICT,"song_not_in_playlist"));
+                }
+            }
+            _=>{}
+        }
         let policy = &inner.config.audio_policy;
         let audio = &inner.snapshot.audio;
         match &command.operation {
@@ -483,6 +558,7 @@ impl SingerGateway {
                 let (level, max, bound) = match control.as_str() {
                     "music" => (&audio.music, policy.music_max, true),
                     "microphone" => (&audio.microphone, policy.microphone_max, !policy.microphone.is_empty()),
+                    "microphone2" => (&audio.microphone2, policy.microphone2_max, !policy.microphone2.is_empty()),
                     "reverb" => (&audio.reverb, policy.reverb_max, !policy.microphone.is_empty() && !policy.reverb_bus.is_empty()),
                     _ => return Err(ApiError(StatusCode::BAD_REQUEST, "invalid_audio_value")),
                 };
@@ -497,7 +573,7 @@ impl SingerGateway {
             _ => {}
         }
         match &command.operation {
-            Operation::Select { song_id } | Operation::Next { song_id }
+            Operation::Select { song_id } | Operation::Next { song_id } | Operation::TemporarySelect { song_id } | Operation::PlaylistSelect { song_id, .. }
                 if !inner.catalog.iter().any(|s| s.id() == *song_id) =>
             {
                 return Err(ApiError(StatusCode::NOT_FOUND, "song_not_found"))
@@ -562,7 +638,8 @@ async fn guard(State(gateway): State<SingerGateway>, request: Request, next: Nex
                 .fold(0u8, |diff, (a, b)| diff | (a ^ b))
                 == 0
     };
-    if !authorized {
+    let pairing_request = (request.method() == axum::http::Method::POST && request.uri().path() == "/api/singer/v1/pair") || (request.method() == axum::http::Method::GET && request.uri().path() == "/api/singer/v1/info");
+    if !authorized && !pairing_request {
         return ApiError(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     let result = tokio::time::timeout(Duration::from_secs(3), next.run(request)).await;
@@ -576,8 +653,11 @@ async fn guard(State(gateway): State<SingerGateway>, request: Request, next: Nex
 }
 pub fn router(gateway: SingerGateway) -> Router {
     Router::new()
+        .route("/api/singer/v1/pair", post(pairing::pair))
+        .route("/api/singer/v1/info", get(pairing::info))
         .route("/api/singer/v1/state", get(state))
         .route("/api/singer/v1/songs", get(songs))
+        .route("/api/singer/v1/playlists", get(playlists))
         .route("/api/singer/v1/songs/{id}/lyrics", get(lyrics))
         .route("/api/singer/v1/commands", post(command))
         .route("/api/singer/v1/commands/{id}", get(receipt))
@@ -598,11 +678,17 @@ async fn state(State(gateway): State<SingerGateway>) -> Json<Value> {
         .and_then(|key| inner.catalog.iter().find(|s| s.key == *key));
     Json(
         json!({"apiVersion": 1, "sessionId": inner.session_id, "revision": inner.revision,
+        "controllerId": inner.config.controller_id,
         "serverTimeUnixMs": now_ms(), "controllerOnline": inner.fresh(), "deck": inner.config.deck,
         "song": song.map(Song::summary), "playback": deck.map(|d| json!({"loaded": d.loaded, "paused": d.paused,
             "positionSeconds": d.position_seconds, "sampledAtUnixMs": d.sampled_at_unix_ms, "vocalMode": d.vocal_mode,
-            "playbackMode": d.playback_mode, "volume": d.volume,
+            "playbackMode": d.playback_mode, "volume": d.volume, "pitchSemitones": d.pitch_semitones,
             "clockFresh": inner.fresh() && now_ms().abs_diff(d.sampled_at_unix_ms) < 2000})),
+        "frontLight":inner.snapshot.front_light,
+        "features":{"frontLight":true,"pitch":true,"playlists":true,"temporarySelect":true,"autoReturnNext":true,"atmosphere":true},
+        "autoReturnNext":inner.snapshot.auto_return_next,
+        "playlist":deck.and_then(|d|d.playlist_key.as_ref()).and_then(|key|inner.playlists.iter().find(|p|p.key==*key)).map(Playlist::summary),
+        "interlude":deck.map(|d|json!({"active":d.return_song_key.is_some(),"returnSong":d.return_song_key.as_ref().and_then(|key|inner.catalog.iter().find(|s|s.key==*key)).map(Song::summary),"returnPositionSeconds":d.return_position_seconds,"returnRevision":d.return_revision})),
         "audio": inner.snapshot.audio, "audioPolicy": inner.config.audio_policy,
         "cueActive": inner.snapshot.cue_active, "transitionBusy": inner.snapshot.transition_busy,
         "busy": inner.entries.iter().any(|e| matches!(e.receipt.status.as_str(), "queued" | "executing"))}),
@@ -611,8 +697,13 @@ async fn state(State(gateway): State<SingerGateway>) -> Json<Value> {
 #[derive(Deserialize)]
 struct Search {
     q: Option<String>,
+    #[serde(rename="playlistId")] playlist_id: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
+}
+async fn playlists(State(gateway): State<SingerGateway>) -> Json<Value> {
+    let inner=gateway.0.inner.lock().unwrap();
+    Json(json!({"items":inner.playlists.iter().map(Playlist::summary).collect::<Vec<_>>()}))
 }
 async fn songs(State(gateway): State<SingerGateway>, Query(search): Query<Search>) -> Json<Value> {
     let inner = gateway.0.inner.lock().unwrap();
@@ -623,9 +714,11 @@ async fn songs(State(gateway): State<SingerGateway>, Query(search): Query<Search
         .take(200)
         .collect::<String>()
         .to_lowercase();
-    let matches: Vec<_> = inner
-        .catalog
-        .iter()
+    let selected=search.playlist_id.as_ref().and_then(|id|inner.playlists.iter().find(|p|p.id()==*id));
+    let ordered:Vec<_>=if let Some(playlist)=selected {
+        playlist.song_keys.iter().filter_map(|key|inner.catalog.iter().find(|s|s.key==*key)).collect()
+    } else if search.playlist_id.is_some() { vec![] } else { inner.catalog.iter().collect() };
+    let matches: Vec<_> = ordered.into_iter()
         .filter(|s| {
             format!("{} {}", s.title, s.artist)
                 .to_lowercase()
@@ -677,6 +770,11 @@ async fn receipt(
 }
 
 #[tauri::command]
+pub fn singer_gateway_pairing(state: tauri::State<'_, SingerGateway>, enabled: bool) -> Result<Value, String> {
+    pairing::set_window(&state, enabled)?;
+    Ok(state.status())
+}
+#[tauri::command]
 pub fn singer_gateway_status(state: tauri::State<'_, SingerGateway>) -> Value {
     state.status()
 }
@@ -703,8 +801,10 @@ pub async fn singer_gateway_configure(
 pub fn singer_gateway_catalog(
     state: tauri::State<'_, SingerGateway>,
     songs: Vec<Song>,
+    playlists: Option<Vec<Playlist>>,
 ) -> Result<(), String> {
-    state.set_catalog(songs)
+    state.set_catalog(songs)?;
+    state.set_playlists(playlists.unwrap_or_default())
 }
 #[tauri::command]
 pub fn singer_gateway_exchange(
@@ -778,6 +878,7 @@ mod tests {
                 vocal_mode: "original".into(),
                 playback_mode: "single".into(),
                 volume: 66.0,
+                ..DeckSnapshot::default()
             }],
             ..Default::default()
         }
@@ -1064,6 +1165,32 @@ mod tests {
         policy.microphone = "ch-11".into(); assert!(!policy.valid());
         policy.microphone = "ch-6".into(); policy.reverb_bus = "LR".into(); assert!(!policy.valid());
         policy.reverb_bus = "FX 1".into(); policy.microphone_max = 78; assert!(!policy.valid());
+    }
+
+    #[tokio::test]
+    async fn playlists_preserve_order_hide_paths_and_validate_selection() {
+        let gateway=fixture();
+        let first=gateway.0.inner.lock().unwrap().catalog[0].clone();
+        let second=Song{key:"D:/private/second.flac".into(),title:"Second".into(),..first.clone()};
+        gateway.set_catalog(vec![first.clone(),second.clone()]).unwrap();
+        let playlist=Playlist{key:"2:private-playlist-key".into(),name:"Singer".into(),kind:"custom".into(),library:2,song_keys:vec![second.key.clone(),first.key.clone()]};
+        let id=playlist.id();gateway.set_playlists(vec![playlist]).unwrap();gateway.exchange(snapshot());
+        let response=body(router(gateway.clone()).oneshot(request(&gateway,"GET","/api/singer/v1/playlists",json!(null))).await.unwrap()).await;
+        assert_eq!(response["items"][0]["count"],2);assert!(!response.to_string().contains("private"));
+        let path=format!("/api/singer/v1/songs?playlistId={id}");
+        let response=body(router(gateway.clone()).oneshot(request(&gateway,"GET",&path,json!(null))).await.unwrap()).await;
+        assert_eq!(response["items"][0]["id"],second.id());assert_eq!(response["items"][1]["id"],first.id());
+        let mut command=make_command(&gateway);command.operation=Operation::PlaylistSelect{song_id:first.id(),playlist_id:"bad".into()};
+        assert!(gateway.submit(command).is_err());
+        let mut command=make_command(&gateway);command.operation=Operation::PlaylistSelect{song_id:first.id(),playlist_id:id};
+        gateway.submit(command).unwrap();let work=gateway.exchange(snapshot());assert_eq!(work["work"]["songKey"],first.key);
+        assert_eq!(work["work"]["playlistKey"],"2:private-playlist-key");
+    }
+    #[test]
+    fn pitch_range_is_checked_at_admission() {
+        let gateway=fixture();
+        for semitones in [-7,7] {let mut command=make_command(&gateway);command.operation=Operation::Pitch{semitones};assert!(gateway.submit(command).is_err());}
+        let mut command=make_command(&gateway);command.operation=Operation::Pitch{semitones:-2};assert!(gateway.submit(command).is_ok());
     }
 
 }

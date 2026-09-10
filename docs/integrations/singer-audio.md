@@ -35,3 +35,41 @@ API v1 增量增加 audio/audioPolicy 状态、audio_level 和 acappella 操作�
 
 APK：artifacts/KINGCLUB-Singer-0.1.0-debug.apk
 SHA256：5311ac7cb00b17efd7b5248e24b4ac8e89bd5318a9281ef0b1a1044b57c8765a
+
+## 双麦克风（Android 0.1.9）
+
+`audioPolicy.microphone` 与 `microphone2` 分别绑定两支麦克风，`microphoneMax`、`microphone2Max` 独立限制各自音量（0–77 控制刻度，不是 dB）。同一通道不能重复绑定。旧配置迁移时第二支默认为未绑定，第二支上限为 77；不会自动写入硬件。
+
+`audio.microphone2` 复用 `AudioLevel`，命令为 `{type:"audio_level",control:"microphone2",value:60}`。执行时重新核验绑定、上限、同步状态及该通道实际回读。平板显示绑定的通道名称，旧中控不显示不存在的第二支能力。混响仍控制第一支绑定麦克风到所选 FX 总线的发送；不联动两支麦克风。
+
+当前按用户最新确认绑定 CH1 专业麦克风和 CH6 GS 麦克风，两路独立调节。混响效果类型尚需查看实体调音台 FX 页面。Windows 在本轮检查中未枚举 Qu-16 USB 声卡，网络控制在线不等于 USB 音频在线。
+
+现场控制绑定补充：主唱混响复用桌面原有 CH1 → FX1 发送控制，已启用该绑定；这不是效果器算法类型的检测。CH6 目前仍只提供独立音量。USB 声卡未枚举以及 ST3 静音是音频输出链路的独立阻断，需要逐项现场验证。
+
+USB 后续检查：Windows 已重新枚举 Qu-16 ST1/ST2/ST3，设备名称变为 Qu-16 ST3 (2- Qu-16)。修复 mpv 原来只匹配旧实例名称的问题，ST3 自动选择同时接受 Windows 的数字实例前缀，并保持排除 ST1/ST2。名称匹配回归测试通过；现场声压/听音验收仍需操作员确认。
+
+2026-09-10 USB 断开恢复：mpv 每秒检查已有实例的输出端点；锁定端点消失时选择可用 Realtek 扬声器，保留音量、暂停状态和最近有效播放进度，必要时重新装载同一文件。前端对失败的备歌每两秒重试，防止播放器一直未就绪。自动恢复不改 Qu-16 的话筒、LR、Mute 或 Gain。Qu-16 ST3 重新被 Windows 枚举后优先恢复到该端点；ST1、ST2 和 HDMI 不会作为返回目标。
+
+本轮实际拔线验证：运行进程自动从 Qu-16 ST3 切到 Realtek WASAPI 端点；同一歌曲保持加载，进度保留约37秒。通过主唱播放命令回执 succeeded，并观察到37.12→38.50秒推进及 clockFresh=true。现场听音由操作员确认；不将设备回读/时钟推进当作听音验收。证据：ui-prototype/artifacts/singer-fallback-live.json。
+
+2026-09-10 网络控制离线待机：Qu-16 连续连接或同步失败后，重试等待依次为 2、4、8、15 秒，之后维持 15 秒；等待使用可被停止信号唤醒的阻塞接收，不忙循环。仅在连接持续至少 30 秒且收到真实表计后才重置退避，避免 TCP 接通但同步反复失败造成密集重连。等待时间不含连接及同步超时，不承诺插入网线后立即恢复。已知地址失败时网段发现最多每 5 分钟一次，正常连接时不扫描。前端每 5 秒核对后台缓存参数以补偿丢失的恢复事件，版本未变且状态一致时不更新 React 状态；实时参数仍走事件推送。USB 音频枚举与网络控制独立，USB 未插不作为禁用网络调音的依据。离线保留低频发现，不能宣称零资源消耗。
+
+主唱同步停顿排查：本机网关 80 次采样中 7 次 controllerOnline=false、clockFresh=false，HTTP 最大响应 32ms；这证明该样本中存在中控状态过期，不能据此归因于平板 Wi-Fi。后续 40 秒 IPC 时长采样没有捕获超过 200ms 的调用，尚不能锁定单一根因。针对源码发现的阻塞风险，将定时 AI 状态/任务查询移至 spawn_blocking、限制前端为单个在途查询，并关闭播控 WebView 的后台计时器节流。保留原有 2 秒状态新鲜度校验，不通过放宽阈值掩盖问题。
+
+进一步发现每 30 秒执行的 scan_media_library 原为同步 Tauri 命令，会在窗口线程执行目录遍历、素材导入准备及数据库查询。真实调用测得 2771ms，超过 2 秒心跳阈值；仅修复 AI 查询后仍有 1/80 次状态过期。现将歌库扫描整体移到 spawn_blocking，继续复用现有单在途扫描与元数据缓存。
+
+最终运行验证：新版 PID 12656，恢复用户原歌曲与播放状态后，主动执行三次真实歌库扫描，耗时 2830/4606/2831ms；并行约一分钟的 120 次网关采样全部 controllerOnline=true、clockFresh=true，HTTP 最大 32ms。证据 ui-prototype/artifacts/singer-sync-after-scan-fix.json。这是本机中控连续性验证，不等同于长时间平板 Wi-Fi 稳定性验收。平板已覆盖安装 0.1.12 Release（versionCode 13），实际截图确认已连接；滑块本地跟手、旧回读隔离、限频发送最终值和断线禁用通过浏览器交互回归。
+
+Android 0.1.13 连续调音：原生 range 同时接收 input/change，值去重后立即尝试发送，单在途时只保留最新值；待发值检查和调音回执轮询为 40ms。中控收到调音操作后短时以 40ms 交换，停止调音两秒后恢复 200ms，禁用网关仍为 1000ms。不去掉持久化回执、不自动重放失败写入。等待自身麦克风回读时保留滑块，断线仍禁用。
+
+实机验证使用 HA1FR1W4 的 3 秒触摸滑动，读取真实 mpv 音量：手指未松开期间 60→58→57→56→55→54→53→52→51，最后到 50；不是仅检查 UI 数字。证据在独立 Android 仓库 artifacts/slider-0.1.13-live.json。此次播放器处于暂停，证明音量参数实时生效，不冒充现场听音验收；Qu-16 未同步，未执行麦克风/混响硬件写入。
+
+Android 0.1.14 增加演唱页“唱完续播原歌单”开关，对应白名单命令 `{type:"auto_return_next",enabled:true}`、状态 `autoReturnNext` 和能力 `features.autoReturnNext`。设置保存在中控本机，默认为关闭，不因平板重连重置。临时点播完成时，关闭则恢复原曲/原进度并暂停；开启则按保存的原歌单顺序查找下一首可用歌曲，以原唱/原调从零开始播放，恢复歌单顺序播放模式。歌单末尾不跨歌单跳转；原歌单/原曲已删除时报错，不猜测返回目标。开关本身不启动播放。普通“选择歌单歌曲”不建立临时返回书签。
+
+## 主唱面光接口（2026-09-10，现场绑定待完成）
+
+平板演唱页“调音”左侧提供面光开关，Singer API operation 为 `{"type":"front_light","enabled":true}`（false 为关闭），走已有鉴权、时效、唯一命令及完成回执。`state.frontLight` 返回 available、enabled、reason；无回读时 enabled 为 null，不伪造关闭。
+
+用户照片指向下排 Macros & Executors 第5键，不是上排 StaticPlaybacks 第5路。灯控台目前未联网，未写入任何句柄映射。下一次联网须读取该按键实际 handle 类型和引用目标：只有确认它对应可单独 Fire/Release 的 cue/chase/cueList 且 Active 可回读时，才保存 `king.singer.frontLightBinding`（verified、titanId、showName、deviceName、group、index）。若实际为宏，先核验宏内容与开关语义，补充对应适配，不套用 Playback 接口。
+
+接口只修改已绑定面光句柄，不参与自动节拍场景的替换/释放队列，不调用全局 Release 或 SWOP。配置只绑定程序，不自动执行。断线后状态失效、禁止发送，重连不重放；程序变更、Show/设备不匹配、句柄位置变更均禁用。尚未完成真机面光开关和与常规律动叠加的视觉验收。

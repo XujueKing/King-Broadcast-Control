@@ -34,3 +34,13 @@ export function readProgramClockSnapshot(snapshot,playback,now=performance.now()
   if(age<0||age>1500||!Number.isFinite(snapshot.seconds)||snapshot.seconds<0)return null;
   return {seconds:snapshot.seconds+(snapshot.playing?age/1000:0),playing:snapshot.playing===true};
 }
+export function recordShowHistory(history,project){
+  return {past:[...history.past,project].slice(-100),future:[]};
+}
+export function stepShowHistory(history,project,direction){
+  const undo=direction==='undo',source=undo?history.past:history.future;
+  if(!source.length)return null;
+  return {project:source[source.length-1],history:undo
+    ?{past:history.past.slice(0,-1),future:[...history.future,project]}
+    :{past:[...history.past,project],future:history.future.slice(0,-1)}};
+}

@@ -25,7 +25,7 @@ const mixerConsoleSource=await readFile(new URL("../src/MixerConsole.jsx",import
 
 test("mixer workspace exposes a live readback CH1 FX1 reverb control",()=>{
   assert.match(mixerConsoleSource,/const reverbKey="send:ch-1:FX 1"/);
-  assert.match(mixerConsoleSource,/CH1\/CH2 话筒混响/);
+  assert.match(mixerConsoleSource,/CH1 话筒混响/);
   assert.match(mixerConsoleSource,/parameterSnapshot\?\.connected/);
   assert.match(mixerConsoleSource,/parameterSnapshot\?\.synced/);
   assert.match(mixerConsoleSource,/onWriteParameters\?\.\(\[\{key:reverbKey,value:uiToMidiValue\(next\)\}\]\)/);

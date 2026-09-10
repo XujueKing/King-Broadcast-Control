@@ -13,17 +13,23 @@ export function singerCatalog(tracks) {
 
 // This bridge stays mounted on every desktop page. Only this bridge can claim
 // LAN commands; the output WebView and tablet never create another player.
-export function useSingerGateway({desktopRuntime,tracks,getSnapshot,execute,onConfiguration}) {
+export function singerPlaylists(libraries,tracks) {
+  const available=new Set(tracks.filter(t=>t.path&&!t.demo).map(t=>t.path));
+  return Object.entries(libraries.libraries).flatMap(([library,management])=>management.playlists.map(p=>({
+    key:`${library}:${p.id}`,name:p.name,kind:p.kind,library:Number(library),songKeys:p.trackPaths.filter(path=>available.has(path)),
+  })));
+}
+export function useSingerGateway({desktopRuntime,tracks,playlistLibraries,getSnapshot,execute,onConfiguration}) {
   const current=useRef({getSnapshot,execute,onConfiguration});
   current.current={getSnapshot,execute,onConfiguration};
   useEffect(()=>{
     if(!desktopRuntime)return;
-    invoke("singer_gateway_catalog",{songs:singerCatalog(tracks)})
+    invoke("singer_gateway_catalog",{songs:singerCatalog(tracks),playlists:singerPlaylists(playlistLibraries,tracks)})
       .catch(error=>console.error("主唱曲库发布失败",error));
-  },[desktopRuntime,tracks]);
+  },[desktopRuntime,tracks,playlistLibraries]);
   useEffect(()=>{
     if(!desktopRuntime)return;
-    let disposed=false,timer;
+    let disposed=false,timer,audioActiveUntil=0;
     const poll=async()=>{
       let enabled=false;
       try {
@@ -32,6 +38,7 @@ export function useSingerGateway({desktopRuntime,tracks,getSnapshot,execute,onCo
         current.current.onConfiguration?.(response);
         if(response.work){
           const work=response.work;
+          if(work.command.operation.type==="audio_level")audioActiveUntil=Date.now()+2000;
           void (async()=>{
             let error=null;
             try {
@@ -42,7 +49,7 @@ export function useSingerGateway({desktopRuntime,tracks,getSnapshot,execute,onCo
           })().catch(error=>console.error("主唱操作回执未送达，请检查中控",error));
         }
       }catch(error){console.error("主唱局域网桥接失败",error)}
-      if(!disposed)timer=window.setTimeout(poll,enabled?200:1000);
+      if(!disposed)timer=window.setTimeout(poll,enabled?(Date.now()<audioActiveUntil?40:200):1000);
     };
     void poll();
     return()=>{disposed=true;window.clearTimeout(timer)};

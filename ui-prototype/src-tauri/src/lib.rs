@@ -674,13 +674,37 @@ async fn mpv_deck_seek(
 }
 
 #[tauri::command]
+async fn singer_atmosphere(app: tauri::AppHandle, state: tauri::State<'_, mpv_runtime::MpvManager>, effect: String, volume: u8) -> Result<(), String> {
+    let bytes: Option<&'static [u8]> = match effect.as_str() {
+        "applause"=>Some(include_bytes!("../assets/atmosphere/applause.mp3")),
+        "cheer"=>Some(include_bytes!("../assets/atmosphere/cheer.mp3")),
+        "scream"=>Some(include_bytes!("../assets/atmosphere/scream.mp3")),
+        "stop"=>None,
+        _=>return Err("invalid_effect".into()),
+    };
+    if volume>60 { return Err("invalid_effect_volume".into()); }
+    let directory=app.path().app_cache_dir().map_err(|e|e.to_string())?.join("atmosphere-v1");
+    let manager=state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path=if let Some(bytes)=bytes {
+            std::fs::create_dir_all(&directory).map_err(|e|e.to_string())?;
+            let path=directory.join(format!("{effect}.mp3"));
+            if std::fs::read(&path).ok().as_deref()!=Some(bytes) {std::fs::write(&path,bytes).map_err(|e|e.to_string())?;}
+            Some(path)
+        }else{None};
+        mpv_runtime::atmosphere(&manager,path.as_deref(),volume)
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
 async fn mpv_deck_set_volume(
     state: tauri::State<'_, mpv_runtime::MpvManager>,
     deck: u8,
     volume: f64,
+    fade_from_silence: Option<bool>,
 ) -> Result<(), String> {
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || mpv_runtime::set_volume(&manager, deck, volume))
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::set_volume_with_fade(&manager, deck, volume, fade_from_silence.unwrap_or(false)))
         .await
         .map_err(|error| error.to_string())?
 }
@@ -694,6 +718,13 @@ async fn mpv_deck_state(
     tauri::async_runtime::spawn_blocking(move || mpv_runtime::deck_state(&manager, deck))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn mpv_deck_set_pitch(state: tauri::State<'_, mpv_runtime::MpvManager>, deck: u8, semitones: i8) -> Result<mpv_runtime::MpvDeckState, String> {
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || mpv_runtime::set_pitch(&manager, deck, semitones))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -824,26 +855,29 @@ async fn prioritize_audio_ai_analysis(
 }
 
 #[tauri::command]
-fn list_audio_ai_jobs(app: tauri::AppHandle) -> Result<Vec<ai_analysis::AiAnalysisJob>, String> {
+async fn list_audio_ai_jobs(app: tauri::AppHandle) -> Result<Vec<ai_analysis::AiAnalysisJob>, String> {
     let database_path = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("king-club.sqlite3");
-    ai_analysis::list(&database_path)
+    tauri::async_runtime::spawn_blocking(move || ai_analysis::list(&database_path))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn audio_ai_worker_status(
+async fn audio_ai_worker_status(
     app: tauri::AppHandle,
-    capabilities: tauri::State<runtime_capability::RuntimeCapabilities>,
-    state: tauri::State<ai_worker::AiWorkerManager>,
 ) -> Result<ai_worker::AiWorkerStatus, String> {
-    if capabilities.ai_processing_available {
-        ai_worker::start(&app, &state)
-    } else {
-        ai_worker::status(&app, &state)
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let capabilities=app.state::<runtime_capability::RuntimeCapabilities>();
+        let state=app.state::<ai_worker::AiWorkerManager>();
+        if capabilities.ai_processing_available {
+            ai_worker::start(&app, &state)
+        } else {
+            ai_worker::status(&app, &state)
+        }
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2042,13 +2076,15 @@ fn scan_image_library(app: tauri::AppHandle) -> Result<ImageLibrary, String> {
 }
 
 #[tauri::command]
-fn scan_media_library(
+async fn scan_media_library(
     app: tauri::AppHandle,
-    cache: tauri::State<MediaMetadataCache>,
-    importer: tauri::State<audio_importer::AudioImporter>,
 ) -> Result<LocalMediaLibrary, String> {
     let root_directory = media_root_directory(&app)?;
-    scan_media_root(root_directory, &cache, Some(&importer))
+    tauri::async_runtime::spawn_blocking(move || {
+        let cache=app.state::<MediaMetadataCache>();
+        let importer=app.state::<audio_importer::AudioImporter>();
+        scan_media_root(root_directory, &cache, Some(&importer))
+    }).await.map_err(|error| error.to_string())?
 }
 
 fn scan_media_root(
@@ -2175,6 +2211,7 @@ pub fn run() {
         .manage(capability_state)
         .invoke_handler(tauri::generate_handler![
             singer_gateway::singer_gateway_status,
+            singer_gateway::singer_gateway_pairing,
             singer_gateway::singer_gateway_configure,
             singer_gateway::singer_gateway_catalog,
             singer_gateway::singer_gateway_exchange,
@@ -2199,6 +2236,8 @@ pub fn run() {
             mpv_deck_set_paused,
             mpv_deck_seek,
             mpv_deck_set_volume,
+            singer_atmosphere,
+            mpv_deck_set_pitch,
             mpv_deck_state,
             mpv_deck_shutdown,
             mpv_rescue_preview_sync,

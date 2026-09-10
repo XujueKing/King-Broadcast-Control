@@ -1,8 +1,20 @@
 # 主唱平板局域网接口 v1
 
+2026-09-10 实机验收：中控已重新构建并启动，Android 0.1.5 Release（versionCode 6）已覆盖安装到 Lenovo TB-X616M。系统设置横屏时应用仍为竖屏；平板真实 HTTP 读取阿俊歌单 21 首，点击升调后中控确认 +1 半音，再点击原调确认 0。暂停状态下将临时点播《茶花开了》定位至曲终，中控自动恢复阿俊歌单《后来的我们》61.52 秒、原升降调设置并保持暂停。验证未发送播放命令。证据位于 `ui-prototype/artifacts/singer-interlude-live-verification.json`；Android 实机截图位于独立安卓项目 `artifacts/*0.1.5.png` 和 `artifacts/pitch-confirmation.png`。
+
 范围：主唱从中控本地曲库选歌、看同步歌词、原唱/伴唱、重唱、切歌，以及必要的播放/暂停。平板程序在后续独立项目开发。本项目提供中控 API、设置入口和可复用客户端。
 
 ## 连接
+
+### 自动发现与 4 位配对（Android 0.1.2）
+
+平板与中控接入同一员工局域网。安卓端通过 UDP 4866 自动发现中控；仅一台时自动选中，多台时由歌手选择。在中控生成 4 位配对码，平板输入一次即可保存长期密钥。短码有效期 5 分钟、成功一次即关闭，累计输错 5 次锁定该窗口，需中控重新生成。窗口不会跨重启保留。
+
+后续启动自动重连；已连接时遇到网络错误，最多每 10 秒尝试重新发现。改用新地址前，必须验证 HMAC-SHA256：密钥为原 64 字符 token 的 UTF-8 字节，消息为 `kingclub-singer-v1|<nonce>|<controllerId>|<port>`，结果为 64 位 hex。nonce 为每次新生成的 32 位随机 hex，controllerId 持久保存。发现消息不会发送密钥，返回包没有配对码。自动重连只读取状态，不播放、切歌或调音。
+
+新增无 Bearer 路由 `GET /info?nonce=<32位hex>` 返回公开身份和证明；`POST /pair` 接收 `{controllerId,code}`，成功返回 `{apiVersion:1,controllerId,token}`。两条路由仍限制私有 IPv4/回环并拒绝 Origin。其余路由继续要求长期 Bearer。短码关闭、过期、锁定分别返回 `pairing_closed`、`pairing_expired`、`pairing_locked`。
+
+防火墙除现有 TCP 接口外，还需允许应用 UDP 4866 入站。广播过滤、跨网段或访客隔离会阻止自动发现；可在折叠入口手动填写可达地址并使用相同 4 位配对。长密钥仅保留兼容旧中控。下面原 v1 的“所有路由需密钥”规则不包括以上两个新增路由。
 
 在 Windows 中控「设置 → 主唱平板连接」选择演唱 Deck，保存并开启接口。默认端口 `4865`，默认关闭；启用状态与连接密钥保存在应用数据目录 `singer-gateway.json`，重启后恢复服务但不自动开始播放。首次选歌/播放将该 Deck 设为单曲播放，曲终暂停。
 
@@ -108,3 +120,24 @@ await client.play();
 后续平板只需连接页、曲库选歌页、横屏演唱页。演唱页保留大字当前歌词、下一句、原唱/伴唱、重唱、切歌、播放/暂停和明确的连接状态；不需要吧台管理、顾客点歌或云端队列。
 
 服务采用 [Axum 官方 HTTP 路由与共享状态机制](https://docs.rs/axum/0.8.9/axum/)，播放由已有桌面控制函数执行并确认。
+
+
+## Android 0.1.5：歌单、临时点播、升降调
+
+客户端固定竖屏。`state.features` 声明 `pitch`、`playlists`、`temporarySelect`；老中控缺少能力时不显示歌单操作，升降调禁用。
+
+- `GET /playlists` 返回 `items:[{id,name,kind,library,count}]`。类别为 weekday/event/custom，库号为 1/2；ID 不包含本地路径。
+- `GET /songs?playlistId=<id>` 按该歌单的原顺序分页，可结合 q 搜索。省略 playlistId 则搜索全部曲库。未知歌单返回空结果，绝不退回全库误播。
+- `playlist_select` 携带 songId、playlistId，服务端检查归属并在执行时再次检查；装载暂停，将 Deck 绑定到该歌单。
+- `temporary_select` 携带 songId：保存原曲稳定路径、真实 mpv 位置、原歌单来源、原唱/伴唱与音高；再装载临时歌曲并暂停。连续临时选歌保留第一份原位置。匹配临时歌曲的真实 EOF 在中控恢复原曲并定位，保持暂停。重复/过期 EOF 不重复恢复；本机明确重新选歌取消旧书签；遇到其他 Deck 播放、CUE 或混音则不强行恢复。书签存在中控本次运行内，平板后台或断网不影响；中控重启不自动恢复此书签。
+- `state.playlist` 是当前来源摘要；`state.interlude` 有 active、returnSong、returnPositionSeconds、returnRevision。成功恢复才增加 returnRevision，平板据此恢复列表分类、分页、搜索与滚动位置，不发送播放命令。
+- `pitch` 携带整数 semitones，范围 −6..+6，0 是原调。真实 mpv rubberband 标签滤镜调整音高；保留输出校准滤镜、速度、位置、暂停状态；换歌回到原调，同曲原伴唱切换保留音高。命令等滤镜参数回读后才成功，`playback.pitchSemitones` 是已确认值。
+
+算法参照 [mpv 官方 rubberband 文档](https://mpv.io/manual/stable/#audio-filters-rubberband)。本机隔离测试使用 `ao=null` 和 PCM 文件输出，±2 半音的 440Hz 测试音测得 392.00Hz / 493.88Hz，时长均 3.0 秒，没有连接真实音响。现场音质仍由歌手听感确认。
+
+
+## Android 0.1.15: atmosphere sound pad
+
+`state.features.atmosphere=true` enables the right-side pad. Submit the usual authenticated, revision-checked command with `operation: {type:"atmosphere", effect:"applause"|"cheer"|"scream"|"stop", volume:0..60}`. Volume is an integer, default client value 30, applied to the next triggered effect. Succeeded confirms mpv acknowledged playback/stop, not operator hearing. No path or URL is accepted. Commands keep the existing receipt journal and never replay after reconnect.
+
+The desktop bundles three CC0 recordings (see src-tauri/assets/atmosphere/LICENSE.md), plays at most one effect on private mpv lane 21 using the preferred audio output, leaves both songs and CUE lanes untouched, and exits the effect process at EOF. Stop does not create a player. The APK contains controls only; audio plays on the desktop.

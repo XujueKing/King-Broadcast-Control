@@ -1,0 +1,298 @@
+{
+  "format": "club.king.audio-layout",
+  "version": 1,
+  "room": {
+    "widthM": null,
+    "lengthM": null
+  },
+  "outputs": [
+    {
+      "id": 1,
+      "label": "M-F15+L",
+      "note": "2026-08-26：舞台上方两只15寸全频箱，成对静音核对。左右单只归属待定位。",
+      "amp": "",
+      "draft": {
+        "gainDb": null,
+        "delayMs": null,
+        "hpfHz": null,
+        "lpfHz": null,
+        "polarity": null,
+        "eq": []
+      }
+    },
+    {
+      "id": 2,
+      "label": "M-F15+R",
+      "note": "2026-08-26：舞台上方两只15寸全频箱，成对静音核对。左右单只归属待定位。",
+      "amp": "",
+      "draft": {
+        "gainDb": null,
+        "delayMs": null,
+        "hpfHz": null,
+        "lpfHz": null,
+        "polarity": null,
+        "eq": []
+      }
+    },
+    {
+      "id": 3,
+      "label": "待确认线路",
+      "note": "历史记录未完成定位。",
+      "amp": "",
+      "draft": {
+        "gainDb": null,
+        "delayMs": null,
+        "hpfHz": null,
+        "lpfHz": null,
+        "polarity": null,
+        "eq": []
+      }
+    },
+    {
+      "id": 4,
+      "label": "待确认线路",
+      "note": "历史记录未完成定位。",
+      "amp": "",
+      "draft": {
+        "gainDb": null,
+        "delayMs": null,
+        "hpfHz": null,
+        "lpfHz": null,
+        "polarity": null,
+        "eq": []
+      }
+    },
+    {
+      "id": 5,
+      "label": "待确认线路",
+      "note": "历史记录未完成定位。",
+      "amp": "",
+      "draft": {
+        "gainDb": null,
+        "delayMs": null,
+        "hpfHz": null,
+        "lpfHz": null,
+        "polarity": null,
+        "eq": []
+      }
+    },
+    {
+      "id": 6,
+      "label": "待确认线路",
+      "note": "历史记录未完成定位。",
+      "amp": "",
+      "draft": {
+        "gainDb": null,
+        "delayMs": null,
+        "hpfHz": null,
+        "lpfHz": null,
+        "polarity": null,
+        "eq": []
+      }
+    },
+    {
+      "id": 7,
+      "label": "低音输出",
+      "note": "2026-08-26：OUT7–8接四只低音箱，逐只分配待确认。",
+      "amp": "",
+      "draft": {
+        "gainDb": null,
+        "delayMs": null,
+        "hpfHz": null,
+        "lpfHz": null,
+        "polarity": null,
+        "eq": []
+      }
+    },
+    {
+      "id": 8,
+      "label": "低音输出",
+      "note": "2026-08-26：OUT7–8接四只低音箱，逐只分配待确认。",
+      "amp": "",
+      "draft": {
+        "gainDb": null,
+        "delayMs": null,
+        "hpfHz": null,
+        "lpfHz": null,
+        "polarity": null,
+        "eq": []
+      }
+    }
+  ],
+  "speakers": [
+    {
+      "id": "A1",
+      "name": "全频音响 1",
+      "kind": "full",
+      "output": null,
+      "candidates": [
+        1,
+        2
+      ],
+      "x": 33.3,
+      "y": 18.3,
+      "angle": 175,
+      "distanceM": null,
+      "heightM": 4.3,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "A2",
+      "name": "全频音响 2",
+      "kind": "full",
+      "output": null,
+      "candidates": [
+        1,
+        2
+      ],
+      "x": 63.2,
+      "y": 18.3,
+      "angle": 195,
+      "distanceM": null,
+      "heightM": 4.3,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "A3",
+      "name": "全频音响 3",
+      "kind": "full",
+      "output": null,
+      "candidates": [],
+      "x": 78,
+      "y": 38.5,
+      "angle": 0,
+      "distanceM": null,
+      "heightM": 4.3,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "A4",
+      "name": "全频音响 4",
+      "kind": "full",
+      "output": null,
+      "candidates": [],
+      "x": 62.4,
+      "y": 59.3,
+      "angle": 290,
+      "distanceM": null,
+      "heightM": 4.3,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "A5",
+      "name": "全频音响 5",
+      "kind": "full",
+      "output": null,
+      "candidates": [],
+      "x": 70,
+      "y": 58.9,
+      "angle": 65,
+      "distanceM": null,
+      "heightM": 4.3,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "A6",
+      "name": "全频音响 6",
+      "kind": "full",
+      "output": null,
+      "candidates": [],
+      "x": 28.5,
+      "y": 69,
+      "angle": 165,
+      "distanceM": null,
+      "heightM": 4.3,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "B1",
+      "name": "低音箱 1",
+      "kind": "sub",
+      "output": null,
+      "candidates": [
+        7,
+        8
+      ],
+      "x": 42,
+      "y": 16,
+      "angle": 180,
+      "distanceM": null,
+      "heightM": null,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "B2",
+      "name": "低音箱 2",
+      "kind": "sub",
+      "output": null,
+      "candidates": [
+        7,
+        8
+      ],
+      "x": 55.1,
+      "y": 16,
+      "angle": 180,
+      "distanceM": null,
+      "heightM": null,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "B3",
+      "name": "低音箱 3",
+      "kind": "sub",
+      "output": null,
+      "candidates": [
+        7,
+        8
+      ],
+      "x": 73.5,
+      "y": 42.8,
+      "angle": 180,
+      "distanceM": null,
+      "heightM": null,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "B4",
+      "name": "低音箱 4",
+      "kind": "sub",
+      "output": null,
+      "candidates": [
+        7,
+        8
+      ],
+      "x": 56.8,
+      "y": 65.1,
+      "angle": 270,
+      "distanceM": null,
+      "heightM": null,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "C1",
+      "name": "舞台返听 1",
+      "kind": "monitor",
+      "output": null,
+      "candidates": [],
+      "x": 34.3,
+      "y": 14.4,
+      "angle": 40,
+      "distanceM": null,
+      "heightM": null,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    },
+    {
+      "id": "C2",
+      "name": "舞台返听 2",
+      "kind": "monitor",
+      "output": null,
+      "candidates": [],
+      "x": 61.5,
+      "y": 14.4,
+      "angle": 325,
+      "distanceM": null,
+      "heightM": null,
+      "note": "2026-09-10 用户标注图：位置和朝向按图估计；A组悬挂高度约4.3米；单只输出线路待核实。"
+    }
+  ]
+}

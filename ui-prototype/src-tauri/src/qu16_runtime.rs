@@ -81,7 +81,12 @@ const SYSTEM_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const END_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_METER_TIMEOUT: Duration = Duration::from_secs(10);
 const METER_STALE_TIMEOUT: Duration = Duration::from_secs(3);
-const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(15);
+const STABLE_CONNECTION_TIME: Duration = Duration::from_secs(30);
+
+fn reconnect_delay(failures: u32) -> Duration {
+    Duration::from_secs(2_u64.saturating_pow(failures.min(4))).min(MAX_RECONNECT_DELAY)
+}
 const MAX_CONSECUTIVE_BAD_METER_FRAMES: usize = 3;
 const CONTROL_QUEUE_CAPACITY: usize = 64;
 const MAX_WRITES_PER_BATCH: usize = 64;
@@ -1145,6 +1150,7 @@ fn meter_worker(
 ) {
     let mut frame_sequence = 0_u64;
     let mut connection_epoch = 0_u64;
+    let mut consecutive_failures = 0_u32;
     loop {
         if stop_requested(&stop) {
             publish_snapshot(
@@ -1189,6 +1195,8 @@ fn meter_worker(
             None,
         );
 
+        let connected_at = Instant::now();
+        let previous_frame_sequence = frame_sequence;
         match run_connection(
             &host,
             &inner,
@@ -1246,6 +1254,14 @@ fn meter_worker(
                 return;
             }
             ConnectionOutcome::Retry(error) => {
+                // A TCP accept followed by another failed sync is not recovery.
+                // Reset backoff only after a sustained stream of real meter data.
+                if connected_at.elapsed() >= STABLE_CONNECTION_TIME
+                    && frame_sequence > previous_frame_sequence
+                {
+                    consecutive_failures = 0;
+                }
+                consecutive_failures = consecutive_failures.saturating_add(1);
                 publish_snapshot(
                     &inner,
                     &callback,
@@ -1269,7 +1285,8 @@ fn meter_worker(
                     connection_epoch,
                     Some(error),
                 );
-                match stop.recv_timeout(RECONNECT_DELAY) {
+                // Block without polling while absent; stop/shutdown wakes immediately.
+                match stop.recv_timeout(reconnect_delay(consecutive_failures)) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                         publish_snapshot(
                             &inner,
@@ -1909,6 +1926,21 @@ fn unix_time_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn absent_device_backoff_is_bounded_and_does_not_spin() {
+        let seconds: Vec<_> = (1..=8).map(|n| super::reconnect_delay(n).as_secs()).collect();
+        assert_eq!(seconds, vec![2, 4, 8, 15, 15, 15, 15, 15]);
+        assert_eq!(super::reconnect_delay(u32::MAX).as_secs(), 15);
+    }
+
+    #[test]
+    fn absent_device_wait_is_interruptible_on_shutdown() {
+        let (send, receive) = std::sync::mpsc::channel();
+        send.send(()).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(receive.recv_timeout(super::reconnect_delay(10)), Ok(()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
     use super::*;
     use std::sync::atomic::AtomicUsize;
 

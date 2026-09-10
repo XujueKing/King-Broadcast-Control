@@ -100,6 +100,11 @@ struct MpvInstance {
     child: Child,
     pipe_path: String,
     loaded_path: Option<PathBuf>,
+    pitch_semitones: i8,
+    active_audio_device: Option<MpvAudioDevice>,
+    last_device_check: Option<Instant>,
+    last_good_state: Option<MpvDeckState>,
+    last_requested_volume: Option<f64>,
 }
 
 #[cfg(windows)]
@@ -177,7 +182,7 @@ impl Default for MpvManager {
         let binary = discover_mpv_binary();
         let audio_device = binary.as_deref().and_then(discover_preferred_audio_device);
         let output_trim_db = preferred_output_trim_db(audio_device.as_ref());
-        let lanes = [1, 2, 11, 12]
+        let lanes = [1, 2, 11, 12, 21]
             .into_iter()
             .map(|id| {
                 (
@@ -234,6 +239,7 @@ pub struct MpvDeckState {
     pub duration: f64,
     pub volume: f64,
     pub eof_reached: bool,
+    pub pitch_semitones: i8,
 }
 
 #[derive(Clone, Serialize)]
@@ -362,7 +368,17 @@ fn discover_preferred_audio_device(binary: &Path) -> Option<MpvAudioDevice> {
     }
     devices
         .into_iter()
-        .find(|device| device.label.eq_ignore_ascii_case("Qu-16 ST3 (Qu-16)"))
+        .find(|device| is_qu16_st3_device(device))
+}
+
+fn is_qu16_st3_device(device: &MpvAudioDevice) -> bool {
+    if !device.id.starts_with("wasapi/") { return false; }
+    let label = device.label.to_ascii_lowercase();
+    let Some(instance) = label.strip_prefix("qu-16 st3 (").and_then(|v| v.strip_suffix(')')) else { return false; };
+    instance == "qu-16" || instance.strip_suffix("- qu-16").is_some_and(|prefix| {
+        let number = prefix.trim();
+        !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+    })
 }
 
 fn preferred_output_trim_db(_audio_device: Option<&MpvAudioDevice>) -> f64 {
@@ -393,7 +409,7 @@ fn rescue_preview_instance_id(deck: u8) -> Result<u8, String> {
 }
 
 fn validate_instance(instance: u8) -> Result<(), String> {
-    if matches!(instance, 1 | 2 | 11 | 12) {
+    if matches!(instance, 1 | 2 | 11 | 12 | 21) {
         Ok(())
     } else {
         Err(format!("无效 mpv 实例编号：{instance}"))
@@ -463,6 +479,7 @@ fn spawn_deck(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if deck == 21 { command.arg("--keep-open=no"); }
     if let Some(audio_device) = audio_device {
         command.arg(format!("--audio-device={}", audio_device.id));
     }
@@ -492,6 +509,11 @@ fn spawn_deck(
         child,
         pipe_path,
         loaded_path: None,
+        pitch_semitones: 0,
+        active_audio_device: audio_device.cloned(),
+        last_device_check: None,
+        last_good_state: None,
+        last_requested_volume: None,
     })
 }
 
@@ -642,10 +664,8 @@ fn ensure_instance(
             .or_else(discover_mpv_binary)
             .ok_or_else(|| "未找到 mpv。请运行 npm run setup:mpv。".to_string())?;
         manager.binary = Some(binary.clone());
-        if manager.audio_device.is_none() {
-            manager.audio_device = discover_preferred_audio_device(&binary);
-            manager.output_trim_db = preferred_output_trim_db(manager.audio_device.as_ref());
-        }
+        manager.audio_device = discover_preferred_audio_device(&binary);
+        manager.output_trim_db = preferred_output_trim_db(manager.audio_device.as_ref());
         let instance = spawn_deck(
             &binary,
             instance_id,
@@ -655,10 +675,57 @@ fn ensure_instance(
         )?;
         manager.instances.insert(instance_id, instance);
     }
-    manager
-        .instances
-        .get_mut(&instance_id)
-        .ok_or_else(|| format!("mpv 实例 {instance_id} 未就绪"))
+    let instance = manager.instances.get_mut(&instance_id)
+        .ok_or_else(|| format!("mpv 实例 {instance_id} 未就绪"))?;
+    refresh_audio_output(instance)?;
+    Ok(instance)
+}
+
+fn fallback_audio_device<'a>(current: &str, devices: &'a [MpvAudioDevice]) -> Option<&'a MpvAudioDevice> {
+    // The venue USB return takes priority again after reconnection.
+    if let Some(preferred) = devices.iter().find(|d| is_qu16_st3_device(d)) {
+        return if preferred.id == current { None } else { Some(preferred) };
+    }
+    if current == "auto" || devices.iter().any(|d| d.id == current) { return None; }
+    devices.iter().find(|d| d.id.starts_with("wasapi/") && d.label.to_ascii_lowercase().contains("realtek"))
+        .or_else(|| devices.iter().find(|d| is_qu16_st3_device(d)))
+}
+
+fn refresh_audio_output(instance: &mut MpvInstance) -> Result<(), String> {
+    // Tests remain on null output regardless of host audio devices.
+    if cfg!(test) { return Ok(()); }
+    if instance.last_device_check.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) { return Ok(()); }
+    instance.last_device_check = Some(Instant::now());
+    let current = property(&instance.pipe_path, "audio-device")?.as_str().unwrap_or("auto").to_owned();
+    let devices = property(&instance.pipe_path, "audio-device-list")?;
+    let devices: Vec<MpvAudioDevice> = devices.as_array().ok_or("invalid_audio_device_list")?.iter()
+        .filter_map(|d| Some(MpvAudioDevice {id:d["name"].as_str()?.into(),label:d["description"].as_str()?.into()})).collect();
+    let replacement = fallback_audio_device(&current, &devices);
+    let idle = property(&instance.pipe_path, "idle-active")?.as_bool().unwrap_or(false);
+    if replacement.is_none() && !(idle && instance.loaded_path.is_some()) { return Ok(()); }
+    if current != "auto" && !devices.iter().any(|d| d.id == current) && replacement.is_none() {
+        return Err("音频输出设备已断开，等待可用扬声器".into());
+    }
+    let saved = instance.last_good_state.clone();
+    let paused = if idle { saved.as_ref().map_or(true, |s| s.paused) } else { property(&instance.pipe_path,"pause")?.as_bool().unwrap_or(true) };
+    let volume = property(&instance.pipe_path,"volume")?.as_f64().unwrap_or(0.0);
+    send_command(&instance.pipe_path,json!(["set_property","volume",0]))?;
+    send_command(&instance.pipe_path,json!(["set_property","pause",true]))?;
+    if let Some(device) = replacement {
+        send_command(&instance.pipe_path,json!(["set_property","audio-device",device.id]))?;
+        instance.active_audio_device=Some(device.clone());
+    }
+    if property(&instance.pipe_path,"idle-active")?.as_bool().unwrap_or(false) {
+        if let Some(path) = instance.loaded_path.clone() {
+            send_command(&instance.pipe_path,json!(["loadfile",path.to_string_lossy(),"replace"]))?;
+            wait_for_loaded_path(instance,&path)?;
+            let seconds=saved.as_ref().map_or(0.0,|s|s.time_pos);
+            safe_seek_instance(instance,seconds,false,0.0)?;
+        }
+    }
+    send_command(&instance.pipe_path,json!(["set_property","volume",volume]))?;
+    send_command(&instance.pipe_path,json!(["set_property","pause",paused]))?;
+    Ok(())
 }
 
 pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> {
@@ -678,6 +745,9 @@ pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> 
             }
         })
         .collect();
+    let live_audio_device = [1,2].into_iter().find_map(|deck| {
+        config.lanes[&deck].try_lock().ok().and_then(|lane|lane.instances.get(&deck).and_then(|i|i.active_audio_device.clone()))
+    }).or_else(||config.audio_device.clone());
     let version = binary.as_deref().and_then(mpv_version);
     Ok(MpvRuntimeStatus {
         available: binary.is_some() && version.is_some(),
@@ -685,19 +755,18 @@ pub fn runtime_status(manager: &MpvManager) -> Result<MpvRuntimeStatus, String> 
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
         version,
-        audio_device: config.audio_device.as_ref().map(|device| device.id.clone()),
-        audio_device_label: config
-            .audio_device
+        audio_device: live_audio_device.as_ref().map(|device| device.id.clone()),
+        audio_device_label: live_audio_device
             .as_ref()
             .map(|device| device.label.clone()),
         output_trim_db: config.output_trim_db,
         active_decks,
         message: if binary.is_some() {
-            config.audio_device.as_ref().map_or_else(
+            live_audio_device.as_ref().map_or_else(
                 || "mpv 播放引擎可用 · 系统自动音频设备".to_string(),
                 |device| {
                     format!(
-                        "mpv 播放引擎可用 · USB-B → {} · 输出修整 {:.0} dB",
+                        "mpv 播放引擎可用 · 输出 → {} · 输出修整 {:.0} dB",
                         device.label, config.output_trim_db
                     )
                 },
@@ -719,6 +788,7 @@ pub fn load_deck(manager: &MpvManager, deck: u8, path: &Path) -> Result<MpvDeckS
     // then wait until mpv reports the requested local path as stable.
     send_command(&instance.pipe_path, json!(["set_property", "volume", 0.0]))?;
     send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+    if instance.pitch_semitones != 0 { set_instance_pitch(instance, 0)?; }
     send_command(
         &instance.pipe_path,
         json!(["loadfile", canonical_path.to_string_lossy(), "replace"]),
@@ -791,6 +861,23 @@ pub fn switch_source_preserving_state(
 pub fn set_paused(manager: &MpvManager, deck: u8, paused: bool) -> Result<MpvDeckState, String> {
     let mut manager = manager.lane(deck)?;
     let instance = ensure_instance(&mut manager, deck)?;
+    if !paused && [1,2].contains(&deck)
+        && property(&instance.pipe_path,"pause")?.as_bool()==Some(true) {
+        let target=property(&instance.pipe_path,"volume")?.as_f64().ok_or("invalid_volume")?.clamp(0.0,100.0);
+        if target>0.0 {
+            send_command(&instance.pipe_path,json!(["set_property","volume",0]))?;
+            let result=send_command(&instance.pipe_path,json!(["set_property","pause",false]))
+                .and_then(|_| fade_in_volume(&instance.pipe_path,target));
+            if let Err(error)=result {
+                // Restore the setting only after pause is acknowledged.
+                if send_command(&instance.pipe_path,json!(["set_property","pause",true])).is_ok() {
+                    let _=send_command(&instance.pipe_path,json!(["set_property","volume",target]));
+                }
+                return Err(error);
+            }
+            return deck_state_for_instance(deck,instance);
+        }
+    }
     send_command(
         &instance.pipe_path,
         json!(["set_property", "pause", paused]),
@@ -815,18 +902,82 @@ pub fn seek(manager: &MpvManager, deck: u8, seconds: f64) -> Result<MpvDeckState
 }
 
 pub fn set_volume(manager: &MpvManager, deck: u8, volume: f64) -> Result<(), String> {
+    set_volume_with_fade(manager,deck,volume,false)
+}
+
+// Only explicit silence-to-sound controls opt in. Auto-DJ already owns its
+// two-Deck envelope and continues to use the immediate writer.
+pub fn set_volume_with_fade(manager: &MpvManager, deck: u8, volume: f64, fade_from_silence: bool) -> Result<(), String> {
     if !volume.is_finite() {
         return Err("音量必须是有限数字".to_string());
     }
     let mut manager = manager.lane(deck)?;
     let instance = ensure_instance(&mut manager, deck)?;
+    let target=volume.clamp(0.0,100.0);
+    if fade_from_silence && [1,2].contains(&deck) && target>0.0 && instance.last_requested_volume==Some(0.0)
+        && property(&instance.pipe_path,"pause")?.as_bool()==Some(false)
+        && property(&instance.pipe_path,"volume")?.as_f64()==Some(0.0) {
+        if let Err(error)=fade_in_volume(&instance.pipe_path,target) {
+            let _=send_command(&instance.pipe_path,json!(["set_property","volume",0]));
+            return Err(error);
+        }
+        instance.last_requested_volume=Some(target);
+        return Ok(());
+    }
     send_command(
         &instance.pipe_path,
         json!(["set_property", "volume", volume.clamp(0.0, 100.0)]),
     )?;
+    instance.last_requested_volume=Some(target);
     // Fade writes only acknowledge the write. The existing state poll owns
     // snapshots; five extra IPC connections per fade step block both Decks.
     Ok(())
+}
+
+fn fade_in_volume(pipe: &str, target: f64) -> Result<(),String> {
+    // A short 400ms smoothstep ramp; the per-Deck worker holds ordering, while
+    // Tauri UI and the other Deck continue independently. No background poll.
+    for step in 1..=16 {
+        thread::sleep(Duration::from_millis(25));
+        let t=f64::from(step)/16.0;
+        send_command(pipe,json!(["set_property","volume",target*t*t*(3.0-2.0*t)]))?;
+    }
+    Ok(())
+}
+
+fn set_instance_pitch(instance: &mut MpvInstance, semitones: i8) -> Result<(), String> {
+    if !(-6..=6).contains(&semitones) { return Err("invalid_pitch".into()); }
+    let filters = property(&instance.pipe_path, "af")?;
+    let present = filters.as_array().ok_or("pitch_readback_failed")?.iter()
+        .any(|filter| filter["label"] == "king-singer-pitch");
+    if semitones == 0 {
+        if present { send_command(&instance.pipe_path, json!(["af", "remove", "@king-singer-pitch"]))?; }
+    } else {
+        let ratio = 2_f64.powf(f64::from(semitones) / 12.0);
+        // A labelled filter replaces only our transposer, preserving output trim.
+        send_command(&instance.pipe_path, json!(["af", "add",
+            format!("@king-singer-pitch:rubberband=pitch-scale={ratio:.10}:engine=faster")]))?;
+    }
+    let confirmed = property(&instance.pipe_path, "af")?;
+    let filter = confirmed.as_array().ok_or("pitch_readback_failed")?.iter()
+        .find(|filter| filter["label"] == "king-singer-pitch");
+    let valid = if semitones == 0 { filter.is_none() } else {
+        filter.and_then(|f| f["params"]["pitch-scale"].as_str()).and_then(|v| v.parse::<f64>().ok())
+            .map(|v| (v - 2_f64.powf(f64::from(semitones) / 12.0)).abs() < 0.00001).unwrap_or(false)
+    };
+    if !valid { return Err("pitch_readback_failed".into()); }
+    instance.pitch_semitones = semitones;
+    Ok(())
+}
+
+pub fn set_pitch(manager: &MpvManager, deck: u8, semitones: i8) -> Result<MpvDeckState, String> {
+    validate_deck(deck)?;
+    if !(-6..=6).contains(&semitones) { return Err("invalid_pitch".into()); }
+    let mut lane = manager.lane(deck)?;
+    let instance = ensure_instance(&mut lane, deck)?;
+    if instance.loaded_path.is_none() { return Err("no_song_selected".into()); }
+    set_instance_pitch(instance, semitones)?;
+    deck_state_for_instance(deck, instance)
 }
 
 pub fn deck_state(manager: &MpvManager, deck: u8) -> Result<MpvDeckState, String> {
@@ -957,7 +1108,7 @@ fn deck_state_for_instance(deck: u8, instance: &mut MpvInstance) -> Result<MpvDe
     } else {
         (0.0, 0.0, false)
     };
-    Ok(MpvDeckState {
+    let state = MpvDeckState {
         deck,
         running: true,
         path: instance
@@ -969,7 +1120,37 @@ fn deck_state_for_instance(deck: u8, instance: &mut MpvInstance) -> Result<MpvDe
         duration,
         volume,
         eof_reached,
-    })
+        pitch_semitones: instance.pitch_semitones,
+    };
+    instance.last_good_state = Some(state.clone());
+    Ok(state)
+}
+
+// Private, lazily-created sound-pad lane; never shares Deck or CUE instances.
+pub fn atmosphere(manager: &MpvManager, path: Option<&Path>, volume: u8) -> Result<(), String> {
+    if volume > 60 { return Err("invalid_effect_volume".into()); }
+    let mut lane = manager.lane(21)?;
+    if path.is_none() {
+        if let Some(mut instance) = lane.instances.remove(&21) {
+            let _ = instance.child.kill();
+            let _ = instance.child.wait();
+        }
+        return Ok(());
+    }
+    let path = path.unwrap().canonicalize().map_err(|e|e.to_string())?;
+    let instance = ensure_instance(&mut lane, 21)?;
+    // idle=yes keeps replacements safe; idle=no releases the process at EOF.
+    send_command(&instance.pipe_path, json!(["set_property", "idle", true]))?;
+    send_command(&instance.pipe_path, json!(["set_property", "pause", true]))?;
+    send_command(&instance.pipe_path, json!(["set_property", "volume", 0]))?;
+    send_command(&instance.pipe_path, json!(["loadfile", path.to_string_lossy(), "replace"]))?;
+    wait_for_loaded_path(instance, &path)?;
+    instance.loaded_path=Some(path);
+    send_command(&instance.pipe_path, json!(["set_property", "volume", volume]))?;
+    send_command(&instance.pipe_path, json!(["set_property", "idle", false]))?;
+    send_command(&instance.pipe_path, json!(["set_property", "pause", false]))?;
+    if property(&instance.pipe_path, "pause")?.as_bool()!=Some(false) {return Err("effect_readback_failed".into());}
+    Ok(())
 }
 
 pub fn shutdown_deck(manager: &MpvManager, deck: u8) -> Result<(), String> {
@@ -985,7 +1166,7 @@ pub fn shutdown_deck(manager: &MpvManager, deck: u8) -> Result<(), String> {
 }
 
 pub fn shutdown_all(manager: &MpvManager) -> Result<(), String> {
-    for id in [1, 2, 11, 12] {
+    for id in [1, 2, 11, 12, 21] {
         let mut lane = manager.lane(id)?;
         for (_, mut instance) in std::mem::take(&mut lane.instances) {
             let _ = instance.child.kill();
@@ -1081,6 +1262,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn real_mpv_resume_and_unmute_fade_without_changing_crossfade_writes() {
+        let manager=MpvManager::default();
+        let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/atmosphere/applause.mp3");
+        load_deck(&manager,1,&path).unwrap();
+        set_volume(&manager,1,66.0).unwrap();
+        let pipe=manager.lane(1).unwrap().instances[&1].pipe_path.clone();
+        let worker_manager=manager.clone();
+        let worker=thread::spawn(move||set_paused(&worker_manager,1,false).unwrap());
+        let mut samples=Vec::new();
+        while !worker.is_finished() {
+            thread::sleep(Duration::from_millis(35));
+            samples.push(property(&pipe,"volume").unwrap().as_f64().unwrap());
+        }
+        let resumed=worker.join().unwrap();
+        assert!(!resumed.paused);
+        assert!((resumed.volume-66.0).abs()<0.01);
+        assert!(samples.iter().filter(|&&v|v>0.0&&v<66.0).count()>=3,"must observe real intermediate gain values: {samples:?}");
+        assert!(samples.windows(2).all(|w|w[1]>=w[0]));
+        set_volume(&manager,1,0.0).unwrap();
+        let started=Instant::now();
+        set_volume_with_fade(&manager,1,66.0,true).unwrap();
+        assert!(started.elapsed()>=Duration::from_millis(400));
+        assert!((deck_state(&manager,1).unwrap().volume-66.0).abs()<0.01);
+        set_volume(&manager,1,0.0).unwrap();
+        let immediate=Instant::now();
+        set_volume_with_fade(&manager,1,10.0,false).unwrap();
+        assert!(immediate.elapsed()<Duration::from_millis(250),"Auto-DJ writes must not enter the startup fade");
+        set_paused(&manager,1,true).unwrap();
+        set_volume(&manager,1,0.0).unwrap();
+        assert_eq!(set_paused(&manager,1,false).unwrap().volume,0.0);
+        shutdown_deck(&manager,1).unwrap();
+    }
+
+    #[test]
+    fn atmosphere_uses_private_null_audio_lane_and_releases_at_eof() {
+        let manager=MpvManager::default();
+        assert!(manager.0.binary.is_some(),"mpv fixture runtime is required");
+        let path=Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/atmosphere/scream.mp3");
+        load_deck(&manager,1,&path).unwrap();
+        let before=deck_state(&manager,1).unwrap();
+        atmosphere(&manager,Some(&path),30).unwrap();
+        let after=deck_state(&manager,1).unwrap();
+        assert_eq!(before.path,after.path);
+        assert_eq!(before.paused,after.paused);
+        assert_eq!(before.volume,after.volume);
+        assert!((before.time_pos-after.time_pos).abs()<0.1);
+        let deadline=Instant::now()+Duration::from_secs(10);
+        loop {
+            if manager.lane(21).unwrap().instances.get_mut(&21).unwrap().child.try_wait().unwrap().is_some(){break;}
+            assert!(Instant::now()<deadline,"effect must release its process at EOF");
+            thread::sleep(Duration::from_millis(100));
+        }
+        atmosphere(&manager,Some(&path),20).unwrap();
+        atmosphere(&manager,None,20).unwrap();
+        assert!(manager.lane(21).unwrap().instances.is_empty());
+        assert!(atmosphere(&manager,Some(&path),61).is_err());
+        shutdown_all(&manager).unwrap();
+    }
+
+    #[test]
     fn busy_deck_does_not_lock_other_deck_or_rescue() {
         let manager = MpvManager::default();
         let _busy = manager.lane(1).unwrap();
@@ -1136,6 +1377,34 @@ mod tests {
             "wasapi/{f51955ae-1997-4ebd-bb2d-84ac01bed4e2}"
         );
         assert_eq!(devices[1].label, "Qu-16 ST3 (Qu-16)");
+    }
+
+    #[test]
+    fn qu16_st3_selection_accepts_windows_replug_names_only() {
+        for label in ["Qu-16 ST3 (Qu-16)", "Qu-16 ST3 (2- Qu-16)", "Qu-16 ST3 (12- Qu-16)"] {
+            assert!(is_qu16_st3_device(&MpvAudioDevice { id: "wasapi/test".into(), label: label.into() }));
+        }
+        for label in ["Qu-16 ST1 (2- Qu-16)", "Qu-16 ST2 (Qu-16)", "Qu-16 ST3 (Other)", "Speakers (Qu-16)"] {
+            assert!(!is_qu16_st3_device(&MpvAudioDevice { id: "wasapi/test".into(), label: label.into() }));
+        }
+    }
+
+    #[test]
+    fn disconnected_qu16_falls_back_to_realtek_but_keeps_connected_outputs() {
+        let devices=vec![MpvAudioDevice{id:"wasapi/hdmi".into(),label:"HDMI".into()},MpvAudioDevice{id:"wasapi/speakers".into(),label:"扬声器 (Realtek(R) Audio)".into()}];
+        assert_eq!(fallback_audio_device("wasapi/removed-qu16",&devices).unwrap().id,"wasapi/speakers");
+        assert!(fallback_audio_device("wasapi/speakers",&devices).is_none());
+        assert!(fallback_audio_device("auto",&devices).is_none());
+        assert!(fallback_audio_device("wasapi/removed-qu16",&devices[..1]).is_none());
+    }
+
+    #[test]
+    fn reconnected_qu16_st3_takes_priority_over_computer_speakers() {
+        let devices=vec![MpvAudioDevice{id:"wasapi/speakers".into(),label:"Realtek Audio".into()},MpvAudioDevice{id:"wasapi/st1".into(),label:"Qu-16 ST1 (2- Qu-16)".into()},MpvAudioDevice{id:"wasapi/st3".into(),label:"Qu-16 ST3 (2- Qu-16)".into()}];
+        assert_eq!(fallback_audio_device("wasapi/speakers",&devices).unwrap().id,"wasapi/st3");
+        assert_eq!(fallback_audio_device("auto",&devices).unwrap().id,"wasapi/st3");
+        assert!(fallback_audio_device("wasapi/st3",&devices).is_none());
+        assert!(fallback_audio_device("wasapi/speakers",&devices[..2]).is_none());
     }
 
     #[test]

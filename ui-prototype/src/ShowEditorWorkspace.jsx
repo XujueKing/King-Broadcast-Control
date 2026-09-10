@@ -1,4 +1,4 @@
-import { saveShowProject, clipAtTime, clipSourceTime, advancePreviewClock } from "./show-editor-runtime.js";
+import { saveShowProject, clipAtTime, clipSourceTime, advancePreviewClock, recordShowHistory, stepShowHistory } from "./show-editor-runtime.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowCounterClockwise,
@@ -111,6 +111,7 @@ export function ShowEditorWorkspace({ track, deck1, deck2, playingDecks, cueDeck
   const [assetType,setAssetType]=useState("全部");
   const [selectedAsset,setSelectedAsset]=useState("main");
   const [project,setProject]=useState(()=>createDefaultShowProject(songKey,duration));
+  const [history,setHistory]=useState({past:[],future:[]});
   const [selectedClip,setSelectedClip]=useState({trackId:"v1",clipId:"v1-clip-1"});
   const [timelinePlaying,setTimelinePlaying]=useState(false);
   const [saved,setSaved]=useState(true);
@@ -162,6 +163,7 @@ export function ShowEditorWorkspace({ track, deck1, deck2, playingDecks, cueDeck
     next=next||createDefaultShowProject(songKey,duration);
     activeSongRef.current=songKey;loadingProjectRef.current=next;
     setProject(next);setSaved(loaded);setDirty(draft?.dirty??false);setTimelinePlaying(false);setCurrentTime(0);setPreviewTimeline(false);
+    setHistory({past:[],future:[]});
     const lane=next.tracks.find(item=>!item.locked&&item.id==="v1"&&item.clips.length);
     setSelectedClip(lane?{trackId:lane.id,clipId:lane.clips[0].id}:{trackId:"",clipId:""});
   },[songKey,duration,storageKey]);
@@ -174,7 +176,11 @@ export function ShowEditorWorkspace({ track, deck1, deck2, playingDecks, cueDeck
     const warn=event=>{if(dirty){event.preventDefault();event.returnValue="";}};
     window.addEventListener("beforeunload",warn);return()=>window.removeEventListener("beforeunload",warn);
   },[dirty]);
-  const applyProject=(next)=>{if(next===project)return;setProject(next);setSaved(false);setDirty(true);setSaveError("")};
+  const applyProject=(next)=>{if(next===project)return;setHistory(current=>recordShowHistory(current,project));setProject(next);setSaved(false);setDirty(true);setSaveError("")};
+  const stepHistory=direction=>{
+    const result=stepShowHistory(history,project,direction);if(!result)return;
+    setProject(result.project);setHistory(result.history);setSaved(false);setDirty(true);setSaveError('');
+  };
   const selectClip=(trackId,clipId)=>setSelectedClip({trackId,clipId});
   const updateSelected=(patch)=>{
     if(!selectedProjectClip)return;
@@ -258,7 +264,7 @@ export function ShowEditorWorkspace({ track, deck1, deck2, playingDecks, cueDeck
       </aside>
     </div>
 
-    <div className="show-timeline-toolbar"><span><button type="button" disabled title="撤销尚未接入"><ArrowCounterClockwise/></button><button type="button" disabled title="重做尚未接入"><ArrowsClockwise/></button><button type="button" onClick={()=>seekPreview(0)} title="预览回到开头"><SkipBack/></button><button type="button" className="timeline-play" aria-label="播放或暂停编排预览" onClick={togglePreview}>{timelinePlaying?<Pause weight="fill"/>:<Play weight="fill"/>}</button><button type="button" onClick={()=>seekPreview(currentTime+5)} title="预览前进五秒"><SkipForward/></button><em>拖动片段排序；素材可直接拖入兼容轨道</em></span><strong>{fmt(currentTime)}<small> / {fmt(duration)}</small></strong><span><label>吸附<input type="checkbox" disabled title="吸附尚未接入"/></label><select defaultValue="1/4" disabled><option>1/4 拍</option><option>1/2 拍</option><option>1 拍</option></select><button type="button" onClick={()=>seekPreview(0)}>回到开头</button></span></div>
+    <div className="show-timeline-toolbar"><span><button type="button" disabled={!history.past.length} onClick={()=>stepHistory("undo")} title="撤销" aria-label="撤销编辑"><ArrowCounterClockwise/></button><button type="button" disabled={!history.future.length} onClick={()=>stepHistory("redo")} title="重做" aria-label="重做编辑"><ArrowsClockwise/></button><button type="button" onClick={()=>seekPreview(0)} title="预览回到开头"><SkipBack/></button><button type="button" className="timeline-play" aria-label="播放或暂停编排预览" onClick={togglePreview}>{timelinePlaying?<Pause weight="fill"/>:<Play weight="fill"/>}</button><button type="button" onClick={()=>seekPreview(currentTime+5)} title="预览前进五秒"><SkipForward/></button><em>拖动片段排序；素材可直接拖入兼容轨道</em></span><strong>{fmt(currentTime)}<small> / {fmt(duration)}</small></strong><span><label>吸附<input type="checkbox" disabled title="吸附尚未接入"/></label><select defaultValue="1/4" disabled><option>1/4 拍</option><option>1/2 拍</option><option>1 拍</option></select><button type="button" onClick={()=>seekPreview(0)}>回到开头</button></span></div>
     <section className="show-timeline" style={{"--playhead":`${currentTime/duration}`}}>
       <div className="show-time-ruler"><span/><div className="show-time-ticks">{timeTicks.map((value,index)=><i key={index}>{fmt(value)}</i>)}</div></div>
       <div className="show-playhead" aria-hidden="true"><i/></div>

@@ -1,3 +1,7 @@
+import AudioProcessorWorkspace from "./AudioProcessorWorkspace.jsx";
+import {frontLightState,setFrontLight} from "./singer-front-light.js";
+import {createWaveformClock} from "./waveform-clock.js";
+import {singerCompletionBookmark,SingerInterlude,singerPlaylistKey,singerPlaylistSource,singerReturnPlan} from './singer-library.js';
 import { createLightingSession, rhythmPulsePayload, createVideoColorTracker } from "./lighting-session.js";
 import {defaultSingerAudioPolicy,singerAudioSnapshot,executeSingerAudio,transitionSingerAcappella} from "./singer-audio.js";
 import SingerGatewaySettings from "./SingerGatewaySettings.jsx";
@@ -360,7 +364,7 @@ const defaultMonitorTargets = [
 ];
 const nav = [
   ["首页", House], ["音乐管理", MusicNotes], ["演出编排", FilmSlate],
-  ["调音台", SlidersHorizontal], ["Avolites Tiger Touch Pro", DiceFive], ["设置", GearSix],
+  ["调音台", SlidersHorizontal], ["Avolites Tiger Touch Pro", DiceFive], ["专业数字音频处理器", SpeakerHigh], ["设置", GearSix],
 ];
 const playbackModes = [
   ["single", "单曲播放", MusicNoteSimple],
@@ -458,11 +462,12 @@ const buildWaveformPeaks = (key, count = 120) => {
   });
 };
 
-function WaveformCanvas({ peaks, beats = [], downbeats = [], bars = [], bpm = 0, progress, durationSeconds, side, seeking }) {
+function WaveformCanvas({ peaks, beats = [], downbeats = [], bars = [], bpm = 0, progress, durationSeconds, side, seeking, playing }) {
   const canvasRef = useRef(null);
   const frameRef = useRef(0);
   const drawRef = useRef(() => {});
   const progressRef = useRef(progress);
+  const visualClockRef = useRef(createWaveformClock());
   const amplitudeRange = useMemo(() => {
     if (!peaks?.length) return { floor:0, ceiling:1 };
     // v4 cache already contains an RMS/transient envelope in linear display space.
@@ -634,32 +639,21 @@ function WaveformCanvas({ peaks, beats = [], downbeats = [], bars = [], bpm = 0,
   }, []);
 
   useEffect(() => {
-    window.cancelAnimationFrame(frameRef.current);
-    const nextProgress = Math.min(durationSeconds, Math.max(0, Number(progress) || 0));
-    const previousProgress = progressRef.current;
-    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    const shouldSnap = seeking || reducedMotion || Math.abs(nextProgress - previousProgress) > 1;
+    visualClockRef.current.update({seconds:progress,playing,duration:durationSeconds,seeking},performance.now());
+    progressRef.current=visualClockRef.current.read(performance.now());
+    drawRef.current(progressRef.current);
+  },[progress,playing,durationSeconds,seeking,peaks,beats,downbeats,bars]);
 
-    if (shouldSnap) {
-      progressRef.current = nextProgress;
-      drawRef.current(nextProgress);
-      return undefined;
-    }
-
-    const startedAt = performance.now();
-    const animate = (now) => {
-      const ratio = Math.min(1, (now - startedAt) / 240);
-      const interpolatedProgress = previousProgress + (nextProgress - previousProgress) * ratio;
-      progressRef.current = interpolatedProgress;
-      drawRef.current(interpolatedProgress);
-      if (ratio < 1) frameRef.current = window.requestAnimationFrame(animate);
+  useEffect(() => {
+    if(!playing||seeking||window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)return;
+    const animate=now=>{
+      progressRef.current=visualClockRef.current.read(now);
+      drawRef.current(progressRef.current);
+      frameRef.current=window.requestAnimationFrame(animate);
     };
-
-    frameRef.current = window.requestAnimationFrame(animate);
-    return () => window.cancelAnimationFrame(frameRef.current);
-  }, [progress, durationSeconds, peaks, beats, downbeats, bars, seeking]);
-
-  useEffect(() => () => window.cancelAnimationFrame(frameRef.current), []);
+    frameRef.current=window.requestAnimationFrame(animate);
+    return()=>window.cancelAnimationFrame(frameRef.current);
+  },[playing,seeking]);
 
   return <canvas ref={canvasRef} className={`track-waveform-canvas track-waveform-canvas-${side}`} aria-hidden="true" />;
 }
@@ -909,10 +903,10 @@ function Deck({ number, track, analysis, onRhythmCorrection, playing, onPlay, on
       onPointerCancel={handleSeekCancel}
       onLostPointerCapture={handleSeekCancel}
       onKeyDown={handleSeekKeyDown}
-    ><WaveformCanvas key={track.title} peaks={waveformPeaks} beats={analysis?.beats} downbeats={analysis?.downbeats} bars={analysis?.bars} bpm={analysis?.bpm} progress={displayedProgress} durationSeconds={durationSeconds} side={side} seeking={seekPreview!==null} />{track.path&&!analysis&&<span className="waveform-pending">波形与节拍分析中</span>}</div>
+    ><WaveformCanvas key={track.title} peaks={waveformPeaks} beats={analysis?.beats} downbeats={analysis?.downbeats} bars={analysis?.bars} bpm={analysis?.bpm} progress={displayedProgress} durationSeconds={durationSeconds} side={side} seeking={seekPreview!==null} playing={playing} />{track.path&&!analysis&&<span className="waveform-pending">波形与节拍分析中</span>}</div>
     <div className="time-row"><span>{formatDuration(displayedProgress)}</span><span>{track.duration}</span></div>
     <div className="deck-bottom-controls">
-      <div className="transport" role="group" aria-label={`Deck ${number} 曲目控制`}><button type="button" className="track-step previous" aria-label={`Deck ${number} 装载上一首并暂停`} title="装载上一首（暂停）" onClick={onPrevious}><SkipBack weight="fill" /></button><button type="button" className="track-step replay" aria-label={`Deck ${number} 从头重放当前歌曲`} title="从头重放" onClick={onReplay}><ArrowCounterClockwise weight="bold" /></button><button type="button" className={`vocal-rescue-toggle ${aiRescueActive?"active":""} ${aiReferenceReady?"ready":"missing"} ${aiReferenceBusy?"busy":""}`} aria-label={`Deck ${number} AI 补音暂时关闭`} aria-pressed={aiRescueActive} disabled={!AI_RESCUE_FEATURE_ENABLED||vocalMode!=="accompaniment"||!aiReferenceReady||aiReferenceBusy} onClick={onAiRescueToggle} title={aiRescueTitle}>{AI_RESCUE_FEATURE_ENABLED?(aiReferenceBusy?"准备":aiReferenceReady?"补音✓":"补音"):"补音停"}</button><button type="button" className="track-step next" aria-label={`Deck ${number} 装载下一首并暂停`} title="装载下一首（暂停）" onClick={onNext}><SkipForward weight="fill" /></button><button type="button" className={`deck-extra-toggle lyrics-toggle ${lyricsEnabled?"active":""} ${!lyricsAvailable?"missing":""}`} aria-label={`Deck ${number} ${lyricsAvailable?(lyricsEnabled?"关闭":"打开"):"未找到"}歌词`} aria-pressed={lyricsEnabled&&lyricsAvailable} onClick={onLyricsToggle} title={lyricsAvailable?(lyricsEnabled?"关闭歌词":"打开歌词"):"未找到同名 LRC 歌词文件"}>{lyricsAvailable?"词":"无词"}</button></div>
+      <div className="transport" role="group" aria-label={`Deck ${number} 曲目控制`}><button type="button" className="track-step previous" aria-label={`Deck ${number} 装载上一首并暂停`} title="装载上一首（暂停）" onClick={onPrevious}><SkipBack weight="fill" /></button><button type="button" className="track-step replay" aria-label={`Deck ${number} 从头重放当前歌曲`} title="从头重放" onClick={onReplay}><ArrowCounterClockwise weight="bold" /></button><button type="button" className={`vocal-rescue-toggle ${aiRescueActive?"active":""} ${aiReferenceReady?"ready":"missing"} ${aiReferenceBusy?"busy":""}`} aria-label={`Deck ${number} AI 补音暂时关闭`} aria-pressed={aiRescueActive} disabled={!AI_RESCUE_FEATURE_ENABLED||vocalMode!=="accompaniment"||!aiReferenceReady||aiReferenceBusy} onClick={onAiRescueToggle} title={aiRescueTitle}>{aiReferenceBusy&&AI_RESCUE_FEATURE_ENABLED?"准备":"补音"}</button><button type="button" className="track-step next" aria-label={`Deck ${number} 装载下一首并暂停`} title="装载下一首（暂停）" onClick={onNext}><SkipForward weight="fill" /></button><button type="button" className={`deck-extra-toggle lyrics-toggle ${lyricsEnabled?"active":""} ${!lyricsAvailable?"missing":""}`} aria-label={`Deck ${number} ${lyricsAvailable?(lyricsEnabled?"关闭":"打开"):"未找到"}歌词`} aria-pressed={lyricsEnabled&&lyricsAvailable} onClick={onLyricsToggle} title={lyricsAvailable?(lyricsEnabled?"关闭歌词":"打开歌词"):"未找到同名 LRC 歌词文件"}>{lyricsAvailable?"词":"无词"}</button></div>
       <div className="deck-playback-modes" role="group" aria-label={`Deck ${number} 播放模式`}>{playbackModes.map(([id,label,Icon])=><button type="button" key={id} className={playbackMode===id?"active":""} aria-label={label} aria-pressed={playbackMode===id} onClick={()=>onPlaybackModeChange(id)} title={label}><Icon weight={playbackMode===id?"fill":"regular"}/></button>)}<button type="button" className="active vocal-toggle" aria-label={`Deck ${number} 当前${vocalMode==="original"?"原唱":"伴唱"}，点击切换`} aria-pressed={vocalMode==="accompaniment"} disabled={!accompanimentAvailable} onClick={onVocalToggle} title={!accompanimentAvailable?"伴唱音轨尚未生成":vocalMode==="original"?"当前原唱，点击切换为伴唱（保持 Deck 当前音量）":"当前伴唱（保持 Deck 当前音量），点击切换为原唱"}>{vocalMode==="original"?"原唱":"伴唱"}</button></div>
     </div>
     {rhythmEditorOpen&&<div className={`rhythm-editor rhythm-editor-${side}`} role="dialog" aria-label={`Deck ${number} 节拍网格校正`}>
@@ -1153,7 +1147,10 @@ function TextFormatToolbar({ elements, fonts, fontDirectory, customFontCount, on
   </div>;
 }
 
-function MediaTransformEditor({ value, onChange }) {
+function MediaTransformEditor({ value, onChange, hasTextOverlay=false, mediaKey }) {
+  const [editBackground,setEditBackground]=useState(false);
+  useEffect(()=>{setEditBackground(false)},[hasTextOverlay,mediaKey]);
+  const textMode=hasTextOverlay&&!editBackground;
   const dragRef = useRef(null);
   const beginDrag = (kind, event) => {
     event.preventDefault();
@@ -1200,18 +1197,19 @@ function MediaTransformEditor({ value, onChange }) {
     }
     onChange({ ...value, fit, mode: "uniform", x: 0, y: 0, scaleX: 1, scaleY: 1 });
   };
-  return <div className="media-transform-editor" onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
-    <div className="media-transform-surface" onPointerDown={(event)=>beginDrag("move",event)} title="按住拖动，上下左右移动素材"/>
+  return <div className={`media-transform-editor${textMode?" text-edit-mode":""}`} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
+    {!textMode&&<div className="media-transform-surface" onPointerDown={(event)=>beginDrag("move",event)} title="按住拖动，上下左右移动素材"/>}
     <div className="media-transform-toolbar" role="group" aria-label="预览画面变换">
-      <span>拖动移动</span>
+      {hasTextOverlay&&<button type="button" aria-pressed={editBackground} onClick={()=>setEditBackground(current=>!current)}>{textMode?'编辑背景':'编辑文字 / Logo'}</button>}
+      {!textMode&&<><span>拖动移动</span>
       <button type="button" className={value.fit==="stretch"?"active":""} onClick={()=>setMode("stretch")}>自由拉伸</button>
       <button type="button" className={value.fit==="cover"?"active":""} onClick={()=>setMode("cover")}>等比</button>
       <button type="button" className={value.fit==="width"?"active":""} onClick={()=>setMode("width")}>锁宽</button>
       <button type="button" className={value.fit==="height"?"active":""} onClick={()=>setMode("height")}>锁高</button>
-      <button type="button" onClick={()=>onChange(defaultMediaTransform)}>重置</button>
+      <button type="button" onClick={()=>onChange(defaultMediaTransform)}>重置</button></>}
     </div>
-    {value.mode==="free"&&<><button type="button" className="transform-handle handle-x" aria-label="横向拉伸" onPointerDown={(event)=>beginDrag("scale-x",event)}/><button type="button" className="transform-handle handle-y" aria-label="纵向拉伸" onPointerDown={(event)=>beginDrag("scale-y",event)}/></>}
-    <button type="button" className="transform-handle handle-corner" aria-label={value.mode==="free"?"自由拉伸宽高":"等比缩放"} onPointerDown={(event)=>beginDrag(value.mode==="free"?"scale-free":"scale-uniform",event)}/>
+    {!textMode&&value.mode==="free"&&<><button type="button" className="transform-handle handle-x" aria-label="横向拉伸" onPointerDown={(event)=>beginDrag("scale-x",event)}/><button type="button" className="transform-handle handle-y" aria-label="纵向拉伸" onPointerDown={(event)=>beginDrag("scale-y",event)}/></>}
+    {!textMode&&<button type="button" className="transform-handle handle-corner" aria-label={value.mode==="free"?"自由拉伸宽高":"等比缩放"} onPointerDown={(event)=>beginDrag(value.mode==="free"?"scale-free":"scale-uniform",event)}/>}
   </div>;
 }
 
@@ -1724,6 +1722,8 @@ export function App() {
   const singerClockRef = useRef({1:null,2:null});
   const singerCommandBusyRef = useRef(false);
   const singerContextRef = useRef(null);
+  const singerInterludeRef = useRef(new SingerInterlude());
+  const [singerAutoReturnNext,setSingerAutoReturnNext]=useState(()=>window.localStorage.getItem('king.singer.autoReturnNext')==='true');
   const mpvLoadingRef = useRef({1:null,2:null});
   const mpvAutoTransitionRef = useRef({phase:"idle"});
   const mpvAutoTransitionTimerRef = useRef(null);
@@ -1744,8 +1744,8 @@ export function App() {
     const { deck1Gain:deckOneGain,deck2Gain:deckTwoGain,outputVolume } = deckCueMix(nextCrossfade,nextMasterVolume,headphoneVolume,deckCue.deck);
     if (mpvEnabled) {
       const batch = [];
-      if (mpvLoadedPathsRef.current[1]) batch.push({deck:1,volume:deckOutputVolumePercent(deckOneGain,outputVolume,deckVocalModes[1])});
-      if (mpvLoadedPathsRef.current[2]) batch.push({deck:2,volume:deckOutputVolumePercent(deckTwoGain,outputVolume,deckVocalModes[2])});
+      if (mpvLoadedPathsRef.current[1]) batch.push({deck:1,volume:deckOutputVolumePercent(deckOneGain,outputVolume,deckVocalModes[1]),fadeFromSilence:mpvAutoTransitionRef.current.phase==="idle"});
+      if (mpvLoadedPathsRef.current[2]) batch.push({deck:2,volume:deckOutputVolumePercent(deckTwoGain,outputVolume,deckVocalModes[2]),fadeFromSilence:mpvAutoTransitionRef.current.phase==="idle"});
       if (batch.length) mpvVolumeWriterRef.current.enqueue(batch);
       return;
     }
@@ -2041,14 +2041,20 @@ export function App() {
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return undefined;
     let disposed = false;
-    const refresh = () => Promise.all([invoke("list_audio_ai_jobs"),invoke("audio_ai_worker_status")])
+    let refreshing=false;
+    const refresh = () => {
+      if(disposed||refreshing)return;
+      refreshing=true;
+      return Promise.all([invoke("list_audio_ai_jobs"),invoke("audio_ai_worker_status")])
       .then(([jobs,worker])=>{
         if (disposed) return;
         const nextJobs=Array.isArray(jobs)?jobs:[];
         setAudioAiJobs((current)=>JSON.stringify(current)===JSON.stringify(nextJobs)?current:nextJobs);
         setAudioAiWorker((current)=>JSON.stringify(current)===JSON.stringify(worker)?current:worker);
       })
-      .catch((error)=>console.error("读取 AI 制作队列失败",error));
+      .catch((error)=>console.error("读取 AI 制作队列失败",error))
+      .finally(()=>{refreshing=false});
+    };
     refresh();
     const timer=window.setInterval(refresh,3000);
     return ()=>{disposed=true;window.clearInterval(timer)};
@@ -2137,6 +2143,8 @@ export function App() {
   // restart may restore the safe Gatling environment, but must not launch a
   // focused beam show before the floor and furniture are confirmed clear.
   const [beamShowArmed,setBeamShowArmed]=useState(false);
+  const singerFrontLightSampleRef=useRef({host:"",at:0,handles:[]});
+  const [singerFrontLightBinding]=useState(()=>{try{return JSON.parse(localStorage.getItem("king.singer.frontLightBinding")||"null")}catch{return null}});
   const [titanHost,setTitanHost]=useState(()=>window.localStorage.getItem("king.lighting.titanHost")||"192.168.1.154");
   const [titanStatus,setTitanStatus]=useState({connected:false,environmentMode:"detecting",host:"",port:4430,deviceName:"Avolites Titan",softwareVersion:"--",showName:"--",message:"正在识别酒吧灯光控制台"});
   const [titanInventory,setTitanInventory]=useState({state:"idle",authoritative:false,fixtureCount:0,groupCount:0,playbackCount:0,fixtures:[],groups:[],liveShowName:"",cachedShowName:"",blockedReason:"尚未读取真机 Patch"});
@@ -2486,9 +2494,11 @@ export function App() {
     try{
       const handles=await invoke("titan_playbacks",{host:titanStatus.host});
       const next=Array.isArray(handles)?handles:[];
+      singerFrontLightSampleRef.current={host:titanStatus.host,at:Date.now(),handles:next};
       setTitanPlaybacks(current=>JSON.stringify(current)===JSON.stringify(next)?current:next);
       return next;
     }catch(error){
+      singerFrontLightSampleRef.current={host:"",at:0,handles:[]};
       console.error("Titan Playback 状态读取失败",error);
       return [];
     }
@@ -2857,6 +2867,8 @@ export function App() {
     let pendingFrame=null;
     let pendingStatus=null;
     let pendingParameterFrame=null;
+    let parameterRefreshTimer;
+    let parameterRefreshPending=false;
     qu16ControlSessionRef.current={generation:effectGeneration,host,sessionId:null,revision:-1,live:false};
     setMixerControlStatus({mode:"hardware-syncing",state:"syncing",title:"正在同步控制状态",message:`Qu-16 TCP-MIDI · ${host}`});
     const isCurrent=()=>!disposed&&qu16MeterEffectGenerationRef.current===effectGeneration;
@@ -2909,6 +2921,7 @@ export function App() {
       session.live=Boolean(frame.connected&&frame.synced);
       const acceptedFrame={...frame,revision,receivedAtMs:Date.now()};
       const pendingCount=Number.isFinite(Number(frame.pending))?Math.max(0,Number(frame.pending)):0;
+      mixerParameterSnapshotRef.current=acceptedFrame;
       setMixerParameterSnapshot(acceptedFrame);
       const nextControlStatus=session.live
         ? {mode:"hardware-live",state:"live",title:"真机控制 LIVE",message:`Qu-16 参数已同步 · ${host}${pendingCount?` · ${pendingCount} 项待确认`:""}`}
@@ -2919,6 +2932,27 @@ export function App() {
       return true;
     };
     qu16ParameterFrameApplyRef.current=applyParameterFrame;
+    // Reconcile the existing connection even when a recovery event was missed.
+    // This reads cached backend state; it never opens another mixer connection.
+    const refreshParameters=async()=>{
+      if(!isCurrent()||startedSessionId===null||parameterRefreshPending)return;
+      parameterRefreshPending=true;
+      try{
+        const frame=await invoke("qu16_parameter_status");
+        if(!isCurrent())return;
+        const session=qu16ControlSessionRef.current;
+        const previous=mixerParameterSnapshotRef.current;
+        if(Number(frame?.revision)!==session.revision
+          ||Number(previous?.sessionId)!==startedSessionId
+          ||session.live!==Boolean(frame?.connected&&frame?.synced)){
+          applyParameterFrame(frame);
+        }
+      }catch{
+        // Transport events remain authoritative on failure; never enable blindly.
+      }finally{
+        parameterRefreshPending=false;
+      }
+    };
     const timer=window.setTimeout(async()=>{
       try{
         [unlistenFrame,unlistenStatus,unlistenParameters]=await Promise.all([
@@ -2957,6 +2991,8 @@ export function App() {
         pendingStatus=null;
         pendingFrame=null;
         pendingParameterFrame=null;
+        void refreshParameters();
+        parameterRefreshTimer=window.setInterval(refreshParameters,5000);
       }catch(error){
         if(isCurrent()){
           clearQu16MeterSnapshot();
@@ -2970,6 +3006,7 @@ export function App() {
       disposed=true;
       clearQu16MeterSnapshot();
       window.clearTimeout(timer);
+      window.clearInterval(parameterRefreshTimer);
       detachListeners();
       if(qu16ParameterFrameApplyRef.current===applyParameterFrame)qu16ParameterFrameApplyRef.current=null;
       if(qu16ControlSessionRef.current.generation===effectGeneration)qu16ControlSessionRef.current.live=false;
@@ -2983,7 +3020,7 @@ export function App() {
     let disposed=false;
     const timer=window.setTimeout(async()=>{
       const now=Date.now();
-      if(disposed||qu16DiscoveryRef.current.busy||now-qu16DiscoveryRef.current.lastAttempt<60_000)return;
+      if(disposed||qu16DiscoveryRef.current.busy||now-qu16DiscoveryRef.current.lastAttempt<300_000)return;
       qu16DiscoveryRef.current={busy:true,lastAttempt:now};
       try{
         const candidates=await invoke("qu16_discover",{hostHint});
@@ -2998,7 +3035,7 @@ export function App() {
       }finally{
         qu16DiscoveryRef.current.busy=false;
       }
-    },8_000);
+    },10_000);
     return ()=>{disposed=true;window.clearTimeout(timer);};
   },[desktopRuntime,mixerControlHost,mixerMeterStatus.state,mixerModelId]);
   const writeQu16Parameters=useCallback(async(writes)=>{
@@ -3466,6 +3503,7 @@ export function App() {
   const prepareTrack = async(deck, index, {singer=false}={}) => {
     if(singerCommandBusyRef.current&&!singer)return;
     if (index===null||(!singer&&isTrackLoaded(index))) return;
+    if(!singer)singerInterludeRef.current.cancel(deck);
     deckStartupSelectionAppliedRef.current[deck]=true;
     await takeDeckOperatorControl(deck,{rollbackAutoTarget:true});
     if(singer){
@@ -3482,6 +3520,7 @@ export function App() {
       if(!loaded)await invoke("mpv_deck_seek",{deck,seconds:0});
       const state=await invoke("mpv_deck_set_paused",{deck,paused:true});
       applyMpvDeckState(state);
+      if(state.pitchSemitones)applyMpvDeckState(await invoke("mpv_deck_set_pitch",{deck,semitones:0}));
       mpvAutoplayAfterLoadRef.current[deck]=false;
       setDeckPlaybackModes(current=>({...current,[deck]:"single"}));
     }
@@ -4020,6 +4059,7 @@ export function App() {
   };
   const loadAdjacentDeckTrack = async(deckNumber, direction) => {
     if(singerCommandBusyRef.current)return;
+    singerInterludeRef.current.cancel(deckNumber);
     const currentIndex = deckNumber===1?deck1:deck2;
     const excludedIndex = deckNumber===1?deck2:deck1;
     if(currentIndex===null||currentIndex===undefined)return;
@@ -4330,6 +4370,7 @@ export function App() {
     );
     else if(plan.action==="crossfade")await beginMpvAutoTransition(deckNumber);
   };
+  const finishMpvDeckRef=useRef(null);
   const finishMpvDeck = async (deckNumber, trackIndex) => {
     if (mpvEndingRef.current[deckNumber]) return;
     const automaticTransition=mpvAutoTransitionRef.current;
@@ -4337,7 +4378,33 @@ export function App() {
     if(automaticTransition.sourceDeck===deckNumber)cancelMpvAutoTransition();
     mpvEndingRef.current[deckNumber]=true;
     try {
+      const bookmark=singerInterludeRef.current.claim(deckNumber,tracks[trackIndex]?.path);
+      if(bookmark){
+        if(singerCommandBusyRef.current)throw Error('controller_busy');
+        singerCommandBusyRef.current=true;
+        try{
+          const autoplay=await singerContextRef.current.restoreInterlude(deckNumber,bookmark.original);
+          singerInterludeRef.current.complete(deckNumber,bookmark);
+          setSongPackageMessage(autoplay?'临时点播结束，已回到原歌单继续播放下一首。':'临时点播结束，已回到原歌单位置，等待开始。');
+        }finally{singerCommandBusyRef.current=false;}
+        return;
+      }
       const mode=deckPlaybackModes[deckNumber];
+      const continuation=singerCompletionBookmark({
+        enabled:singerAutoReturnNext,deck:deckNumber,singerDeck:singerConfigurationRef.current.deck,mode,
+        songKey:tracks[trackIndex]?.path,source:deckPlaybackQueueSources[deckNumber],
+        seconds:singerClockRef.current[deckNumber]?.timePos??0,
+        vocalMode:deckVocalModes[deckNumber],pitch:singerClockRef.current[deckNumber]?.pitchSemitones??0,
+      });
+      if(continuation){
+        if(singerCommandBusyRef.current)throw Error('controller_busy');
+        singerCommandBusyRef.current=true;
+        try{
+          const autoplay=await singerContextRef.current.restoreInterlude(deckNumber,continuation);
+          setSongPackageMessage(autoplay?'演唱结束，已按原歌单继续播放下一首。':'已到歌单末尾，演唱结束。');
+        }finally{singerCommandBusyRef.current=false;}
+        return;
+      }
       if(mode==="repeat-one") {
         mpvEofHandledRef.current[deckNumber]=false;
         await invoke("mpv_deck_seek",{deck:deckNumber,seconds:0});
@@ -4375,6 +4442,7 @@ export function App() {
       mpvEndingRef.current[deckNumber]=false;
     }
   };
+  finishMpvDeckRef.current=finishMpvDeck;
   const getSingerAudio=()=>singerAudioSnapshot({
     policy:singerConfigurationRef.current.audioPolicy,
     musicVolume:masterVolume,acappella:singerAcappella,
@@ -4393,7 +4461,7 @@ export function App() {
     const mix=deckCueMix(crossfade,value,headphoneVolume,null);
     const gain=deck===1?mix.deck1Gain:mix.deck2Gain;
     const volume=deckOutputVolumePercent(gain,value,deckVocalModes[deck]);
-    await invoke("mpv_deck_set_volume",{deck,volume});
+    await invoke("mpv_deck_set_volume",{deck,volume,fadeFromSilence:true});
     const state=await invoke("mpv_deck_state",{deck});
     applyMpvDeckState(state);
     if(!state.running||!state.path||!Number.isFinite(state.volume)||Math.abs(state.volume-volume)>0.6)throw new Error("audio_readback_failed");
@@ -4401,6 +4469,13 @@ export function App() {
     await mpvVolumeWriterRef.current.settled();
   };
   const executeSingerWork=async work=>{
+    if(work.command.operation.type==='front_light') {
+      return setFrontLight(work.command.operation.enabled,{
+        binding:singerFrontLightBinding,status:titanStatus,
+        read:async()=>({host:titanStatus.host,at:Date.now(),handles:await invoke("titan_playbacks",{host:titanStatus.host})}),
+        fire:args=>invoke("titan_fire_playback",args),release:args=>invoke("titan_release_playback",args),
+      }).finally(()=>refreshTitanPlaybacks());
+    }
     if(singerCommandBusyRef.current)throw new Error("controller_busy");
     singerCommandBusyRef.current=true;setSingerAudioBusy(true);
     try{
@@ -4414,6 +4489,57 @@ export function App() {
     finally{singerCommandBusyRef.current=false;setSingerAudioBusy(false)}
   };
   singerContextRef.current={
+    atmosphere:(effect,volume)=>invoke("singer_atmosphere",{effect,volume}),
+    setAutoReturnNext:async enabled=>{
+      window.localStorage.setItem('king.singer.autoReturnNext',String(enabled));
+      flushSync(()=>setSingerAutoReturnNext(enabled));
+    },
+    setPitch:async(deck,semitones)=>{
+      const state=await invoke("mpv_deck_set_pitch",{deck,semitones});
+      if(state.pitchSemitones!==semitones)throw Error('pitch_readback_failed');
+      applyMpvDeckState(state);
+    },
+    selectFromLibrary:async(deck,index,playlistKey,temporary)=>{
+      const songKey=tracks[index]?.path;
+      const source=temporary?null:singerPlaylistSource(playlistLibraries,playlistKey,songKey);
+      const originalTrack=tracks[deck===1?deck1:deck2];
+      let original=null;
+      if(temporary && !singerInterludeRef.current.entries[deck]){
+        if(!originalTrack?.path)throw Error('no_song_selected');
+        const clock=await invoke('mpv_deck_state',{deck});
+        if(!clock.running||!clock.path||normalizeMediaPath(clock.path)!==normalizeMediaPath(playbackPathForDeck(deck,originalTrack)))throw Error('player_unavailable');
+        original={songKey:originalTrack.path,seconds:clock.timePos,source:deckPlaybackQueueSources[deck]??activePlaylistPlaybackSource,
+          vocalMode:deckVocalModes[deck],pitch:clock.pitchSemitones??0};
+      }
+      await prepareTrack(deck,index,{singer:true});
+      if(temporary){
+        singerInterludeRef.current.begin(deck,original,songKey);
+        const saved=singerInterludeRef.current.entries[deck].original.source;
+        flushSync(()=>setDeckPlaybackQueueSources(current=>({...current,[deck]:saved})));
+      }else{
+        singerInterludeRef.current.cancel(deck);
+        flushSync(()=>setDeckPlaybackQueueSources(current=>({...current,[deck]:source})));
+      }
+    },
+    restoreInterlude:async(deck,original)=>{
+      if(deckCue.deck!==null||deckCue.busy||playingDecks[deck===1?2:1]||mpvAutoTransitionRef.current.phase!=="idle")throw Error('desktop_mix_active');
+      const plan=singerReturnPlan(original,playlistLibraries,tracks,singerAutoReturnNext);
+      const {index}=plan;
+      await prepareTrack(deck,index,{singer:true});
+      // Flush selection before seeking: the shared seek helper reads the loaded song.
+      flushSync(()=>{if(deck===1)setDeck1(index);else setDeck2(index);
+        setDeckPlaybackQueueSources(current=>({...current,[deck]:original.source}));});
+      if(plan.vocalMode==='accompaniment')await singerContextRef.current.setVocalMode(deck,'accompaniment');
+      await singerContextRef.current.setPitch(deck,plan.pitch);
+      const state=await invoke('mpv_deck_seek',{deck,seconds:plan.seconds});
+      applyMpvDeckState(state);
+      if(!state.paused)applyMpvDeckState(await invoke('mpv_deck_set_paused',{deck,paused:true}));
+      if(plan.autoplay){
+        await singerContextRef.current.setPaused(deck,false);
+        flushSync(()=>setDeckPlaybackModes(current=>({...current,[deck]:'sequence'})));
+      }
+      return plan.autoplay;
+    },
     audio:async(deck,operation)=>{
       if(deck!==singerConfigurationRef.current.deck)throw new Error("audio_unavailable");
       return executeSingerAudio(operation,{
@@ -4443,7 +4569,7 @@ export function App() {
     findTrack:key=>tracks.findIndex(track=>track.path===key&&!track.demo),
     hasTrack:deck=>Boolean(tracks[deck===1?deck1:deck2]?.path),
     hasAccompaniment:deck=>Boolean(tracks[deck===1?deck1:deck2]?.accompanimentPath),
-    select:(deck,index)=>prepareTrack(deck,index,{singer:true}),
+    select:async(deck,index)=>{await prepareTrack(deck,index,{singer:true});singerInterludeRef.current.cancel(deck);},
     setPaused:async(deck,paused)=>{
       // Singer playback is an explicit single-song action. Reuse the desktop
       // AI playback guard and pause acknowledgement before returning success.
@@ -4463,7 +4589,7 @@ export function App() {
     },
     setVocalMode:(deck,mode)=>switchDeckVocalMode(deck,deck===1?deck1:deck2,{singer:true,mode}),
   };
-  useSingerGateway({desktopRuntime,tracks,
+  useSingerGateway({desktopRuntime,tracks,playlistLibraries,
     onConfiguration:response=>{
       const next={deck:response.deck,audioPolicy:response.audioPolicy??defaultSingerAudioPolicy};
       if(JSON.stringify(next)!==JSON.stringify(singerConfigurationRef.current)){
@@ -4471,6 +4597,8 @@ export function App() {
       }
     },
     getSnapshot:()=>({
+      frontLight:frontLightState(singerFrontLightBinding,titanStatus,singerFrontLightSampleRef.current),
+      autoReturnNext:singerAutoReturnNext,
       audio:getSingerAudio(),
       runtimeReady:mpvEnabled,
       cueActive:deckCue.deck!==null||deckCue.busy,
@@ -4481,7 +4609,10 @@ export function App() {
         const path=playbackPathForDeck(deck,track);
         const loaded=Boolean(path&&mpvLoadedPathsRef.current[deck]===path&&!mpvLoadingRef.current[deck]);
         const matched=loaded&&clock?.path===path;
-        return {deck,songKey:track?.path??null,loaded,paused:matched?clock.paused:!playingDecks[deck],
+        const bookmark=singerInterludeRef.current.entries[deck];
+        return {deck,pitchSemitones:clock?.pitchSemitones??0,playlistKey:singerPlaylistKey(deckPlaybackQueueSources[deck]??activePlaylistPlaybackSource),
+          returnSongKey:bookmark?.original?.songKey??null,returnPositionSeconds:bookmark?.original?.seconds??null,returnRevision:singerInterludeRef.current.revisions[deck],
+          songKey:track?.path??null,loaded,paused:matched?clock.paused:!playingDecks[deck],
           positionSeconds:matched?Math.max(0,Number(clock.timePos)||0):0,
           sampledAtUnixMs:matched?clock.sampledAtUnixMs:0,vocalMode:deckVocalModes[deck],
           playbackMode:deckPlaybackModes[deck],volume:matched?Number(clock.volume)||0:0};
@@ -4520,12 +4651,19 @@ export function App() {
     if(!mpvEnabled)return undefined;
     let disposed=false;
     let polling=false;
+    const loadRetryAt={1:0,2:0};
     const poll=async()=>{
       if(polling||disposed)return;
       polling=true;
       try {
         for(const [deckNumber,trackIndex,path] of [[1,deck1,deckOnePath],[2,deck2,deckTwoPath]]) {
-          if(!path||mpvLoadedPathsRef.current[deckNumber]!==path||mpvLoadingRef.current[deckNumber]||singerCommandBusyRef.current)continue;
+          if(!path||mpvLoadingRef.current[deckNumber]||singerCommandBusyRef.current)continue;
+          if(mpvLoadedPathsRef.current[deckNumber]!==path){
+            if(Date.now()-loadRetryAt[deckNumber]<2000)continue;
+            loadRetryAt[deckNumber]=Date.now();
+            await ensureMpvDeckLoaded(deckNumber,trackIndex);
+            continue;
+          }
           const state=await invoke("mpv_deck_state",{deck:deckNumber});
           if(disposed)return;
           dispatchDeckRhythmEvents(
@@ -4539,9 +4677,9 @@ export function App() {
           const reachedEnd=Boolean(state.eofReached)||(state.duration>0&&state.timePos>=state.duration-.06);
           if(!reachedEnd) {
             mpvEofHandledRef.current[deckNumber]=false;
-          } else if(!mpvEofHandledRef.current[deckNumber]) {
+          } else if(!mpvEofHandledRef.current[deckNumber]&&!singerCommandBusyRef.current) {
             mpvEofHandledRef.current[deckNumber]=true;
-            void finishMpvDeck(deckNumber,trackIndex);
+            void finishMpvDeckRef.current(deckNumber,trackIndex);
           }
         }
       } catch(error) {
@@ -4780,6 +4918,7 @@ export function App() {
   const chosenTextElements = stagedMedia?.type === "text" ? stagedMedia.elements.filter((element)=>selectedTextElements.includes(element.id)) : [];
   const outputLabel = `${outputBaseMedia?.name ?? outputMedia.name}${outputMedia.type === "text" ? " · 文字/Logo 覆盖" : ""}`;
   const stageMedia = (candidate) => {
+    setHoverMedia(null);
     if(candidate.type==="video")candidate={...candidate,playbackCategory:mediaCategory};
     setTextDraftClearSlot(null);
     const replacesOverlay = candidate.type === "text";
@@ -5278,8 +5417,8 @@ export function App() {
       <div className="system-status"><span className={`runtime-mode runtime-mode-${runtimeCapability.mode}`} title={`${runtimeCapability.message}${runtimeCapability.aiProcessingAvailable?` · AI worker ${audioAiWorker.enabled===false?"已关闭":audioAiWorker.running?"运行中":"等待中"}`:""}`}>{runtimeCapability.mode==="full"?<><span className="nvidia-runtime-logo" aria-label="NVIDIA"><img src="/assets/nvidia-logo-horiz-wht-16x9.png" alt="NVIDIA"/></span><span className="runtime-edition">{runtimeCapability.aiEnvironmentAvailable?"制作 + 播放":"AI 待配置 · 可播放"}</span></>:<><Lightning weight="fill"/> {runtimeCapability.mode==="detecting"?"识别硬件":"播放版"}</>}</span><span><WifiHigh /> 本机控制</span><span className={ledOutputStatus.connected?"led-connected":"led-disconnected"} title={ledOutputStatus.message}><MonitorPlay /> {ledOutputStatus.previewMode?"单屏 · C1 预览":ledOutputStatus.connected?"第二屏 + C1 预览":"LED 主屏未连接"}</span><RuntimeClock/><button type="button" className="app-exit-button" onClick={exitApplication} title="退出软件" aria-label="退出软件"><X weight="bold"/></button></div>
     </header>
 
-    <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""} ${activeNav==="调音台"?"mixer-layout":""} ${activeNav==="Avolites Tiger Touch Pro"?"titan-layout":""} ${activeNav==="演出编排"?"show-editor-layout":""}`}>
-      {activeNav === "设置" ? <SettingsView singerAudioControls={{audio:getSingerAudio(),policy:singerConfiguration.audioPolicy,busy:singerAudioBusy,
+    <main ref={workspaceRef} className={`workspace ${previewMode?"preview-layout":""} ${activeNav==="调音台"?"mixer-layout":""} ${activeNav==="Avolites Tiger Touch Pro"?"titan-layout":""} ${activeNav==="演出编排"?"show-editor-layout":""} ${activeNav==="专业数字音频处理器"?"dsp-layout":""}`}>
+      {activeNav === "专业数字音频处理器" ? <AudioProcessorWorkspace/> : activeNav === "设置" ? <SettingsView singerAudioControls={{audio:getSingerAudio(),pitchSemitones:singerClockRef.current[singerConfigurationRef.current.deck]?.pitchSemitones??0,policy:singerConfiguration.audioPolicy,busy:singerAudioBusy,
         onOperation:operation=>executeSingerWork({deck:singerConfigurationRef.current.deck,command:{operation}})}}
         screenTargets={screenTargets}
         monitorTargets={monitorTargets}
@@ -5401,7 +5540,7 @@ export function App() {
           <div className={`led-stage ${previewMode&&monitorTarget===null?"dual-preview-stage":""}`}>
             {monitorTarget===null
               ? previewMode
-                ? <><div className="dual-screen-pane program-pane"><span className="screen-role-label">PGM · 当前上屏</span><MediaOutputScreen media={outputMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={outputTransform} videoRef={outputVideoElementRef} readClock={desktopRuntime?readProgramVideoClock:undefined} playback={videoPlayback} onVideoEnded={desktopRuntime?undefined:handleProgramVideoEnded}/></div><div className="dual-screen-pane preview-pane"><span className="screen-role-label">{previewPending?"PVW · 编辑中":"PVW · 已同步"}</span><MediaOutputScreen media={displayMedia} track={tracks[deck1]} transform={displayTransform} editable={stagedMedia?.type==="text"&&stagedMedia===displayMedia} selectedElementId={selectedTextElement} selectedElementIds={selectedTextElements} onElementSelect={selectTextElement} onElementChange={updateTextElementById} onEditStart={rememberTextState}/>{stagedMedia===displayMedia&&resolveBaseMedia(stagedMedia)?.src&&<MediaTransformEditor value={displayTransform} onChange={setStagedTransform}/>}<svg className="preview-visible-outline" viewBox="0 0 2048 2304" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><path d="M512 0h1024v1152h512v1152H0V1152h512z"/></svg></div></>
+                ? <><div className="dual-screen-pane program-pane"><span className="screen-role-label">PGM · 当前上屏</span><MediaOutputScreen media={outputMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={outputTransform} videoRef={outputVideoElementRef} readClock={desktopRuntime?readProgramVideoClock:undefined} playback={videoPlayback} onVideoEnded={desktopRuntime?undefined:handleProgramVideoEnded}/></div><div className="dual-screen-pane preview-pane"><span className="screen-role-label">{previewPending?"PVW · 编辑中":"PVW · 已同步"}</span><MediaOutputScreen media={displayMedia} track={tracks[deck1]} transform={displayTransform} editable={stagedMedia?.type==="text"&&stagedMedia===displayMedia} selectedElementId={selectedTextElement} selectedElementIds={selectedTextElements} onElementSelect={selectTextElement} onElementChange={updateTextElementById} onEditStart={rememberTextState}/>{stagedMedia===displayMedia&&resolveBaseMedia(stagedMedia)?.src&&<MediaTransformEditor value={displayTransform} onChange={setStagedTransform} hasTextOverlay={stagedMedia?.type==="text"} mediaKey={stagedMedia?.id}/>}<svg className="preview-visible-outline" viewBox="0 0 2048 2304" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><path d="M512 0h1024v1152h512v1152H0V1152h512z"/></svg></div></>
                 : <MediaOutputScreen media={outputMedia} track={tracks[deck1]} lyrics={activeLyrics} transform={outputTransform} videoRef={outputVideoElementRef} readClock={desktopRuntime?readProgramVideoClock:undefined} playback={videoPlayback} onVideoEnded={desktopRuntime?undefined:handleProgramVideoEnded}/>
               : <div className="monitor-feed" style={{backgroundImage:`linear-gradient(180deg,rgba(0,0,0,.05),rgba(0,0,0,.28)),url(${monitorTargets[monitorTarget].src})`}}><div className="monitor-live"><span className="live-dot"/> LIVE</div><b>{monitorTargets[monitorTarget].name}</b><small>摄像机视频流接口预留</small></div>}
           </div>

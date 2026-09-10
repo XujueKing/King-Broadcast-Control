@@ -43,3 +43,12 @@ test('acknowledgement waits for actual player completion and propagates failure'
   const failed=fixture({setPaused:async()=>{throw new Error('pipe_timeout')}});
   await assert.rejects(executeSingerOperation(work({type:'play'}),failed.context),/pipe_timeout/);
 });
+
+test('atmosphere overlays without touching the song or playlist and rejects arbitrary files',async()=>{
+  const played=[];
+  const {calls,context}=fixture({atmosphere:async(...args)=>played.push(args)});
+  await executeSingerOperation(work({type:'atmosphere',effect:'applause',volume:30}),context);
+  await executeSingerOperation(work({type:'atmosphere',effect:'stop',volume:30}),context);
+  assert.deepEqual(played,[['applause',30],['stop',30]]);assert.deepEqual(calls,[]);
+  for(const op of [{effect:'../song.mp3',volume:30},{effect:'cheer',volume:61},{effect:'cheer',volume:NaN}])await assert.rejects(executeSingerOperation(work({type:'atmosphere',...op}),context));
+});
