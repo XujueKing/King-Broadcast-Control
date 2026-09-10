@@ -1884,9 +1884,11 @@ export function App() {
     ])));
   },[desktopRuntime,tracks.length,playlistLibraries,trackIndexByPath]);
   useEffect(()=>{
-    const trackPaths=tracks.map(managedTrackIdentity).filter(Boolean);
+    const seedTracks=desktopRuntime?audioAssets:tracks;
+    if(!seedTracks.length)return;
+    const trackPaths=seedTracks.map(managedTrackIdentity).filter(Boolean);
     setPlaylistManagement(current=>seedPlaylistManagement(current,trackPaths,playlist));
-  },[tracks,playlist,setPlaylistManagement]);
+  },[audioAssets,desktopRuntime,tracks,playlist,setPlaylistManagement]);
   useEffect(()=>{
     try{localStorage.setItem(PLAYLIST_MANAGEMENT_STORAGE_KEY,JSON.stringify(playlistLibraries))}catch{}
   },[playlistLibraries]);

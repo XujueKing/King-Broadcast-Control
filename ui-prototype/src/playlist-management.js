@@ -146,13 +146,23 @@ export function resolvePlaybackQueuePaths(value, source) {
 
 export function seedPlaylistManagement(value, trackPaths, preferredName = "周六") {
   const normalized = normalizePlaylistManagement(value);
-  if (normalized.seeded || !trackPaths.length) return normalized;
-  const preferred = normalized.playlists.find((playlist) => playlist.name === preferredName) ?? normalized.playlists[0];
+  const availablePaths = [...new Set((trackPaths ?? []).filter((path) => typeof path === "string" && path))];
+  if (!availablePaths.length) return normalized;
+  const containsDemoBootstrap = normalized.playlists.some((playlist) =>
+    playlist.trackPaths.some((path) => path.startsWith("demo:")),
+  );
+  if (normalized.seeded && !containsDemoBootstrap) return normalized;
+  const playlists = normalized.playlists.map((playlist) => ({
+    ...playlist,
+    trackPaths: playlist.trackPaths.filter((path) => !path.startsWith("demo:")),
+  }));
+  const preferred = playlists.find((playlist) => playlist.name === preferredName) ?? playlists[0];
+  const preferredPaths = new Set(preferred.trackPaths);
   return {
     ...normalized,
     seeded: true,
-    playlists: normalized.playlists.map((playlist) => playlist.id === preferred.id
-      ? { ...playlist, trackPaths: [...new Set(trackPaths)] }
+    playlists: playlists.map((playlist) => playlist.id === preferred.id
+      ? { ...playlist, trackPaths: [...playlist.trackPaths, ...availablePaths.filter((path) => !preferredPaths.has(path))] }
       : playlist),
   };
 }

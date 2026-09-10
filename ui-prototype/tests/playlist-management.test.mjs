@@ -130,6 +130,20 @@ test("first media scan seeds only the preferred playlist", () => {
   assert.equal(state.seeded, true);
 });
 
+test("real media replaces a stale demo-only bootstrap after desktop packaging", () => {
+  const bootstrapped = seedPlaylistManagement(
+    createDefaultPlaylistManagement(),
+    ["demo:0", "demo:1"],
+    "周五",
+  );
+  const restored = seedPlaylistManagement(bootstrapped, ["D:\\Music\\a.mp3", "D:\\Music\\b.mp3"], "周五");
+  assert.deepEqual(
+    restored.playlists.find((playlist) => playlist.name === "周五").trackPaths,
+    ["D:\\Music\\a.mp3", "D:\\Music\\b.mp3"],
+  );
+  assert.equal(restored.playlists.some((playlist) => playlist.trackPaths.some((path) => path.startsWith("demo:"))), false);
+});
+
 test("playlist membership is unique and reorderable", () => {
   const state = updatePlaylistTracks(createDefaultPlaylistManagement(), "playlist:周一", (paths) => [...new Set([...paths, "a", "b", "a"])]);
   assert.deepEqual(state.playlists[0].trackPaths, ["a", "b"]);
