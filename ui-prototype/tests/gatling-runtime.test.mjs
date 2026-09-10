@@ -13,7 +13,7 @@ test("video families use only the physically verified Gatling colours", () => {
   assert.equal(gatlingPaletteForVideoFamily("red"), 33207);
   assert.equal(gatlingPaletteForVideoFamily("orange"), 33207);
   assert.equal(gatlingPaletteForVideoFamily("yellow"), 33207);
-  assert.equal(gatlingPaletteForVideoFamily("green"), 33219);
+  assert.equal(gatlingPaletteForVideoFamily("green"), 33214);
   assert.equal(gatlingPaletteForVideoFamily("cyan"), 33219);
   assert.equal(gatlingPaletteForVideoFamily("blue"), 33219);
   assert.equal(gatlingPaletteForVideoFamily("purple"), 33219);

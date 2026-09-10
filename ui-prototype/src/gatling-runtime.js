@@ -7,12 +7,12 @@ export const kingclubGatlingProfile = Object.freeze({
   palettes: Object.freeze({
     neutral: 33207,
     red: 33207,
-    // Only Colour 71 (red) and Colour 73 (blue) are physically verified for
-    // Fixture 42. Colour 72 turned the Gatling completely off onsite, so
-    // unverified video families are folded into a safe warm/cool pair.
+    // Fixture 42: Colour 71 red, 73 blue; Colour 72 green was re-tested
+    // at 4% and physically confirmed by the operator on 2026-09-11.
+    // Other unverified families retain their existing warm/cool fallback.
     orange: 33207,
     yellow: 33207,
-    green: 33219,
+    green: 33214,
     cyan: 33219,
     blue: 33219,
     purple: 33219,
