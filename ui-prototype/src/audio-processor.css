@@ -552,3 +552,8 @@
 .dsp-speaker > svg,.dsp-speaker small {display:none;}
 .dsp-speaker strong {font-size:11px;line-height:16px;}
 .dsp-direction {top:-14px;transform-origin:6px 26px;}
+.dsp-native { border-bottom: 1px solid #3c494f; padding-bottom: 16px; }
+.dsp-native h2 { display: flex; align-items: center; gap: 12px; }
+.dsp-native h2 span { font-size: 12px; color: #9ec4b9; }
+.dsp-native-connect { display: flex; gap: 8px; flex-wrap: wrap; }
+.dsp-native .dsp-field { gap: 8px; }

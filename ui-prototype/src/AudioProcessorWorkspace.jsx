@@ -18,6 +18,7 @@ import {
   DSP_STORAGE_KEY,
 } from "./dp448-layout.js";
 import "./audio-processor.css";
+import Dp448Live from "./Dp448Live.jsx";
 
 const kinds = { full: "全频", sub: "低音", fill: "补声", monitor: "返听" };
 function Numeric({ label, value, min, max, step = 1, unit, onCommit }) {
@@ -184,7 +185,7 @@ export default function AudioProcessorWorkspace() {
           </span>
         </div>
         <div className="dsp-header-actions">
-          <span className="dsp-offline">设备未连接 · 布局编辑</span>
+          <span className="dsp-offline">实机控制 · 布局编辑</span>
           <button onClick={exportLayout}>
             <DownloadSimple />
             导出方案
@@ -460,6 +461,7 @@ export default function AudioProcessorWorkspace() {
                 : "输出通道参数"}
             </small>
           </header>
+          <Dp448Live output={channel.id} />
           {speaker && (
             <section>
               <h2>位置与线路</h2>
@@ -720,18 +722,18 @@ export default function AudioProcessorWorkspace() {
             ))}
             <div className="dsp-readback">
               <span>
-                设备回读<strong>—</strong>
+                草稿下发<strong>未启用</strong>
               </span>
               <span>
                 限幅 / 保护<strong>未读取</strong>
               </span>
             </div>
             <button className="dsp-apply" disabled>
-              设备未连接 · 无法下发
+              离线草稿 · 不自动下发
             </button>
             <p className="dsp-note">
-              布局和参数草稿自动保存在本机。当前没有向 DP448
-              发送命令；参数范围仅用于方案编辑，连接后须按实机能力核验。
+              布局和参数草稿自动保存在本机，不触发设备命令。
+              已核验的音量和延时请在上方“DP448 实机控制”中调节。
             </p>
           </section>
         </aside>

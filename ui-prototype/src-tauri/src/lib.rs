@@ -17,6 +17,7 @@ mod ai_analysis;
 mod ai_worker;
 mod audio_importer;
 mod deadline_pipe;
+mod dp448;
 mod kinglight;
 mod kingsong;
 mod libmpv_runtime;
@@ -2256,10 +2257,16 @@ pub fn run() {
         .manage(singer_gateway::SingerGateway::default())
         .manage(ai_worker::AiWorkerManager::default())
         .manage(qu16_runtime::Qu16Runtime::default())
+        .manage(dp448::Dp448::default())
         .manage(vocal_meter_bridge::VocalMeterBridge::default())
         .manage(vocal_runtime::VocalRuntimeBridge::default())
         .manage(capability_state)
         .invoke_handler(tauri::generate_handler![
+            dp448::dp448_ports,
+            dp448::dp448_connect,
+            dp448::dp448_disconnect,
+            dp448::dp448_read,
+            dp448::dp448_write,
             singer_gateway::singer_gateway_status,
             singer_gateway::singer_gateway_pairing,
             singer_gateway::singer_gateway_configure,

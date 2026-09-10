@@ -14,4 +14,6 @@
 
 2026-09-10 用户平面图确认：A1–A6 为悬挂全频，高度约4.3m；B1–B4 为低音；C1–C2 为舞台返听。位置与水平朝向按图估计，距离未测量，单只输出归属仍未确认；不得将 A3–A6、C1–C2 自动分配到 OUT3–6。
 
-2026-09-10 现场补验：AudioCore通过PL2303GT COM3/115200识别到ID1 XTA DP448 V3.01，并完成Get Current Settings Only实机上传，备份见 `../hardware/DP448-LIVE-2026-09-10.xaa`。这证明AudioCore设备链路；KINGCLUB原生双向DSP协议仍未实现，下发继续禁用。设备增益/线路回读见 `../hardware/2026-09-10-live-control-completion.md`。
+2026-09-10 现场补验：AudioCore通过PL2303GT COM3/115200识别到ID1 XTA DP448 V3.01，并完成Get Current Settings Only实机上传，备份见 `../hardware/DP448-LIVE-2026-09-10.xaa`。
+
+2026-09-10 原生接入：新增独立“DP448实机控制”区，直接读取串口和8路输出，支持增益、延时写入及完整输出块回读确认，显示真实联动组；离线草稿仍不自动下发。分频/EQ/静音/极性/限幅尚未开放。协议和实机证据见 [DP448-PROTOCOL.md](./DP448-PROTOCOL.md)。
