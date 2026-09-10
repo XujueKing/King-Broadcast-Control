@@ -48,6 +48,10 @@ pub struct AudioImporter(Mutex<()>);
 
 impl AudioImporter {
     pub fn prepare(&self, audio_root: &Path) -> AudioImportStatus {
+        self.prepare_from(audio_root, audio_root)
+    }
+
+    pub fn prepare_from(&self, source_root: &Path, output_root: &Path) -> AudioImportStatus {
         let _guard = match self.0.lock() {
             Ok(guard) => guard,
             Err(_) => {
@@ -58,8 +62,14 @@ impl AudioImporter {
                 }
             }
         };
-        let mut status = prepare_encrypted_audio(audio_root);
-        let lyrics = sync_playable_lyrics(audio_root);
+        let mut status = prepare_encrypted_audio_from(source_root, output_root);
+        let mut lyrics = sync_playable_lyrics(source_root);
+        if source_root != output_root {
+            let output_lyrics = sync_playable_lyrics(output_root);
+            lyrics.synced += output_lyrics.synced;
+            lyrics.ambiguous += output_lyrics.ambiguous;
+            lyrics.failed += output_lyrics.failed;
+        }
         if lyrics.synced > 0 || lyrics.ambiguous > 0 || lyrics.failed > 0 {
             let lyric_message = format!(
                 "酷狗歌词：新增 {} 首、待确认 {} 首、失败 {} 首",
@@ -169,14 +179,23 @@ fn source_path_id(path: &Path) -> String {
     hasher.finalize().to_hex()[..20].to_string()
 }
 
-fn imported_directory(audio_root: &Path, source: &Path) -> Result<PathBuf, String> {
+fn imported_directory_for(
+    source_root: &Path,
+    output_root: &Path,
+    source: &Path,
+) -> Result<PathBuf, String> {
     let parent = source
         .parent()
         .ok_or_else(|| "KGMA 文件缺少父目录".to_string())?;
     let relative_parent = parent
-        .strip_prefix(audio_root)
+        .strip_prefix(source_root)
         .map_err(|_| format!("KGMA 文件不在曲库目录内：{}", source.to_string_lossy()))?;
-    Ok(audio_root.join(".king-imported").join(relative_parent))
+    Ok(output_root.join(".king-imported").join(relative_parent))
+}
+
+#[cfg(test)]
+fn imported_directory(audio_root: &Path, source: &Path) -> Result<PathBuf, String> {
+    imported_directory_for(audio_root, audio_root, source)
 }
 
 fn import_state_path(audio_root: &Path, source: &Path) -> PathBuf {
@@ -466,10 +485,10 @@ fn decode_text_bytes(bytes: &[u8]) -> Result<String, String> {
     }
 }
 
-fn parse_kugou_lyrics_path(contents: &str) -> Option<PathBuf> {
+fn parse_kugou_path(contents: &str, expected_key: &str) -> Option<PathBuf> {
     contents.lines().find_map(|line| {
         let (key, value) = line.trim().trim_start_matches('\u{feff}').split_once('=')?;
-        if key.trim().eq_ignore_ascii_case("LyricPath") {
+        if key.trim().eq_ignore_ascii_case(expected_key) {
             let value = value.trim().trim_matches('"');
             (!value.is_empty()).then(|| PathBuf::from(value))
         } else {
@@ -478,14 +497,32 @@ fn parse_kugou_lyrics_path(contents: &str) -> Option<PathBuf> {
     })
 }
 
+fn parse_kugou_lyrics_path(contents: &str) -> Option<PathBuf> {
+    parse_kugou_path(contents, "LyricPath")
+}
+
+fn kugou_ini_contents() -> Option<String> {
+    let app_data = std::env::var_os("APPDATA").map(PathBuf::from)?;
+    let ini = app_data.join("KuGou8").join("KuGou.ini");
+    decode_text_bytes(&fs::read(ini).ok()?).ok()
+}
+
+pub(crate) fn kugou_download_directory() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("KING_KUGOU_MUSIC_PATH") {
+        let path = PathBuf::from(path);
+        return path.is_dir().then_some(path);
+    }
+    let contents = kugou_ini_contents()?;
+    let path = parse_kugou_path(&contents, "DownloadPath")?;
+    path.is_dir().then_some(path)
+}
+
 fn kugou_lyrics_directory() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("KING_KUGOU_LYRIC_PATH") {
         let path = PathBuf::from(path);
         return path.is_dir().then_some(path);
     }
-    let app_data = std::env::var_os("APPDATA").map(PathBuf::from)?;
-    let ini = app_data.join("KuGou8").join("KuGou.ini");
-    let contents = decode_text_bytes(&fs::read(ini).ok()?).ok()?;
+    let contents = kugou_ini_contents()?;
     let path = parse_kugou_lyrics_path(&contents)?;
     path.is_dir().then_some(path)
 }
@@ -723,13 +760,18 @@ fn cleanup_legacy_cache(source: &Path, cache_id: &str) {
     }
 }
 
-fn decode_one(decoder: &Path, audio_root: &Path, source: &Path) -> Result<PathBuf, String> {
+fn decode_one_from(
+    decoder: &Path,
+    source_root: &Path,
+    output_root: &Path,
+    source: &Path,
+) -> Result<PathBuf, String> {
     let cache_id = source_cache_id(source)?;
     let source_stem = source
         .file_stem()
         .ok_or_else(|| "KGMA 文件名无效".to_string())?;
-    let destination_directory = imported_directory(audio_root, source)?;
-    let state_matches = fs::read_to_string(import_state_path(audio_root, source))
+    let destination_directory = imported_directory_for(source_root, output_root, source)?;
+    let state_matches = fs::read_to_string(import_state_path(output_root, source))
         .is_ok_and(|value| value == cache_id);
     if state_matches {
         if let Some(existing) = existing_imported_audio(&destination_directory, source_stem) {
@@ -747,7 +789,7 @@ fn decode_one(decoder: &Path, audio_root: &Path, source: &Path) -> Result<PathBu
     if let Some(existing) = existing_decoded_audio(&legacy_directory) {
         let imported = install_decoded_audio(&existing, &destination_directory, source_stem)?;
         sync_lyrics_sidecar(source, &imported)?;
-        write_import_state(audio_root, source, &cache_id)?;
+        write_import_state(output_root, source, &cache_id)?;
         cleanup_legacy_cache(source, &cache_id);
         return Ok(imported);
     }
@@ -794,7 +836,7 @@ fn decode_one(decoder: &Path, audio_root: &Path, source: &Path) -> Result<PathBu
         })?;
         let imported = install_decoded_audio(&decoded, &destination_directory, source_stem)?;
         sync_lyrics_sidecar(source, &imported)?;
-        write_import_state(audio_root, source, &cache_id)?;
+        write_import_state(output_root, source, &cache_id)?;
         Ok(imported)
     })();
     let _ = fs::remove_dir_all(&work_directory);
@@ -804,9 +846,14 @@ fn decode_one(decoder: &Path, audio_root: &Path, source: &Path) -> Result<PathBu
     result
 }
 
+#[cfg(test)]
 fn prepare_encrypted_audio(audio_root: &Path) -> AudioImportStatus {
+    prepare_encrypted_audio_from(audio_root, audio_root)
+}
+
+fn prepare_encrypted_audio_from(source_root: &Path, output_root: &Path) -> AudioImportStatus {
     let mut sources = Vec::new();
-    if let Err(error) = collect_encrypted_files(audio_root, &mut sources) {
+    if let Err(error) = collect_encrypted_files(source_root, &mut sources) {
         return AudioImportStatus {
             state: "error".into(),
             message: format!("扫描 KGMA 失败：{error}"),
@@ -834,7 +881,7 @@ fn prepare_encrypted_audio(audio_root: &Path) -> AudioImportStatus {
     let mut ready = 0;
     let mut errors = Vec::new();
     for source in &sources {
-        match decode_one(&decoder, audio_root, source) {
+        match decode_one_from(&decoder, source_root, output_root, source) {
             Ok(_) => ready += 1,
             Err(error) => errors.push(format!(
                 "{}：{error}",
@@ -976,6 +1023,26 @@ mod tests {
         assert_eq!(
             parse_kugou_lyrics_path(contents),
             Some(PathBuf::from(r"D:\KuGou\Lyric\"))
+        );
+    }
+
+    #[test]
+    fn reads_the_configured_kugou_download_directory() {
+        let contents = "[DownloadConfigSection]\r\nDownloadPath=D:\\KuGou\\\r\n";
+        assert_eq!(
+            parse_kugou_path(contents, "DownloadPath"),
+            Some(PathBuf::from(r"D:\KuGou\"))
+        );
+    }
+
+    #[test]
+    fn external_imports_are_written_under_the_managed_media_root() {
+        let source_root = PathBuf::from(r"D:\KuGou");
+        let output_root = PathBuf::from(r"D:\KINGCLUB-Media\audio");
+        let source = source_root.join("KugouMusic").join("歌手 - 歌名.kgma");
+        assert_eq!(
+            imported_directory_for(&source_root, &output_root, &source).unwrap(),
+            output_root.join(".king-imported").join("KugouMusic")
         );
     }
 

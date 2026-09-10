@@ -32,6 +32,30 @@ $devArchivePath = Join-Path $cacheDirectory $devArchiveName
 $extractDirectory = Join-Path $cacheDirectory "extract"
 $devExtractDirectory = Join-Path $cacheDirectory "dev-extract"
 
+function Expand-SevenZipArchive([string]$ArchivePath, [string]$DestinationPath) {
+  $sevenZip = Get-Command "7z.exe" -ErrorAction SilentlyContinue
+  $sevenZipPath = if ($sevenZip) { $sevenZip.Source } else { $null }
+  if (-not $sevenZip) {
+    $defaultSevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+    if (Test-Path -LiteralPath $defaultSevenZip -PathType Leaf) {
+      $sevenZipPath = $defaultSevenZip
+    }
+  }
+
+  if ($sevenZipPath) {
+    & $sevenZipPath x $ArchivePath "-o$DestinationPath" -y | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "7-Zip failed to extract $ArchivePath (exit code $LASTEXITCODE)."
+    }
+    return
+  }
+
+  tar -xf $ArchivePath -C $DestinationPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Unable to extract $ArchivePath. Install 7-Zip and retry."
+  }
+}
+
 New-Item -ItemType Directory -Path $cacheDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $extractDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $devExtractDirectory -Force | Out-Null
@@ -53,8 +77,8 @@ if ($devActualHash -ne $devExpectedHash) {
   throw "libmpv archive checksum mismatch. Expected $devExpectedHash, received $devActualHash."
 }
 
-tar -xf $archivePath -C $extractDirectory
-tar -xf $devArchivePath -C $devExtractDirectory
+Expand-SevenZipArchive -ArchivePath $archivePath -DestinationPath $extractDirectory
+Expand-SevenZipArchive -ArchivePath $devArchivePath -DestinationPath $devExtractDirectory
 $sourceExecutable = Join-Path $extractDirectory "mpv.exe"
 if (-not (Test-Path -LiteralPath $sourceExecutable)) {
   throw "mpv.exe was not found after extracting $archiveName."
