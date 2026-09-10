@@ -52,7 +52,8 @@
         "enable": true,
         "scope": [
           "$APPDATA/**",
-          "D:/**"
+          "D:/**",
+          "E:/**"
         ]
       }
     }
